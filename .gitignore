@@ -1,8 +1,12 @@
 # Build output
 /swartznet
 /swartznet.exe
-/dist/
 /build/
+
+# `dist/` is the cross-compile output directory used by
+# scripts/build-release.sh — full of multi-MB binaries that we
+# upload to GitHub Releases instead of checking in.
+/dist/
 
 # Go
 *.test

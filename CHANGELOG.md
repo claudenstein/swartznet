@@ -9,10 +9,33 @@ format follows [Keep a Changelog][kac]; the project follows
 
 ## Unreleased
 
+- **scripts/build-release.sh**: one-command cross-compile for
+  linux/amd64+arm64, darwin/amd64+arm64, windows/amd64. Pure-Go,
+  CGO-disabled, fully static binaries with stripped symbols and
+  trimpath. Generates a SHA256SUMS file alongside.
+- **cmd/dht-smoke**: one-shot live mainline DHT smoke test for
+  the BEP-44 publisher path. Joins the real DHT, runs an
+  AnacrolixPutter Put + AnacrolixGetter Get round trip with an
+  ephemeral keypair so the user's real publisher identity is
+  never touched. Run with `go run ./cmd/dht-smoke`.
+- **Validation**: the dht-smoke target was run against the live
+  mainline DHT on 2026-04-10. 25 good DHT nodes after bootstrap,
+  Put completed in ~10s, Get round-tripped the signed payload
+  back in ~7s. The "BEP-44 publish path not yet validated
+  against the live mainline DHT" caveat from the v0.1.0 release
+  notes is now retired.
+
 Targeting **v1.0.0** — first numbered release. The roadmap
-through M7 is feature-complete on `main`. v1 will land once
-operational testing in real swarms catches any remaining
-issues.
+through M7 is feature-complete on `main` and the live DHT
+publish path is validated. v1 will land once any remaining
+operational issues from longer-running deployments are fixed.
+
+## v0.1.0 — 2026-04-10
+
+First numbered preview release. M1-M7 feature-complete in 26
+commits. Five cross-platform release binaries (Linux x64+arm64,
+macOS x64+arm64, Windows x64) attached to the GitHub Release at
+<https://github.com/claudenstein/swartznet/releases/tag/v0.1.0>.
 
 ## M7 — Documentation polish
 
