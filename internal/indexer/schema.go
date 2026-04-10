@@ -8,10 +8,18 @@ import (
 )
 
 // Document type constants. We use the special Bleve "_type" field so the
-// same index can hold different kinds of documents (M2.2 will add a
-// "content" type for extracted file text).
+// same index can hold different kinds of documents:
+//
+//   - "torrent" — one per torrent, holds name, file list, trackers. M2.0.
+//   - "content" — one per extracted-text chunk of a file inside a torrent.
+//                 M2.2a. Linked back to its torrent via the infohash field.
+//
+// Keeping both in one index means `swartznet search foo` naturally returns
+// both torrent-level matches and content-level matches in a single result
+// set, which is exactly the UX the integration design calls for.
 const (
 	typeTorrent = "torrent"
+	typeContent = "content"
 )
 
 // Field names. Kept as constants so tests and callers don't drift from
@@ -25,7 +33,22 @@ const (
 	fieldSizeBytes = "size_bytes"
 	fieldAddedAt   = "added_at"
 	fieldFileCount = "file_count"
+
+	// Content document fields.
+	fieldFileIndex = "file_index" // position in the torrent's file list
+	fieldFilePath  = "file_path"  // single file path (keyword)
+	fieldFileSize  = "file_size"  // bytes
+	fieldMime      = "mime"       // MIME type string (keyword)
+	fieldText      = "text"       // the extracted text body (standard analyzer)
+	fieldExtractor = "extractor"  // name of the extractor that produced this doc
+	fieldIndexedAt = "indexed_at"
 )
+
+// SchemaVersion is bumped whenever the Bleve mapping changes in a way that
+// is not backwards compatible with indexes created under an earlier version.
+// The Index.Open path writes this as a sentinel document on first creation
+// and checks it on reopen; a mismatch triggers a clean rebuild.
+const SchemaVersion = 2
 
 // buildMapping constructs the Bleve index mapping for SwartzNet. M2.0
 // ships a single document type ("torrent"); M2.2 will add a "content"
@@ -68,7 +91,18 @@ func buildMapping() *mapping.IndexMappingImpl {
 	torrent.AddFieldMappingsAt(fieldAddedAt, dt)
 	torrent.AddFieldMappingsAt(fieldFileCount, num)
 
+	content := bleve.NewDocumentMapping()
+	content.AddFieldMappingsAt(fieldInfoHash, kw)
+	content.AddFieldMappingsAt(fieldFileIndex, num)
+	content.AddFieldMappingsAt(fieldFilePath, kw)
+	content.AddFieldMappingsAt(fieldFileSize, num)
+	content.AddFieldMappingsAt(fieldMime, kw)
+	content.AddFieldMappingsAt(fieldText, ft) // the main searchable body
+	content.AddFieldMappingsAt(fieldExtractor, kw)
+	content.AddFieldMappingsAt(fieldIndexedAt, dt)
+
 	idx.AddDocumentMapping(typeTorrent, torrent)
+	idx.AddDocumentMapping(typeContent, content)
 	idx.TypeField = fieldType
 	idx.DefaultType = typeTorrent
 

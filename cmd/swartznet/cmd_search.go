@@ -74,15 +74,23 @@ func emitText(w io.Writer, res *indexer.SearchResponse, query string) int {
 		return exitOK
 	}
 	for i, h := range res.Hits {
-		fmt.Fprintf(w, "%3d. [%s] score=%.3f  files=%d  size=%s\n",
-			i+1, h.InfoHash, h.Score, h.FileCount, humanBytes(h.SizeBytes))
-		fmt.Fprintf(w, "     %s\n", h.Name)
-		if len(h.Trackers) > 0 {
-			preview := h.Trackers[0]
-			if len(h.Trackers) > 1 {
-				preview = fmt.Sprintf("%s (+%d more)", preview, len(h.Trackers)-1)
+		switch h.DocType {
+		case "content":
+			fmt.Fprintf(w, "%3d. [content] score=%.3f  mime=%s  extractor=%s\n",
+				i+1, h.Score, h.Mime, h.Extractor)
+			fmt.Fprintf(w, "     %s  (%s)\n", h.FilePath, humanBytes(h.FileSize))
+			fmt.Fprintf(w, "     in torrent: %s\n", h.InfoHash)
+		default: // "torrent" or anything unexpected
+			fmt.Fprintf(w, "%3d. [torrent] [%s] score=%.3f  files=%d  size=%s\n",
+				i+1, h.InfoHash, h.Score, h.FileCount, humanBytes(h.SizeBytes))
+			fmt.Fprintf(w, "     %s\n", h.Name)
+			if len(h.Trackers) > 0 {
+				preview := h.Trackers[0]
+				if len(h.Trackers) > 1 {
+					preview = fmt.Sprintf("%s (+%d more)", preview, len(h.Trackers)-1)
+				}
+				fmt.Fprintf(w, "     tracker: %s\n", preview)
 			}
-			fmt.Fprintf(w, "     tracker: %s\n", preview)
 		}
 		fmt.Fprintln(w)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -20,12 +21,14 @@ import (
 //
 // An Engine optionally holds a reference to an *indexer.Index (set via
 // SetIndex). When present, new torrents are indexed automatically once their
-// metadata arrives — no explicit IndexTorrent call from the CLI is needed.
+// metadata arrives, and a content-ingestion Pipeline runs per-Handle to
+// feed completed files through the text-extractor → content-index path.
 type Engine struct {
-	cfg    config.Config
-	client *torrent.Client
-	log    *slog.Logger
-	idx    *indexer.Index // nil-safe; may be unset for headless tests
+	cfg      config.Config
+	client   *torrent.Client
+	log      *slog.Logger
+	idx      *indexer.Index    // nil-safe; may be unset for headless tests
+	pipeline *indexer.Pipeline // nil iff idx == nil
 
 	mu       sync.Mutex
 	closed   bool
@@ -33,13 +36,27 @@ type Engine struct {
 	closeErr error
 }
 
-// SetIndex attaches an *indexer.Index to the engine. Any torrents that
+// SetIndex attaches an *indexer.Index to the engine and starts a
+// content-ingestion Pipeline backed by that index. Any torrents that
 // arrive after this call will be auto-indexed once their metadata is
-// available. Safe to call at most once per Engine; calling it twice replaces
-// the attached index without tearing down the old one.
+// available, and their files will be extracted + content-indexed as they
+// complete on disk.
+//
+// Safe to call at most once per Engine. Calling it twice replaces the
+// attached index and pipeline; the old pipeline is stopped cleanly first.
 func (e *Engine) SetIndex(idx *indexer.Index) {
 	e.mu.Lock()
+	// Stop any pre-existing pipeline before swapping in a new one.
+	if e.pipeline != nil {
+		e.pipeline.Stop()
+	}
 	e.idx = idx
+	if idx != nil {
+		e.pipeline = indexer.NewPipeline(idx, e.log, 0)
+		e.pipeline.Start()
+	} else {
+		e.pipeline = nil
+	}
 	e.mu.Unlock()
 }
 
@@ -199,7 +216,47 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 	}
 	e.handles[ih] = h
 	go e.autoIndex(h)
+	go e.ingestFileEvents(h)
 	return h
+}
+
+// ingestFileEvents drains a Handle's FileEvents() channel and submits each
+// completed file to the content-ingestion pipeline. Runs in a background
+// goroutine so the tracker is never blocked waiting for extraction.
+//
+// Each FileInput closes over the Handle + FileIndex so the pipeline can
+// lazily open a reader via t.Files()[i].NewReader() only when the
+// extractor actually wants to read the bytes.
+func (e *Engine) ingestFileEvents(h *Handle) {
+	for ev := range h.FileEvents() {
+		e.mu.Lock()
+		p := e.pipeline
+		closed := e.closed
+		e.mu.Unlock()
+		if p == nil || closed {
+			continue
+		}
+		// Capture the file index by value for the closure.
+		idx := ev.FileIndex
+		in := indexer.FileInput{
+			InfoHash:  ev.InfoHash,
+			FileIndex: idx,
+			Path:      ev.Path,
+			Size:      ev.Size,
+			OpenReader: func() (io.Reader, error) {
+				files := h.T.Files()
+				if idx < 0 || idx >= len(files) {
+					return nil, errors.New("engine: file index out of range")
+				}
+				// anacrolix/torrent's Reader reads completed pieces from
+				// the storage backend and blocks on incomplete ones. The
+				// tracker guarantees the file is fully complete before we
+				// get here, so reads should return eagerly.
+				return files[idx].NewReader(), nil
+			},
+		}
+		p.Submit(in)
+	}
 }
 
 // autoIndex waits for a torrent's metadata to arrive and then indexes the
@@ -281,6 +338,11 @@ func (e *Engine) Close() error {
 		return e.closeErr
 	}
 	e.closed = true
+	if e.pipeline != nil {
+		// Stop the pipeline first so in-flight extracts finish before the
+		// underlying torrent.Client's storage shuts down underneath them.
+		e.pipeline.Stop()
+	}
 	for _, h := range e.handles {
 		h.pieceSub.Close()
 		h.fileSub.Close()
