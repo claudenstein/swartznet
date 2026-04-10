@@ -164,4 +164,7 @@ var extTypes = map[string]string{
 	".yml":      "text/x-yaml",
 	".toml":     "text/x-toml",
 	".markdown": "text/markdown",
+	".epub":     "application/epub+zip",
+	".docx":     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".odt":      "application/vnd.oasis.opendocument.text",
 }
