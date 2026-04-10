@@ -72,6 +72,15 @@ type Config struct {
 	// lookup. Indexers below this score are skipped. 0 disables
 	// the cutoff. Default: 0.
 	MinIndexerScore float64
+
+	// CompanionDir is the on-disk directory where the F3 companion
+	// publisher (M11c) stores the gzipped JSON content index and
+	// the wrapping .torrent file. Default:
+	// ~/.local/share/swartznet/companion. Empty disables the
+	// companion publisher entirely (the node still works for local
+	// search and Layer-D queries; it just does not advertise its
+	// content via a companion-index torrent).
+	CompanionDir string
 }
 
 // Default returns a Config populated with sensible defaults for a normal
@@ -91,6 +100,7 @@ func Default() Config {
 		ReputationPath:    defaultReputationPath(),
 		BloomPath:         defaultBloomPath(),
 		MinIndexerScore:   0,
+		CompanionDir:      defaultCompanionDir(),
 	}
 }
 
@@ -153,6 +163,12 @@ func defaultReputationPath() string {
 // for the known-good infohash Bloom filter.
 func defaultBloomPath() string {
 	return filepath.Join(swartznetShareRoot(), "known-good.bloom")
+}
+
+// defaultCompanionDir returns the platform-appropriate default
+// directory for the F3 companion publisher's on-disk artefacts.
+func defaultCompanionDir() string {
+	return filepath.Join(swartznetShareRoot(), "companion")
 }
 
 // swartznetShareRoot returns the per-user root directory SwartzNet uses for

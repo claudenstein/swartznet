@@ -16,6 +16,67 @@ reputation prior weight and at least one second client
 implementing `sn_search` (the BEP-1 requirement to take a
 draft to Final).
 
+### M9 — Per-hit source tracking + targeted flag
+
+- New `internal/reputation.SourceTracker`: an LRU-bounded map of
+  infohash → set of indexer pubkeys that returned that infohash
+  in a Layer-D query. Always non-nil after `engine.New`; no
+  on-disk persistence (it repopulates naturally as the user
+  searches).
+- `dhtindex.Lookup` now records source attributions after
+  merging hits, and `httpapi.handleFlag` uses the tracker to
+  demote only the indexers that actually returned the flagged
+  infohash, falling back to "demote everyone we saw recently"
+  if the tracker has no record.
+
+### M10 — GUI download controls
+
+- **M10a**: New `engine.TorrentSnapshot` plus
+  `Engine.TorrentSnapshots`, `PauseTorrent`, `ResumeTorrent`,
+  `RemoveTorrent`, `IsPaused`. The pause state is mirrored on
+  the `Handle` because anacrolix's internal flag is private.
+  `snapshotOf` carries a nil-Info guard so torrents that haven't
+  fetched metadata yet do not crash the API.
+- **M10b**: Four new HTTP endpoints — `GET /torrents`,
+  `POST /torrents/{infohash}/pause`, `POST /torrents/{infohash}/resume`,
+  `DELETE /torrents/{infohash}`. Bridged through a new
+  `httpapi.TorrentController` interface and a small adapter in
+  `cmd/swartznet/torrent_controller.go`.
+- **M10c**: New "Downloads" tab in the web UI with per-torrent
+  progress bars, status pills, and pause/resume/remove buttons.
+  Polls `/torrents` every 2 s while the tab is active.
+
+### M11 — F3 companion content-index torrents (in progress)
+
+- **M11a**: New `internal/companion` package with the on-disk
+  schema for SwartzNet's distributed content index. Top-level
+  `CompanionIndex` carrying `TorrentRecord`/`FileRecord`/
+  `ContentChunk` types, gzip+JSON `Encode`/`Decode` with a
+  format-magic guard and a 1 GiB safety cap. Format constants:
+  `FormatVersion=1`, `FormatFileName="swartznet-content-index-v1.json.gz"`.
+- **M11b**: `companion.BuildFromIndex` walks the local Bleve
+  index (via two new `indexer.AllTorrentDocs` /
+  `indexer.ContentDocsForInfoHash` paginated MatchAll queries)
+  and produces a CompanionIndex. `companion.WriteCompanionFiles`
+  serialises it and wraps the bytes in a v1 .torrent metainfo
+  with a 256 KiB piece length, written atomically to the
+  publisher's companion directory.
+- **M11c**: New `companion.Publisher` worker — every hour
+  (configurable) it builds the index, seeds the wrapping torrent
+  through the engine, and publishes a BEP-46-style mutable
+  pointer at salt `_sn_content_index` whose value is the new
+  infohash. Manual `RefreshNow` is throttled by `MinInterval`.
+  `dhtindex.AnacrolixPutter.PutInfohashPointer` and
+  `AnacrolixGetter.GetInfohashPointer` are the new BEP-44
+  primitives. `engine.AddTorrentMetaInfo` lets the publisher
+  hand the in-memory metainfo back to the engine for seeding,
+  and `engine.PointerPutter` exposes the shared
+  `*dhtindex.AnacrolixPutter`. `cmd_add.go` constructs and
+  starts the companion publisher after `SetIndex` whenever the
+  daemon has both an index and an identity. New
+  `config.CompanionDir` (default `~/.local/share/swartznet/companion`)
+  controls the on-disk artefacts directory.
+
 ## v0.2.0 — 2026-04-10
 
 Second preview release. Adds a complete browser-based GUI on

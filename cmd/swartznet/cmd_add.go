@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
@@ -80,6 +81,26 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		}
 		defer idx.Close()
 		eng.SetIndex(idx)
+	}
+
+	// Start the F3 companion-index publisher (M11c) once we have
+	// an index AND a DHT putter. Without either, the publisher
+	// has nothing to publish or no way to advertise it; the rest
+	// of the daemon still works.
+	var compPub *companion.Publisher
+	if idx != nil && eng.PointerPutter() != nil && eng.Identity() != nil && cfg.CompanionDir != "" {
+		opts := companion.DefaultPublisherOptions()
+		opts.Dir = cfg.CompanionDir
+		opts.PublisherKey = eng.Identity().PublicKeyBytes()
+		var err error
+		compPub, err = companion.NewPublisher(idx, eng.PointerPutter(), eng, opts, log)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: companion publisher start failed: %v\n", err)
+		} else {
+			compPub.Start()
+			defer compPub.Stop()
+			fmt.Fprintf(stdout, "Companion publisher started, dir=%s\n", cfg.CompanionDir)
+		}
 	}
 
 	// Start the local HTTP API so `swartznet search --swarm` in

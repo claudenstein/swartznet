@@ -43,13 +43,14 @@ type Engine struct {
 	swarm    *swarmsearch.Protocol // always non-nil after New
 	peers    *peerTracker          // addr → *torrent.PeerConn, for swarmSender
 
-	identity  *identity.Identity        // ed25519 publisher keypair, nil for tests
-	publisher *dhtindex.Publisher       // nil if no DHT or no identity
-	manifest  *dhtindex.Manifest        // owned by publisher; nil iff publisher nil
-	lookup    *dhtindex.Lookup          // M4e DHT keyword lookup; nil iff no DHT
-	bloom     *reputation.BloomFilter   // M5 known-good infohash filter; nil if disabled
-	tracker   *reputation.Tracker       // M5 per-pubkey reputation tracker; nil if disabled
-	sources   *reputation.SourceTracker // M9 per-hit source tracker; always non-nil after New
+	identity      *identity.Identity        // ed25519 publisher keypair, nil for tests
+	publisher     *dhtindex.Publisher       // nil if no DHT or no identity
+	manifest      *dhtindex.Manifest        // owned by publisher; nil iff publisher nil
+	pointerPutter *dhtindex.AnacrolixPutter // shared by Publisher AND companion.Publisher; nil iff publisher nil
+	lookup        *dhtindex.Lookup          // M4e DHT keyword lookup; nil iff no DHT
+	bloom         *reputation.BloomFilter   // M5 known-good infohash filter; nil if disabled
+	tracker       *reputation.Tracker       // M5 per-pubkey reputation tracker; nil if disabled
+	sources       *reputation.SourceTracker // M9 per-hit source tracker; always non-nil after New
 
 	mu       sync.Mutex
 	closed   bool
@@ -61,6 +62,15 @@ type Engine struct {
 // the engine was constructed without one (no DHT, no identity, or a
 // headless test setup).
 func (e *Engine) Publisher() *dhtindex.Publisher { return e.publisher }
+
+// PointerPutter returns the engine's BEP-46-style mutable-item
+// putter, or nil if the engine has no DHT/identity. Returned as
+// the concrete *AnacrolixPutter; the companion package only
+// needs the PutInfohashPointer method, which the type already
+// satisfies via its narrow PointerPutter interface. Used by the
+// M11c companion publisher to publish a content-index pointer
+// under the salt SaltContentIndex.
+func (e *Engine) PointerPutter() *dhtindex.AnacrolixPutter { return e.pointerPutter }
 
 // Identity returns the engine's persistent ed25519 keypair, or nil
 // if no identity was loaded.
@@ -392,6 +402,9 @@ func (e *Engine) startPublisher() error {
 	if err != nil {
 		return fmt.Errorf("engine: new anacrolix putter: %w", err)
 	}
+	// Stash the putter so the M11c companion publisher can reuse
+	// it for BEP-46 pointer puts. Same key, same DHT server.
+	e.pointerPutter = put
 	mf, err := dhtindex.LoadOrCreateManifest(e.cfg.PublisherManifest)
 	if err != nil {
 		return fmt.Errorf("engine: load publisher manifest: %w", err)
@@ -496,6 +509,35 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 	t, err := e.client.AddTorrent(mi)
 	if err != nil {
 		return nil, fmt.Errorf("engine: add torrent: %w", err)
+	}
+	return e.registerLocked(t), nil
+}
+
+// AddTorrentMetaInfo adds an in-memory metainfo to the engine and
+// starts seeding/downloading it. Used by the F3 companion publisher
+// (internal/companion) to seed the gzipped JSON content index it
+// just built without doing a second disk read. Returns the same
+// *Handle that AddTorrentFile would.
+//
+// Re-adding a metainfo with an infohash that is already known is a
+// no-op at the anacrolix layer; this method returns the existing
+// Handle in that case.
+//
+// Returning `any` instead of `*Handle` is a deliberate concession to
+// the companion package, which only needs to know "this seeded ok"
+// and would otherwise pull a hard import on internal/engine.
+func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
+	if mi == nil {
+		return nil, errors.New("engine: nil metainfo")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return nil, errors.New("engine: closed")
+	}
+	t, err := e.client.AddTorrent(mi)
+	if err != nil {
+		return nil, fmt.Errorf("engine: add torrent metainfo: %w", err)
 	}
 	return e.registerLocked(t), nil
 }

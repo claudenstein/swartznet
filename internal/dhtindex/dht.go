@@ -68,6 +68,89 @@ func NewAnacrolixPutter(server *dht.Server, priv ed25519.PrivateKey) (*Anacrolix
 // can be found" to other nodes.
 func (a *AnacrolixPutter) PublicKey() [32]byte { return a.public }
 
+// PutInfohashPointer publishes a BEP-46-style mutable item whose
+// value is `{"ih": <20-byte infohash>}` under the given salt.
+// This is the M11c publisher primitive used to advertise a
+// companion content-index torrent at a deterministic
+// (publisher_pubkey, salt) target. Subscribers fetch the
+// pointer, read the infohash, and download the underlying
+// torrent through normal BitTorrent.
+//
+// The salt is typically the well-known constant
+// "_sn_content_index" (from the companion package) but the
+// caller passes whatever bytes they like — anything ≤ 64 bytes
+// is legal per BEP-44.
+func (a *AnacrolixPutter) PutInfohashPointer(ctx context.Context, salt []byte, infohash [20]byte) error {
+	if len(salt) == 0 {
+		return errors.New("dhtindex: empty salt")
+	}
+	if len(salt) > 64 {
+		return fmt.Errorf("dhtindex: salt %d bytes exceeds BEP-44 cap of 64", len(salt))
+	}
+	// Encode the value the same way subscribers will expect.
+	// Using a typed struct with a single "ih" field gives us
+	// stable bencode output regardless of map iteration order.
+	v := bep46Pointer{IH: infohash[:]}
+	encoded, err := bencode.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("dhtindex: marshal pointer: %w", err)
+	}
+	var decoded interface{}
+	if err := bencode.Unmarshal(encoded, &decoded); err != nil {
+		return fmt.Errorf("dhtindex: re-decode pointer: %w", err)
+	}
+
+	target := bep44.MakeMutableTarget(a.public, salt)
+	pubArr := a.public
+	seqToPut := func(seq int64) bep44.Put {
+		put := bep44.Put{
+			V:    decoded,
+			K:    &pubArr,
+			Salt: salt,
+			Seq:  seq + 1,
+		}
+		put.Sign(a.private)
+		return put
+	}
+	if _, err := getput.Put(ctx, target, a.server, salt, seqToPut); err != nil {
+		return fmt.Errorf("dhtindex: put pointer: %w", err)
+	}
+	return nil
+}
+
+// bep46Pointer is the typed shape of a BEP-46 mutable item value.
+// We use a struct so the bencoded output is deterministic and
+// matches whatever the M11d subscriber side will decode.
+type bep46Pointer struct {
+	IH []byte `bencode:"ih"`
+}
+
+// GetInfohashPointer is the matching read-side helper. Returns
+// the 20-byte infohash from a BEP-46 mutable item under
+// (pubkey, salt). Used by the M11d subscriber to discover
+// companion content indexes published by other nodes.
+func (a *AnacrolixGetter) GetInfohashPointer(ctx context.Context, pubkey [32]byte, salt []byte) ([20]byte, error) {
+	var zero [20]byte
+	if len(salt) == 0 {
+		return zero, errors.New("dhtindex: empty salt")
+	}
+	target := bep44.MakeMutableTarget(pubkey, salt)
+	res, _, err := getput.Get(ctx, target, a.server, nil, salt)
+	if err != nil {
+		return zero, fmt.Errorf("dhtindex: get pointer %x: %w", target, err)
+	}
+	var v bep46Pointer
+	if err := bencode.Unmarshal([]byte(res.V), &v); err != nil {
+		return zero, fmt.Errorf("dhtindex: decode pointer: %w", err)
+	}
+	if len(v.IH) != 20 {
+		return zero, fmt.Errorf("dhtindex: pointer ih has %d bytes, want 20", len(v.IH))
+	}
+	var out [20]byte
+	copy(out[:], v.IH)
+	return out, nil
+}
+
 // Put implements Putter. It encodes the value, computes the BEP-44
 // target from (publisher_pubkey, salt), and uses anacrolix's getput.Put
 // to publish to the closest k DHT nodes. The provided ctx bounds the
