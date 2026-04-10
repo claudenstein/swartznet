@@ -11,9 +11,11 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	pp "github.com/anacrolix/torrent/peer_protocol"
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
 // Engine owns an anacrolix/torrent Client and wires SwartzNet's extension
@@ -23,17 +25,30 @@ import (
 // SetIndex). When present, new torrents are indexed automatically once their
 // metadata arrives, and a content-ingestion Pipeline runs per-Handle to
 // feed completed files through the text-extractor → content-index path.
+//
+// Every Engine also owns a *swarmsearch.Protocol which advertises the
+// sn_search BEP-10 extension to every peer we connect to and tracks which
+// remote peers speak it back. External packages reach the protocol via
+// Engine.SwarmSearch().
 type Engine struct {
 	cfg      config.Config
 	client   *torrent.Client
 	log      *slog.Logger
-	idx      *indexer.Index    // nil-safe; may be unset for headless tests
-	pipeline *indexer.Pipeline // nil iff idx == nil
+	idx      *indexer.Index        // nil-safe; may be unset for headless tests
+	pipeline *indexer.Pipeline     // nil iff idx == nil
+	swarm    *swarmsearch.Protocol // always non-nil after New
 
 	mu       sync.Mutex
 	closed   bool
 	handles  map[metainfo.Hash]*Handle
 	closeErr error
+}
+
+// SwarmSearch returns the engine's sn_search protocol handle. Callers
+// (the CLI, future REST layer) use this to issue outbound swarm
+// queries, inspect known peers, and override capabilities.
+func (e *Engine) SwarmSearch() *swarmsearch.Protocol {
+	return e.swarm
 }
 
 // SetIndex attaches an *indexer.Index to the engine and starts a
@@ -119,9 +134,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		tc.HTTPUserAgent = cfg.HTTPUserAgent
 	}
 
+	// Construct the swarm-search protocol before wiring callbacks — it
+	// owns the per-peer state the callbacks will populate.
+	swarm := swarmsearch.New(log)
+
 	// Wire the extension-point callbacks. These are the exact hook points
-	// the integration design depends on. Right now they just log; M2 and
-	// M3 will attach the indexer and the sn_search handler here.
+	// the integration design depends on.
 	tc.Callbacks.StatusUpdated = append(tc.Callbacks.StatusUpdated,
 		func(ev torrent.StatusUpdatedEvent) {
 			log.Debug("torrent.status",
@@ -134,14 +152,27 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	)
 	tc.Callbacks.PeerConnAdded = append(tc.Callbacks.PeerConnAdded,
 		func(pc *torrent.PeerConn) {
-			// M3 TODO: register "sn_search" in pc.LocalLtepProtocolMap via
-			// AddUserProtocol. The anacrolix/torrent callback contract says
-			// this is the correct place to do it: the extended handshake
-			// has not yet occurred, so we can still influence which
-			// extension names we advertise to this peer.
-			log.Debug("peer.added", "peer", pc.RemoteAddr.String())
+			// Per anacrolix's callback contract: "This is a good time to
+			// alter the supported extension protocols." We add sn_search
+			// to pc.LocalLtepProtocolMap so our outbound LTEP handshake
+			// advertises it to this peer, then record the peer in our
+			// own state map.
+			swarm.AdvertiseOn(pc.LocalLtepProtocolMap)
+			swarm.NotePeerAdded(pc.RemoteAddr.String())
 		},
 	)
+	// ReadExtendedHandshake fires after the remote peer sends its LTEP
+	// handshake. The protocol uses it to see whether the peer also
+	// advertises sn_search and, if so, to record the extension id they
+	// chose for it (which we need to send them messages later).
+	tc.Callbacks.ReadExtendedHandshake = func(pc *torrent.PeerConn, hs *pp.ExtendedHandshakeMessage) {
+		swarm.OnRemoteHandshake(pc.RemoteAddr.String(), hs)
+	}
+	// PeerConnClosed lets us drop stale peer state from the
+	// sn_search tracker so long-running processes do not leak memory.
+	tc.Callbacks.PeerConnClosed = func(pc *torrent.PeerConn) {
+		swarm.OnPeerClosed(pc.RemoteAddr.String())
+	}
 
 	cl, err := torrent.NewClient(tc)
 	if err != nil {
@@ -159,6 +190,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		cfg:     cfg,
 		client:  cl,
 		log:     log,
+		swarm:   swarm,
 		handles: make(map[metainfo.Hash]*Handle),
 	}, nil
 }

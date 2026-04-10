@@ -20,7 +20,8 @@ research and design documents that motivate the architecture.
 | **M2.2b — Subtitle-aware extractor** | ✅ Complete | SRT/VTT parser strips timestamps, cue numbers, HTML/ASS markup, and WebVTT headers/NOTE blocks; only dialog text is indexed. Dialog is often the single most valuable text inside a movie/TV torrent. |
 | **M2.2c — Chunker for large files** | ✅ Complete | Plaintext extractions larger than ~12 KiB are split into ~10 KiB chunks at paragraph boundaries (falling back to line boundaries, then arbitrary positions for minified inputs). Each chunk carries its source-byte offset for future snippet-highlight UI. |
 | **M2.3 — PDF extractor** | ✅ Complete | Pure-Go PDF text extraction via `ledongthuc/pdf` (MIT-licensed fork of rsc/pdf). Buffered decode with a 256 MiB ceiling; panic-recovery around the parser; empty-text PDFs (scanned image-only) produce no ContentDocs rather than empty noise. |
-| M3a — sn_search LTEP registration + capability discovery | 🚧 Next | Register the `sn_search` BEP-10 extension name and detect search-capable peers. |
+| **M3a — sn_search LTEP registration + capability discovery** | ✅ Complete | New `internal/swarmsearch` package owns a `Protocol` that registers `sn_search` in every outbound LTEP handshake and observes remote handshakes to detect which peers speak the extension. Per-peer state tracked with their chosen extension id. No message handling yet. |
+| M3b — sn_search wire format + inbound query handler | 🚧 Next | Bencoded query/result/reject messages; inbound queries answered from the local Bleve index. |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
