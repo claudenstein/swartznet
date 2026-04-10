@@ -109,6 +109,11 @@ func sanitizeUTF8(b []byte) string {
 // Register the plaintext extractor in the dispatch table. This init
 // fires at package load time, so callers of extractors.Dispatch() just
 // work without any explicit setup.
+//
+// Subtitle formats (.srt/.vtt) are deliberately excluded here so that
+// the more specific SubtitleExtractor can claim them — that one strips
+// timestamps and only indexes the dialog text, which is far more useful
+// than the raw file with timecodes mixed in.
 func init() {
 	Register(NewPlaintextExtractor(), func(mime string, c Candidate) bool {
 		// Claim anything that looks like text and is not obviously too
@@ -118,15 +123,16 @@ func init() {
 			return false
 		}
 		switch mime {
+		case "application/x-subrip", "text/vtt", "text/x-ssa":
+			// Subtitle formats are handled by SubtitleExtractor.
+			return false
 		case "text/plain",
 			"text/markdown",
 			"text/html",
 			"text/xml",
 			"text/csv",
-			"text/vtt",
 			"text/javascript",
 			"application/json",
-			"application/x-subrip",
 			"application/xml":
 			return true
 		}

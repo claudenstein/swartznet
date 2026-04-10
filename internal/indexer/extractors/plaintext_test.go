@@ -85,16 +85,18 @@ func TestPlaintextSanitizesInvalidUTF8(t *testing.T) {
 
 func TestDispatchPicksPlaintext(t *testing.T) {
 	t.Parallel()
+	// Subtitle formats (.srt, .vtt) are intentionally absent here — they
+	// are claimed by SubtitleExtractor instead; see subtitle_test.go.
 	cases := []struct {
 		path string
 		size int64
 		want string
 	}{
 		{"README.md", 1024, "plaintext"},
-		{"movie.en.srt", 32 * 1024, "plaintext"},
 		{"src/main.go", 4096, "plaintext"},
-		{"subtitles.vtt", 8192, "plaintext"},
 		{"dialog.txt", 100, "plaintext"},
+		{"config.json", 512, "plaintext"},
+		{"page.html", 2048, "plaintext"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
