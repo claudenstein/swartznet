@@ -9,6 +9,20 @@ format follows [Keep a Changelog][kac]; the project follows
 
 ## Unreleased
 
+Targeting **v1.0.0** — first GA release. v0.2.0 adds the local
+web UI and validates the BEP-44 publish path against the live
+mainline DHT. v1.0.0 still wants real-world data for the
+reputation prior weight and at least one second client
+implementing `sn_search` (the BEP-1 requirement to take a
+draft to Final).
+
+## v0.2.0 — 2026-04-10
+
+Second preview release. Adds a complete browser-based GUI on
+top of the existing CLI + JSON API, validates the Layer-D
+publish path against the live mainline DHT, and ships
+release tooling so future cuts are one command.
+
 ### M8 — Local web UI
 
 - **M8a+b**: HTML/CSS/JS embedded into the binary via go:embed
@@ -17,7 +31,7 @@ format follows [Keep a Changelog][kac]; the project follows
   Sharing) using the same JSON endpoints the CLI uses. No build
   step, no JavaScript bundler, no external dependencies. Lives
   at `internal/httpapi/web/{embed.go, index.html,
-  static/style.css, static/app.js}`. /healthz now reports the
+  static/style.css, static/app.js}`. `/healthz` now reports the
   build version so the UI badge can show the running version.
 - **M8c**: Three new HTTP endpoints to round out the UI's
   functionality:
@@ -29,30 +43,33 @@ format follows [Keep a Changelog][kac]; the project follows
     `share_local` / `file_hits` / `content_hits` / `publisher`
     flags from `swarmsearch.Protocol`.
   - `POST /capabilities` updates them with input clamping.
-- All nine packages still green under `go test -race ./...`.
 
-### Release tooling
+The web UI is **localhost-only by design** because it controls
+the daemon and is fundamentally separate from the per-peer
+search-result interfaces (sn_search peer wire, BEP-44 DHT)
+which the user controls via capability flags and the
+`--no-dht` flag at startup.
 
-- **scripts/build-release.sh**: one-command cross-compile for
+### Release tooling and validation
+
+- **`scripts/build-release.sh`**: one-command cross-compile for
   linux/amd64+arm64, darwin/amd64+arm64, windows/amd64. Pure-Go,
   CGO-disabled, fully static binaries with stripped symbols and
   trimpath. Generates a SHA256SUMS file alongside.
-- **cmd/dht-smoke**: one-shot live mainline DHT smoke test for
+- **`cmd/dht-smoke`**: one-shot live mainline DHT smoke test for
   the BEP-44 publisher path. Joins the real DHT, runs an
   AnacrolixPutter Put + AnacrolixGetter Get round trip with an
   ephemeral keypair so the user's real publisher identity is
   never touched. Run with `go run ./cmd/dht-smoke`.
-- **Validation**: the dht-smoke target was run against the live
+- **Validation**: the `dht-smoke` target was run against the live
   mainline DHT on 2026-04-10. 25 good DHT nodes after bootstrap,
-  Put completed in ~10s, Get round-tripped the signed payload
-  back in ~7s. The "BEP-44 publish path not yet validated
-  against the live mainline DHT" caveat from the v0.1.0 release
-  notes is now retired.
+  Put accepted by 7 of 8 closest nodes in ~10s (1 timeout, normal
+  network reality), Get round-tripped the signed payload back in
+  ~7s with the synthetic Hit data unchanged. **The "BEP-44
+  publish path not yet validated against the live mainline
+  DHT" caveat from v0.1.0 is now retired.**
 
-Targeting **v1.0.0** — first numbered release. The roadmap
-through M7 is feature-complete on `main` and the live DHT
-publish path is validated. v1 will land once any remaining
-operational issues from longer-running deployments are fixed.
+All nine packages pass under `go test -race ./...`.
 
 ## v0.1.0 — 2026-04-10
 
