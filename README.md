@@ -27,7 +27,7 @@ research and design documents that motivate the architecture.
 | **M4 — BEP-44 keyword publisher (Layer D)** | ✅ Complete | Persistent ed25519 publisher identity, keyword tokenizer, BEP-44 mutable-item put/get wrapper, publisher worker with on-disk shard manifest, parallel lookup fan-out across known indexer pubkeys, `swartznet search --dht`, and `swartznet status`. |
 | **M5 — Spam resistance** | ✅ Complete | Persistent Bloom filter of known-good infohashes (1M items @ 1% FP, ~1.2 MB), Bayesian-smoothed per-pubkey reputation tracker, lookup auto-skips low-reputation indexers, Bloom-hit results boost to the top, auto-confirm on download completion, `swartznet flag/confirm` CLI commands. |
 | **M6 — EPUB / DOCX / ODT extractors** | ✅ Complete | Three new binary-format text extractors. EPUB iterates XHTML chapters and strips HTML via golang.org/x/net/html. DOCX walks word/document.xml's `<w:t>` elements via stdlib encoding/xml. ODT does the same for content.xml's `<text:p>` elements while skipping `<office:automatic-styles>` noise. All zero-cgo, all use the existing chunker. |
-| M7 — v1 release | 🚧 Next | Stabilise the sn_search and Layer-D wire formats; write the draft BEP; document operationally. |
+| **M7 — Documentation polish for v1** | ✅ Complete | Two draft BEP specs (`docs/06-bep-sn_search-draft.md` and `docs/07-bep-dht-keyword-index-draft.md`), an operations guide (`docs/08-operations.md`), and a [CHANGELOG](CHANGELOG.md) covering every milestone. v1.0.0 release pending real-world swarm testing. |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
@@ -73,6 +73,19 @@ BEP-3/5/9/10/44.
   synthesis: three-layer architecture, the `sn_search` wire format spec,
   ingestion pipeline, threat model, backwards-compatibility test matrix,
   ordered roadmap.
+
+### Specs and operations (M7)
+
+- [`docs/06-bep-sn_search-draft.md`](docs/06-bep-sn_search-draft.md) —
+  draft BEP-style specification for the `sn_search` peer-wire extension.
+  Anyone reimplementing the extension in another client should be able
+  to read this document end-to-end and produce a wire-compatible peer.
+- [`docs/07-bep-dht-keyword-index-draft.md`](docs/07-bep-dht-keyword-index-draft.md) —
+  matching draft spec for the Layer-D BEP-44 mutable-item keyword index.
+- [`docs/08-operations.md`](docs/08-operations.md) — file layout, what
+  to back up, useful commands, and a troubleshooting guide.
+- [`CHANGELOG.md`](CHANGELOG.md) — milestone-by-milestone change log
+  for every commit on `main`.
 
 ## Building
 
