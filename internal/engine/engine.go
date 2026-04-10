@@ -18,6 +18,7 @@ import (
 	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/identity"
 	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
@@ -42,10 +43,12 @@ type Engine struct {
 	swarm    *swarmsearch.Protocol // always non-nil after New
 	peers    *peerTracker          // addr → *torrent.PeerConn, for swarmSender
 
-	identity  *identity.Identity   // ed25519 publisher keypair, nil for tests
-	publisher *dhtindex.Publisher  // nil if no DHT or no identity
-	manifest  *dhtindex.Manifest   // owned by publisher; nil iff publisher nil
-	lookup    *dhtindex.Lookup     // M4e DHT keyword lookup; nil iff no DHT
+	identity  *identity.Identity     // ed25519 publisher keypair, nil for tests
+	publisher *dhtindex.Publisher    // nil if no DHT or no identity
+	manifest  *dhtindex.Manifest     // owned by publisher; nil iff publisher nil
+	lookup    *dhtindex.Lookup       // M4e DHT keyword lookup; nil iff no DHT
+	bloom     *reputation.BloomFilter // M5 known-good infohash filter; nil if disabled
+	tracker   *reputation.Tracker    // M5 per-pubkey reputation tracker; nil if disabled
 
 	mu       sync.Mutex
 	closed   bool
@@ -67,6 +70,14 @@ func (e *Engine) Identity() *identity.Identity { return e.identity }
 // is automatically added as a known indexer so we can find our own
 // published entries during testing.
 func (e *Engine) Lookup() *dhtindex.Lookup { return e.lookup }
+
+// ReputationTracker returns the engine's per-pubkey reputation
+// tracker, or nil if reputation is disabled.
+func (e *Engine) ReputationTracker() *reputation.Tracker { return e.tracker }
+
+// KnownGoodBloom returns the engine's known-good infohash Bloom
+// filter, or nil if disabled.
+func (e *Engine) KnownGoodBloom() *reputation.BloomFilter { return e.bloom }
 
 // peerTracker maintains a thread-safe address → *torrent.PeerConn map.
 // Populated by the PeerConnAdded callback and cleaned by PeerConnClosed.
@@ -291,6 +302,30 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// sender share the same peerTracker instance.
 	swarm.SetSender(&swarmSender{peers: peers})
 
+	// Load the M5 spam-resistance state (Bloom filter + reputation
+	// tracker) before the publisher / lookup so the lookup can be
+	// wired up with both. Errors here are non-fatal — the node
+	// still works for download + local search.
+	if cfg.BloomPath != "" {
+		if bf, err := reputation.LoadOrCreateBloom(cfg.BloomPath); err != nil {
+			log.Warn("engine.bloom_load_err", "err", err)
+		} else {
+			eng.bloom = bf
+			log.Info("engine.bloom_loaded",
+				"path", cfg.BloomPath,
+				"estimated_items", bf.EstimatedItems(),
+			)
+		}
+	}
+	if cfg.ReputationPath != "" {
+		if tr, err := reputation.LoadOrCreateTracker(cfg.ReputationPath); err != nil {
+			log.Warn("engine.reputation_load_err", "err", err)
+		} else {
+			eng.tracker = tr
+			log.Info("engine.reputation_loaded", "path", cfg.ReputationPath)
+		}
+	}
+
 	// Load (or create) the persistent identity, then start a DHT
 	// publisher backed by it. Failures here are non-fatal: a node
 	// without an identity / publisher still works for download +
@@ -345,6 +380,16 @@ func (e *Engine) startPublisher() error {
 	}
 	e.lookup = dhtindex.NewLookup(getter)
 	e.lookup.AddIndexer(e.identity.PublicKeyBytes(), "self")
+	// Wire the M5 spam-resistance helpers if they were loaded.
+	if e.tracker != nil {
+		e.lookup.SetTracker(e.tracker)
+	}
+	if e.bloom != nil {
+		e.lookup.SetBloom(e.bloom)
+	}
+	if e.cfg.MinIndexerScore > 0 {
+		e.lookup.SetMinIndexerScore(e.cfg.MinIndexerScore)
+	}
 	return nil
 }
 
@@ -562,6 +607,18 @@ func (e *Engine) Close() error {
 		// Stop the publisher next so any in-flight Put traversal finishes
 		// before the DHT server is torn down by Client.Close.
 		e.publisher.Stop()
+	}
+	// Persist the spam-resistance state to disk before shutdown
+	// so reputation and known-good entries survive across runs.
+	if e.bloom != nil {
+		if err := e.bloom.Save(); err != nil {
+			e.log.Warn("engine.bloom_save_err", "err", err)
+		}
+	}
+	if e.tracker != nil {
+		if err := e.tracker.Save(); err != nil {
+			e.log.Warn("engine.reputation_save_err", "err", err)
+		}
 	}
 	for _, h := range e.handles {
 		h.pieceSub.Close()

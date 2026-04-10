@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/swartznet/swartznet/internal/reputation"
 )
 
 // Lookup is the read side of Layer D. It holds a set of known
@@ -14,16 +16,19 @@ import (
 // gets against (pubkey, keyword) for every known indexer when the
 // CLI/HTTP API issues a query.
 //
-// The set of known indexers can grow over time:
+// As of M5c, Lookup also consults two optional spam-resistance
+// helpers:
 //
-//   - Hardcoded seeds: a small list shipped with the client. Empty
-//     in M4e; M5+ adds the project's first published seeds.
-//   - Gossip-discovered: M4f or later wires the swarmsearch
-//     protocol's "peer is sn_search-capable" event into AddIndexer
-//     so that any peer we successfully exchange a Layer-S message
-//     with becomes a known indexer for Layer D as well.
-//   - User-supplied: a CLI command or config file can add pubkeys
-//     by hex string.
+//   - A *reputation.Tracker, used to (a) skip indexers whose
+//     historical reputation falls below MinIndexerScore and
+//     (b) record HitsReturned for every indexer that answers a
+//     query, so the score evolves over time.
+//   - A *reputation.BloomFilter of "known-good" infohashes, used to
+//     boost results whose infohash the user has already downloaded
+//     successfully or explicitly confirmed.
+//
+// Both helpers are nil by default; the M4e tests still pass
+// unchanged. M5d wires them up via the Engine.
 //
 // Lookup is safe for concurrent use.
 type Lookup struct {
@@ -31,6 +36,9 @@ type Lookup struct {
 
 	mu       sync.RWMutex
 	indexers map[[32]byte]IndexerInfo
+	tracker  *reputation.Tracker
+	bloom    *reputation.BloomFilter
+	minScore float64 // skip indexers with score below this
 }
 
 // IndexerInfo is the metadata Lookup tracks per known indexer
@@ -43,8 +51,15 @@ type IndexerInfo struct {
 }
 
 // LookupHit is a single deduplicated result from a Layer-D lookup.
-// It mirrors the wire schema (KeywordHit) but adds Sources — the
-// list of indexer pubkey hex strings that returned this hit.
+// It mirrors the wire schema (KeywordHit) but adds:
+//
+//   - Sources: the list of indexer labels that returned this hit
+//     (so the UI can show "this hit was reported by 3 indexers");
+//   - Score: a 0-1 quality score derived from per-indexer
+//     reputation, source count, and Bloom filter membership.
+//     Higher is better.
+//   - BloomHit: true if the infohash is in the user's known-good
+//     Bloom filter. Always false when no filter is wired in.
 type LookupHit struct {
 	InfoHash string // 40-char lowercase hex
 	Name     string
@@ -52,6 +67,8 @@ type LookupHit struct {
 	Size     int64
 	Files    int
 	Sources  []string
+	Score    float64
+	BloomHit bool
 }
 
 // LookupResponse is the result of Lookup.Query.
@@ -68,12 +85,54 @@ type LookupResponse struct {
 
 // NewLookup constructs an empty Lookup wrapped around the given
 // Getter. The set of known indexers starts empty; call AddIndexer
-// to populate it.
+// to populate it. Reputation tracker and Bloom filter are nil by
+// default; call SetTracker / SetBloom to wire them in.
 func NewLookup(getter Getter) *Lookup {
 	return &Lookup{
 		getter:   getter,
 		indexers: make(map[[32]byte]IndexerInfo),
 	}
+}
+
+// SetTracker attaches (or detaches) a reputation tracker. When
+// non-nil, Query skips indexers whose score is below MinScore and
+// records HitsReturned for every indexer that responds.
+func (l *Lookup) SetTracker(t *reputation.Tracker) {
+	l.mu.Lock()
+	l.tracker = t
+	l.mu.Unlock()
+}
+
+// SetBloom attaches (or detaches) a known-good Bloom filter. When
+// non-nil, Query marks each LookupHit with BloomHit=true and adds
+// the corresponding boost to Score.
+func (l *Lookup) SetBloom(b *reputation.BloomFilter) {
+	l.mu.Lock()
+	l.bloom = b
+	l.mu.Unlock()
+}
+
+// SetMinIndexerScore configures the minimum reputation score an
+// indexer must have to be queried. Zero (the default) means no
+// filtering. Has no effect when no Tracker is attached.
+func (l *Lookup) SetMinIndexerScore(s float64) {
+	l.mu.Lock()
+	l.minScore = s
+	l.mu.Unlock()
+}
+
+// Tracker returns the attached reputation tracker, or nil.
+func (l *Lookup) Tracker() *reputation.Tracker {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.tracker
+}
+
+// Bloom returns the attached known-good Bloom filter, or nil.
+func (l *Lookup) Bloom() *reputation.BloomFilter {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.bloom
 }
 
 // AddIndexer records a known indexer pubkey. Idempotent: re-adding
@@ -133,10 +192,17 @@ func (l *Lookup) Indexers() []IndexerInfo {
 // per indexer. Multi-keyword AND/OR queries land in a later
 // milestone.
 //
-// Each Get is timeouted by ctx; the per-indexer error is logged at
-// debug level on the underlying logger but does not fail the
-// overall lookup. As long as at least one indexer returns a
-// non-empty value, the response carries that data.
+// As of M5c the lookup also:
+//
+//   - Filters indexers below MinIndexerScore via the attached
+//     reputation.Tracker (no-op when no tracker is configured).
+//   - Records HitsReturned per indexer for every indexer that
+//     responded with at least one hit, so the tracker stays
+//     current.
+//   - Marks each LookupHit's BloomHit field if the infohash is in
+//     the user's known-good Bloom filter, and folds that flag plus
+//     a per-source reputation average into the LookupHit.Score
+//     used for sorting.
 func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, error) {
 	tokens := Tokenize(query)
 	if len(tokens) == 0 {
@@ -153,10 +219,27 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 	for _, info := range l.indexers {
 		indexers = append(indexers, info)
 	}
+	tracker := l.tracker
+	bloom := l.bloom
+	minScore := l.minScore
 	l.mu.RUnlock()
 
 	if len(indexers) == 0 {
 		return &LookupResponse{}, nil
+	}
+
+	// Apply the reputation cutoff. If a tracker is wired in and
+	// MinIndexerScore is non-zero, skip every indexer whose
+	// historical score is below the threshold. Empty result after
+	// filtering is still a valid response.
+	if tracker != nil && minScore > 0 {
+		filtered := indexers[:0]
+		for _, info := range indexers {
+			if tracker.Threshold(reputation.PubKey(info.PubKey), minScore) {
+				filtered = append(filtered, info)
+			}
+		}
+		indexers = filtered
 	}
 
 	type fetchResult struct {
@@ -178,12 +261,16 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 	close(results)
 
 	merged := make(map[string]*LookupHit)
+	hitSources := make(map[string][][32]byte) // infohash hex → indexer pubkeys
 	resp := &LookupResponse{IndexersAsked: len(indexers)}
 	for r := range results {
 		if r.err != nil {
 			continue
 		}
 		resp.IndexersResponded++
+		if tracker != nil {
+			tracker.RecordReturned(reputation.PubKey(r.info.PubKey), len(r.v.Hits))
+		}
 		labelOrHex := r.info.Label
 		if labelOrHex == "" {
 			labelOrHex = hex.EncodeToString(r.info.PubKey[:])[:16]
@@ -212,17 +299,78 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 				}
 			}
 			lh.Sources = append(lh.Sources, labelOrHex)
+			hitSources[ih] = append(hitSources[ih], r.info.PubKey)
+			if bloom != nil && bloom.Test(h.IH) {
+				lh.BloomHit = true
+			}
 		}
+	}
+
+	// Compute per-hit score from indexer reputation + bloom flag.
+	for ih, lh := range merged {
+		lh.Score = scoreLookupHit(lh, hitSources[ih], tracker)
 	}
 
 	for _, lh := range merged {
 		resp.Hits = append(resp.Hits, *lh)
 	}
 	sort.Slice(resp.Hits, func(i, j int) bool {
+		// Bloom hits go to the top; ties broken by score, then
+		// source-count, then name.
+		if resp.Hits[i].BloomHit != resp.Hits[j].BloomHit {
+			return resp.Hits[i].BloomHit
+		}
+		if resp.Hits[i].Score != resp.Hits[j].Score {
+			return resp.Hits[i].Score > resp.Hits[j].Score
+		}
 		if len(resp.Hits[i].Sources) != len(resp.Hits[j].Sources) {
 			return len(resp.Hits[i].Sources) > len(resp.Hits[j].Sources)
 		}
 		return resp.Hits[i].Name < resp.Hits[j].Name
 	})
 	return resp, nil
+}
+
+// scoreLookupHit computes the LookupHit.Score in [0, 1].
+//
+// The base score is the average reputation of every indexer that
+// returned this hit (or 0.5 when no tracker is attached). Hits
+// reported by multiple indexers get a small additive bonus per
+// extra source (capped). Bloom-filter hits get a flat boost.
+//
+// The exact weights are easy to tune later; what matters today is
+// that confirmed-good infohashes from high-reputation indexers
+// always sort above unknown-quality ones.
+func scoreLookupHit(lh *LookupHit, sources [][32]byte, tracker *reputation.Tracker) float64 {
+	if len(sources) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, pk := range sources {
+		if tracker != nil {
+			sum += tracker.Score(reputation.PubKey(pk))
+		} else {
+			sum += 0.5
+		}
+	}
+	avg := sum / float64(len(sources))
+	// Multi-source bonus: each extra source above the first adds
+	// 0.05, capped at 0.2 (i.e. 4 or more sources gets the full
+	// bonus). The bonus tops out before it can dominate the
+	// underlying reputation signal.
+	bonus := 0.05 * float64(len(sources)-1)
+	if bonus > 0.2 {
+		bonus = 0.2
+	}
+	score := avg + bonus
+	if lh.BloomHit {
+		score += 0.25
+	}
+	if score > 1 {
+		score = 1
+	}
+	if score < 0 {
+		score = 0
+	}
+	return score
 }

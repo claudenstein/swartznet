@@ -57,6 +57,21 @@ type Config struct {
 	// manifest the dhtindex publisher writes. Default:
 	// ~/.local/share/swartznet/publisher.json.
 	PublisherManifest string
+
+	// ReputationPath is the on-disk path to the per-pubkey
+	// reputation tracker. Default:
+	// ~/.local/share/swartznet/reputation.json.
+	ReputationPath string
+
+	// BloomPath is the on-disk path to the known-good infohash
+	// Bloom filter. Default:
+	// ~/.local/share/swartznet/known-good.bloom.
+	BloomPath string
+
+	// MinIndexerScore is the reputation cutoff for Layer-D
+	// lookup. Indexers below this score are skipped. 0 disables
+	// the cutoff. Default: 0.
+	MinIndexerScore float64
 }
 
 // Default returns a Config populated with sensible defaults for a normal
@@ -73,6 +88,9 @@ func Default() Config {
 		IndexDir:          defaultIndexDir(),
 		IdentityPath:      defaultIdentityPath(),
 		PublisherManifest: defaultPublisherManifest(),
+		ReputationPath:    defaultReputationPath(),
+		BloomPath:         defaultBloomPath(),
+		MinIndexerScore:   0,
 	}
 }
 
@@ -123,6 +141,18 @@ func defaultIdentityPath() string {
 // path for the dhtindex publisher's per-keyword manifest.
 func defaultPublisherManifest() string {
 	return filepath.Join(swartznetShareRoot(), "publisher.json")
+}
+
+// defaultReputationPath returns the platform-appropriate default
+// path for the per-pubkey reputation tracker.
+func defaultReputationPath() string {
+	return filepath.Join(swartznetShareRoot(), "reputation.json")
+}
+
+// defaultBloomPath returns the platform-appropriate default path
+// for the known-good infohash Bloom filter.
+func defaultBloomPath() string {
+	return filepath.Join(swartznetShareRoot(), "known-good.bloom")
 }
 
 // swartznetShareRoot returns the per-user root directory SwartzNet uses for
