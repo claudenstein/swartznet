@@ -80,8 +80,10 @@ type Protocol struct {
 	log  *slog.Logger
 	caps Capabilities
 
-	mu    sync.RWMutex
-	peers map[string]*PeerState // keyed by peer addr ("ip:port")
+	mu       sync.RWMutex
+	peers    map[string]*PeerState // keyed by peer addr ("ip:port")
+	searcher LocalSearcher         // attached in M3b; nil means "reject all inbound queries"
+	sender   Sender                // attached by engine; nil means "decode only, don't reply"
 }
 
 // New constructs a Protocol with default capabilities.

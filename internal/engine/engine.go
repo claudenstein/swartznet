@@ -57,6 +57,12 @@ func (e *Engine) SwarmSearch() *swarmsearch.Protocol {
 // available, and their files will be extracted + content-indexed as they
 // complete on disk.
 //
+// As a side-effect, this also wires the sn_search Protocol's
+// LocalSearcher to the same index, so inbound sn_search queries from
+// peers get answered against the same content the CLI searches
+// locally. Pass a nil index to unwire both the pipeline AND the
+// sn_search LocalSearcher.
+//
 // Safe to call at most once per Engine. Calling it twice replaces the
 // attached index and pipeline; the old pipeline is stopped cleanly first.
 func (e *Engine) SetIndex(idx *indexer.Index) {
@@ -69,8 +75,10 @@ func (e *Engine) SetIndex(idx *indexer.Index) {
 	if idx != nil {
 		e.pipeline = indexer.NewPipeline(idx, e.log, 0)
 		e.pipeline.Start()
+		e.swarm.SetSearcher(&indexerSearcher{idx: idx})
 	} else {
 		e.pipeline = nil
+		e.swarm.SetSearcher(nil)
 	}
 	e.mu.Unlock()
 }
@@ -168,6 +176,24 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	tc.Callbacks.ReadExtendedHandshake = func(pc *torrent.PeerConn, hs *pp.ExtendedHandshakeMessage) {
 		swarm.OnRemoteHandshake(pc.RemoteAddr.String(), hs)
 	}
+	// PeerConnReadExtensionMessage fires when an LTEP extended message
+	// arrives. We filter to sn_search frames by looking up the local
+	// extension id in the peer's map, and dispatch to the protocol
+	// with a reply closure bound to this exact connection.
+	tc.Callbacks.PeerConnReadExtensionMessage = append(
+		tc.Callbacks.PeerConnReadExtensionMessage,
+		func(ev torrent.PeerConnReadExtensionMessageEvent) {
+			name, _, err := ev.PeerConn.LocalLtepProtocolMap.LookupId(ev.ExtensionNumber)
+			if err != nil || name != swarmsearch.ExtensionName {
+				return
+			}
+			peerAddr := ev.PeerConn.RemoteAddr.String()
+			reply := func(body []byte) error {
+				return ev.PeerConn.WriteExtendedMessage(swarmsearch.ExtensionName, body)
+			}
+			swarm.HandleMessage(peerAddr, ev.Payload, reply)
+		},
+	)
 	// PeerConnClosed lets us drop stale peer state from the
 	// sn_search tracker so long-running processes do not leak memory.
 	tc.Callbacks.PeerConnClosed = func(pc *torrent.PeerConn) {
