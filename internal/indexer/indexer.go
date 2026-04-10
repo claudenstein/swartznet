@@ -230,6 +230,166 @@ func (i *Index) DocCount() (uint64, error) {
 	return i.bleve.DocCount()
 }
 
+// AllTorrentDocs returns every torrent-level document in the
+// index, reconstructed from the stored fields. Used by the M11
+// companion-index publisher to walk the local index when
+// generating its serialised digest.
+//
+// Pagination is handled internally — Bleve's MatchAllQuery is
+// run in batches of 1000 docs each. The returned slice is
+// freshly allocated and is safe to retain after the index is
+// closed.
+func (i *Index) AllTorrentDocs() ([]TorrentDoc, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.bleve == nil {
+		return nil, errors.New("indexer: closed")
+	}
+	q := bleve.NewQueryStringQuery("+" + fieldType + ":" + typeTorrent)
+	const batch = 1000
+	var (
+		out  []TorrentDoc
+		from = 0
+	)
+	for {
+		sr := bleve.NewSearchRequestOptions(q, batch, from, false)
+		sr.Fields = []string{
+			fieldInfoHash, fieldName, fieldFilePaths, fieldTrackers,
+			fieldSizeBytes, fieldFileCount, fieldAddedAt,
+		}
+		res, err := i.bleve.Search(sr)
+		if err != nil {
+			return nil, fmt.Errorf("indexer: AllTorrentDocs: %w", err)
+		}
+		if len(res.Hits) == 0 {
+			break
+		}
+		for _, h := range res.Hits {
+			out = append(out, torrentDocFromFields(h.Fields))
+		}
+		if len(res.Hits) < batch {
+			break
+		}
+		from += batch
+	}
+	return out, nil
+}
+
+// ContentDocsForInfoHash returns every content-level document
+// stored under the given infohash, reconstructed from the
+// stored fields. Used by the M11 companion-index publisher to
+// pair each torrent record with its extracted text.
+func (i *Index) ContentDocsForInfoHash(infoHash string) ([]ContentDoc, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.bleve == nil {
+		return nil, errors.New("indexer: closed")
+	}
+	infoHash = strings.ToLower(infoHash)
+	q := bleve.NewQueryStringQuery("+" + fieldType + ":" + typeContent +
+		" +" + fieldInfoHash + ":" + infoHash)
+	const batch = 1000
+	var (
+		out  []ContentDoc
+		from = 0
+	)
+	for {
+		sr := bleve.NewSearchRequestOptions(q, batch, from, true)
+		sr.Fields = []string{
+			fieldInfoHash, fieldFileIndex, fieldFilePath, fieldFileSize,
+			fieldMime, fieldText, fieldExtractor, fieldIndexedAt,
+		}
+		res, err := i.bleve.Search(sr)
+		if err != nil {
+			return nil, fmt.Errorf("indexer: ContentDocsForInfoHash: %w", err)
+		}
+		if len(res.Hits) == 0 {
+			break
+		}
+		for _, h := range res.Hits {
+			out = append(out, contentDocFromFields(h.Fields))
+		}
+		if len(res.Hits) < batch {
+			break
+		}
+		from += batch
+	}
+	return out, nil
+}
+
+// torrentDocFromFields reconstructs a TorrentDoc from the
+// projection map Bleve returns in SearchHit.Fields.
+func torrentDocFromFields(fields map[string]any) TorrentDoc {
+	doc := TorrentDoc{}
+	if v, ok := fields[fieldInfoHash].(string); ok {
+		doc.InfoHash = v
+	}
+	if v, ok := fields[fieldName].(string); ok {
+		doc.Name = v
+	}
+	if v, ok := fields[fieldFilePaths].(string); ok && v != "" {
+		doc.FilePaths = strings.Split(v, "\n")
+	}
+	switch v := fields[fieldTrackers].(type) {
+	case string:
+		if v != "" {
+			doc.Trackers = []string{v}
+		}
+	case []any:
+		for _, t := range v {
+			if s, ok := t.(string); ok {
+				doc.Trackers = append(doc.Trackers, s)
+			}
+		}
+	}
+	if v, ok := fields[fieldSizeBytes].(float64); ok {
+		doc.SizeBytes = int64(v)
+	}
+	if v, ok := fields[fieldFileCount].(float64); ok {
+		doc.FileCount = int(v)
+	}
+	if v, ok := fields[fieldAddedAt].(string); ok && v != "" {
+		// Bleve stores datetimes as RFC3339-formatted strings.
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			doc.AddedAt = t
+		}
+	}
+	return doc
+}
+
+// contentDocFromFields reconstructs a ContentDoc from the
+// projection map Bleve returns in SearchHit.Fields.
+func contentDocFromFields(fields map[string]any) ContentDoc {
+	doc := ContentDoc{}
+	if v, ok := fields[fieldInfoHash].(string); ok {
+		doc.InfoHash = v
+	}
+	if v, ok := fields[fieldFileIndex].(float64); ok {
+		doc.FileIndex = int(v)
+	}
+	if v, ok := fields[fieldFilePath].(string); ok {
+		doc.FilePath = v
+	}
+	if v, ok := fields[fieldFileSize].(float64); ok {
+		doc.FileSize = int64(v)
+	}
+	if v, ok := fields[fieldMime].(string); ok {
+		doc.Mime = v
+	}
+	if v, ok := fields[fieldText].(string); ok {
+		doc.Text = v
+	}
+	if v, ok := fields[fieldExtractor].(string); ok {
+		doc.Extractor = v
+	}
+	if v, ok := fields[fieldIndexedAt].(string); ok && v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			doc.IndexedAt = t
+		}
+	}
+	return doc
+}
+
 // SearchRequest describes a query. Only Query is required.
 type SearchRequest struct {
 	Query string // free-form text; matches against name and file paths
