@@ -99,6 +99,22 @@ draft to Final).
   getter. Six new tests covering happy path, pointer/fetcher
   failures, partial-ingest failure, the worker lifecycle, and
   IngestReader. All pass under `-race`.
+- **M11e**: GUI integration. New `httpapi.CompanionController`
+  interface and four endpoints: `GET /companion` (status of
+  publisher + every followed publisher), `POST /companion/refresh`
+  (proxies to `Publisher.RefreshNow`, returns 429 on throttle),
+  `POST /companion/follow {pubkey, label}` (adds to the follow
+  list AND persists to disk), `POST /companion/unfollow {pubkey}`
+  (removes + persists). The `cmd/swartznet/companion_controller.go`
+  adapter bridges the running publisher and subscriber worker
+  to the controller and owns the on-disk follow file
+  (atomic-rename writes). New "Companion" tab in the web UI
+  showing publisher status (last refresh, infohash, count), a
+  manual refresh button, the follow form, and one card per
+  followed publisher with last-sync stats and an unfollow
+  button. Six new httpapi tests using a fake controller —
+  status, refresh happy path, refresh-too-soon (429), follow,
+  follow with bad pubkey (400), and unfollow.
 
 ## v0.2.0 — 2026-04-10
 

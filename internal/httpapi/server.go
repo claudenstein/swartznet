@@ -94,6 +94,7 @@ type Server struct {
 	sources   *reputation.SourceTracker
 	adder     TorrentAdder
 	control   TorrentController
+	companion CompanionController
 	timeout   time.Duration
 
 	httpServer *http.Server
@@ -113,6 +114,7 @@ type Options struct {
 	Sources   *reputation.SourceTracker
 	Adder     TorrentAdder
 	Control   TorrentController
+	Companion CompanionController
 }
 
 // New constructs a Server with the legacy index+swarm signature.
@@ -144,6 +146,7 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		sources:   opts.Sources,
 		adder:     opts.Adder,
 		control:   opts.Control,
+		companion: opts.Companion,
 		timeout:   10 * time.Second,
 	}
 }
@@ -182,6 +185,10 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /torrents/{infohash}/pause", s.handlePauseTorrent)
 	mux.HandleFunc("POST /torrents/{infohash}/resume", s.handleResumeTorrent)
 	mux.HandleFunc("DELETE /torrents/{infohash}", s.handleDeleteTorrent)
+	mux.HandleFunc("GET /companion", s.handleCompanionStatus)
+	mux.HandleFunc("POST /companion/refresh", s.handleCompanionRefresh)
+	mux.HandleFunc("POST /companion/follow", s.handleCompanionFollow)
+	mux.HandleFunc("POST /companion/unfollow", s.handleCompanionUnfollow)
 
 	// Web UI: serve the embedded index.html at / and the
 	// static assets at /static/. The HTTP API endpoints above

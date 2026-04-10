@@ -19,6 +19,7 @@
     <button class="tab active" data-tab="search">Search</button>
     <button class="tab" data-tab="add">Add torrent</button>
     <button class="tab" data-tab="downloads">Downloads</button>
+    <button class="tab" data-tab="companion">Companion</button>
     <button class="tab" data-tab="status">Status</button>
     <button class="tab" data-tab="settings">Sharing</button>
   </nav>
@@ -71,6 +72,47 @@
       with pause/resume/remove controls. Polls every 2 seconds while
       this tab is visible.</p>
       <div id="downloads-list">
+        <p class="hint">loading…</p>
+      </div>
+    </section>
+
+    <!-- ===================== COMPANION ===================== -->
+    <section class="panel hidden" id="panel-companion">
+      <h2>F3 companion content index</h2>
+      <p class="hint">
+        SwartzNet's distributed full-text search. Your local
+        Bleve index is periodically published as a torrent
+        wrapped in a BEP-46 mutable pointer. Subscribers fetch
+        the pointer, download the torrent, and merge the records
+        into their own search index.
+      </p>
+
+      <h3>Publisher</h3>
+      <div id="companion-publisher">
+        <p class="hint">loading…</p>
+      </div>
+      <button id="companion-refresh">Refresh now</button>
+      <p id="companion-refresh-result" class="hint"></p>
+
+      <h3>Followed publishers</h3>
+      <p class="hint">
+        Add a publisher's 64-char ed25519 pubkey hex below to
+        start syncing their content index. The follow list is
+        persisted on disk so it survives daemon restarts.
+      </p>
+      <form id="companion-follow-form" autocomplete="off">
+        <label>
+          Pubkey (64 hex chars)
+          <input type="text" id="companion-follow-pubkey" required
+                 pattern="[0-9a-fA-F]{64}" maxlength="64">
+        </label>
+        <label>
+          Label (optional)
+          <input type="text" id="companion-follow-label">
+        </label>
+        <button type="submit">Follow</button>
+      </form>
+      <div id="companion-follow-list">
         <p class="hint">loading…</p>
       </div>
     </section>

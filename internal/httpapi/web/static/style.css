@@ -388,6 +388,114 @@ button:disabled {
   border-color: var(--bad);
 }
 
+/* ---------- companion (M11e) ---------- */
+
+#panel-companion h3 {
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+  color: var(--accent);
+  font-size: 1.05rem;
+}
+
+#companion-publisher {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+
+dl.companion-status {
+  display: grid;
+  grid-template-columns: 12rem 1fr;
+  gap: 0.4rem 1rem;
+  margin: 0;
+}
+
+dl.companion-status dt {
+  color: var(--text-dim);
+}
+
+dl.companion-status dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+#companion-refresh {
+  margin-top: 0.75rem;
+}
+
+#companion-follow-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin: 0.75rem 0 1rem 0;
+}
+
+#companion-follow-form label {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 16rem;
+}
+
+#companion-follow-form input {
+  font-family: var(--mono);
+  padding: 0.5rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+
+.companion-follows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.companion-follow {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.companion-follow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.25rem;
+}
+
+.companion-follow-label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.companion-follow-pubkey {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  word-break: break-all;
+  margin-bottom: 0.5rem;
+}
+
+.companion-follow-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.companion-follow-err {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--bad);
+}
+
 /* ---------- settings ---------- */
 
 fieldset {

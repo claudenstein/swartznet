@@ -18,6 +18,7 @@
     search: document.getElementById('panel-search'),
     add: document.getElementById('panel-add'),
     downloads: document.getElementById('panel-downloads'),
+    companion: document.getElementById('panel-companion'),
     status: document.getElementById('panel-status'),
     settings: document.getElementById('panel-settings'),
   };
@@ -29,6 +30,7 @@
     panels[t.dataset.tab].classList.remove('hidden');
     if (t.dataset.tab === 'status') refreshStatus();
     if (t.dataset.tab === 'downloads') refreshDownloads();
+    if (t.dataset.tab === 'companion') refreshCompanion();
   }));
 
   // ---------- helpers ----------
@@ -569,5 +571,140 @@
     }
   }
   loadCapabilities();
+
+  // ---------- companion (M11e) ----------
+
+  async function refreshCompanion() {
+    const pubBox = document.getElementById('companion-publisher');
+    const followBox = document.getElementById('companion-follow-list');
+    try {
+      const c = await getJSON('/companion');
+      pubBox.replaceChildren(renderCompanionPublisher(c.publisher || {}));
+      followBox.replaceChildren(renderCompanionFollows(c.subscriber || []));
+    } catch (err) {
+      pubBox.replaceChildren(elt('p', { class: 'hint', text: 'error: ' + err.message }));
+      followBox.replaceChildren();
+    }
+  }
+
+  function renderCompanionPublisher(p) {
+    if (!p.pubkey_hex) {
+      return elt('p', { class: 'hint',
+        text: 'No publisher running. Start the daemon with an identity and DHT enabled.' });
+    }
+    const dl = elt('dl', { class: 'companion-status' });
+    function row(label, value) {
+      dl.appendChild(elt('dt', { text: label }));
+      dl.appendChild(elt('dd', { text: value }));
+    }
+    row('Publisher pubkey', p.pubkey_hex);
+    row('Last refresh', p.last_refresh && p.last_refresh !== '0001-01-01T00:00:00Z'
+      ? new Date(p.last_refresh).toLocaleString()
+      : 'never');
+    row('Last infohash', p.last_infohash || '(none)');
+    row('Published count', p.published_count);
+    if (p.last_error) {
+      row('Last error', p.last_error);
+    }
+    return dl;
+  }
+
+  function renderCompanionFollows(rows) {
+    if (!rows.length) {
+      return elt('p', { class: 'hint',
+        text: 'Not following any publishers yet. Add a pubkey above to start syncing.' });
+    }
+    const list = elt('div', { class: 'companion-follows' });
+    for (const row of rows) {
+      list.appendChild(renderCompanionFollow(row));
+    }
+    return list;
+  }
+
+  function renderCompanionFollow(row) {
+    const card = elt('div', { class: 'companion-follow' });
+    const head = elt('div', { class: 'companion-follow-head' });
+    head.appendChild(elt('span', {
+      class: 'companion-follow-label',
+      text: row.label || '(unlabeled)',
+    }));
+    head.appendChild(elt('button', {
+      class: 'danger',
+      text: '✕ unfollow',
+      onclick: () => unfollowPublisher(row.pubkey_hex),
+    }));
+    card.appendChild(head);
+
+    card.appendChild(elt('div', {
+      class: 'companion-follow-pubkey',
+      text: row.pubkey_hex,
+    }));
+
+    const meta = elt('div', { class: 'companion-follow-meta' });
+    meta.appendChild(elt('span', {
+      text: 'imported ' + (row.torrents_imported || 0) + ' torrents, ' +
+            (row.content_imported || 0) + ' content rows',
+    }));
+    if (row.pointer_infohash) {
+      meta.appendChild(elt('span', {
+        text: 'pointer: ' + row.pointer_infohash.slice(0, 16) + '…',
+      }));
+    }
+    if (row.last_sync_at && row.last_sync_at !== '0001-01-01T00:00:00Z') {
+      meta.appendChild(elt('span', {
+        text: 'snapshot: ' + new Date(row.last_sync_at).toLocaleString(),
+      }));
+    }
+    card.appendChild(meta);
+
+    if (row.last_error) {
+      card.appendChild(elt('div', {
+        class: 'companion-follow-err',
+        text: 'error: ' + row.last_error,
+      }));
+    }
+    return card;
+  }
+
+  async function unfollowPublisher(pubkey) {
+    if (!confirm('Unfollow publisher ' + pubkey.slice(0, 16) + '…?')) return;
+    try {
+      await postJSON('/companion/unfollow', { pubkey: pubkey });
+      refreshCompanion();
+    } catch (err) {
+      alert('unfollow failed: ' + err.message);
+    }
+  }
+
+  document.getElementById('companion-follow-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pub = document.getElementById('companion-follow-pubkey').value.trim();
+    const label = document.getElementById('companion-follow-label').value.trim();
+    if (pub.length !== 64) {
+      alert('pubkey must be exactly 64 hex characters');
+      return;
+    }
+    try {
+      await postJSON('/companion/follow', { pubkey: pub, label: label });
+      document.getElementById('companion-follow-pubkey').value = '';
+      document.getElementById('companion-follow-label').value = '';
+      refreshCompanion();
+    } catch (err) {
+      alert('follow failed: ' + err.message);
+    }
+  });
+
+  document.getElementById('companion-refresh').addEventListener('click', async () => {
+    const out = document.getElementById('companion-refresh-result');
+    out.textContent = 'refreshing…';
+    try {
+      await postJSON('/companion/refresh', {});
+      out.textContent = '✓ refresh queued';
+      setTimeout(() => { out.textContent = ''; }, 3000);
+      refreshCompanion();
+    } catch (err) {
+      out.textContent = 'error: ' + err.message;
+    }
+  });
 
 })();

@@ -154,6 +154,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 			Sources:   eng.SourceTracker(),
 			Adder:     eng,
 			Control:   &controllerAdapter{eng: eng},
+			Companion: newCompanionAdapter(compPub, compSub, cfg.CompanionFollowFile),
 		})
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
