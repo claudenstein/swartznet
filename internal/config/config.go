@@ -52,6 +52,11 @@ type Config struct {
 	// this node as a publisher of BEP-44 keyword-index entries
 	// (Layer D, M4).
 	IdentityPath string
+
+	// PublisherManifest is the on-disk path to the per-keyword
+	// manifest the dhtindex publisher writes. Default:
+	// ~/.local/share/swartznet/publisher.json.
+	PublisherManifest string
 }
 
 // Default returns a Config populated with sensible defaults for a normal
@@ -59,14 +64,15 @@ type Config struct {
 // the XDG Base Directory spec where possible.
 func Default() Config {
 	return Config{
-		DataDir:       defaultDataDir(),
-		ListenPort:    42069, // same as anacrolix/torrent's default; reduces port surprise
-		Seed:          true,
-		NoUpload:      false,
-		DisableDHT:    false,
-		HTTPUserAgent: "", // use anacrolix default
-		IndexDir:      defaultIndexDir(),
-		IdentityPath:  defaultIdentityPath(),
+		DataDir:           defaultDataDir(),
+		ListenPort:        42069, // same as anacrolix/torrent's default; reduces port surprise
+		Seed:              true,
+		NoUpload:          false,
+		DisableDHT:        false,
+		HTTPUserAgent:     "", // use anacrolix default
+		IndexDir:          defaultIndexDir(),
+		IdentityPath:      defaultIdentityPath(),
+		PublisherManifest: defaultPublisherManifest(),
 	}
 }
 
@@ -111,6 +117,12 @@ func defaultIndexDir() string {
 // for the persistent ed25519 publisher key.
 func defaultIdentityPath() string {
 	return filepath.Join(swartznetShareRoot(), "identity.key")
+}
+
+// defaultPublisherManifest returns the platform-appropriate default
+// path for the dhtindex publisher's per-keyword manifest.
+func defaultPublisherManifest() string {
+	return filepath.Join(swartznetShareRoot(), "publisher.json")
 }
 
 // swartznetShareRoot returns the per-user root directory SwartzNet uses for

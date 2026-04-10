@@ -9,11 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	pp "github.com/anacrolix/torrent/peer_protocol"
 
 	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/internal/dhtindex"
+	"github.com/swartznet/swartznet/internal/identity"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
@@ -39,11 +42,24 @@ type Engine struct {
 	swarm    *swarmsearch.Protocol // always non-nil after New
 	peers    *peerTracker          // addr → *torrent.PeerConn, for swarmSender
 
+	identity  *identity.Identity   // ed25519 publisher keypair, nil for tests
+	publisher *dhtindex.Publisher  // nil if no DHT or no identity
+	manifest  *dhtindex.Manifest   // owned by publisher; nil iff publisher nil
+
 	mu       sync.Mutex
 	closed   bool
 	handles  map[metainfo.Hash]*Handle
 	closeErr error
 }
+
+// Publisher returns the engine's DHT keyword publisher, or nil if
+// the engine was constructed without one (no DHT, no identity, or a
+// headless test setup).
+func (e *Engine) Publisher() *dhtindex.Publisher { return e.publisher }
+
+// Identity returns the engine's persistent ed25519 keypair, or nil
+// if no identity was loaded.
+func (e *Engine) Identity() *identity.Identity { return e.identity }
 
 // peerTracker maintains a thread-safe address → *torrent.PeerConn map.
 // Populated by the PeerConnAdded callback and cleaned by PeerConnClosed.
@@ -267,7 +283,63 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// find specific peers by address. The callbacks above and this
 	// sender share the same peerTracker instance.
 	swarm.SetSender(&swarmSender{peers: peers})
+
+	// Load (or create) the persistent identity, then start a DHT
+	// publisher backed by it. Failures here are non-fatal: a node
+	// without an identity / publisher still works for download +
+	// local search + Layer-S queries; it just doesn't push entries
+	// into the mainline DHT.
+	if cfg.IdentityPath != "" {
+		id, err := identity.LoadOrCreate(cfg.IdentityPath)
+		if err != nil {
+			log.Warn("engine.identity_load_err", "err", err)
+		} else {
+			eng.identity = id
+			log.Info("engine.identity_loaded", "pubkey", id.PublicKeyHex())
+			if err := eng.startPublisher(); err != nil {
+				log.Warn("engine.publisher_start_err", "err", err)
+			}
+		}
+	}
 	return eng, nil
+}
+
+// startPublisher constructs the DHT keyword publisher if conditions
+// are met (an identity is loaded, the underlying torrent client
+// exposes an anacrolix DHT server). Called once from engine.New.
+func (e *Engine) startPublisher() error {
+	if e.identity == nil {
+		return errors.New("engine: no identity")
+	}
+	srv := e.dhtServer()
+	if srv == nil {
+		return errors.New("engine: no anacrolix DHT server available")
+	}
+	put, err := dhtindex.NewAnacrolixPutter(srv, e.identity.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("engine: new anacrolix putter: %w", err)
+	}
+	mf, err := dhtindex.LoadOrCreateManifest(e.cfg.PublisherManifest)
+	if err != nil {
+		return fmt.Errorf("engine: load publisher manifest: %w", err)
+	}
+	e.manifest = mf
+	e.publisher = dhtindex.NewPublisher(put, mf, dhtindex.DefaultPublisherOptions(), e.log)
+	e.publisher.Start()
+	e.log.Info("engine.publisher_started", "manifest", e.cfg.PublisherManifest)
+	return nil
+}
+
+// dhtServer fishes the *dht.Server out of the anacrolix Client by
+// type-asserting through the AnacrolixDhtServerWrapper. Returns nil
+// if no anacrolix DHT server is registered (e.g. DisableDHT was set).
+func (e *Engine) dhtServer() *dht.Server {
+	for _, ds := range e.client.DhtServers() {
+		if w, ok := ds.(torrent.AnacrolixDhtServerWrapper); ok {
+			return w.Server
+		}
+	}
+	return nil
 }
 
 // AddMagnet queues a magnet URI for download. The returned Handle exposes a
@@ -370,6 +442,10 @@ func (e *Engine) ingestFileEvents(h *Handle) {
 // torrent-level document into the attached *indexer.Index. If no index is
 // attached, this is a no-op. Runs in a background goroutine; the waiting
 // path is cancelled if Close is called on the engine.
+//
+// As a side effect, this also Submits a publish task to the dhtindex
+// publisher (Layer D) so the torrent's keywords get pushed to the
+// mainline DHT.
 func (e *Engine) autoIndex(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
@@ -380,23 +456,37 @@ func (e *Engine) autoIndex(h *Handle) {
 
 	e.mu.Lock()
 	idx := e.idx
+	pub := e.publisher
 	closed := e.closed
 	e.mu.Unlock()
-	if idx == nil || closed {
+	if closed {
 		return
 	}
 
 	doc := indexerDocFromTorrent(h.T)
-	if err := idx.IndexTorrent(doc); err != nil {
-		e.log.Warn("indexer.index_failed", "info_hash", doc.InfoHash, "err", err)
-		return
+
+	if idx != nil {
+		if err := idx.IndexTorrent(doc); err != nil {
+			e.log.Warn("indexer.index_failed", "info_hash", doc.InfoHash, "err", err)
+		} else {
+			e.log.Info("indexer.indexed",
+				"info_hash", doc.InfoHash,
+				"name", doc.Name,
+				"files", doc.FileCount,
+				"size", doc.SizeBytes,
+			)
+		}
 	}
-	e.log.Info("indexer.indexed",
-		"info_hash", doc.InfoHash,
-		"name", doc.Name,
-		"files", doc.FileCount,
-		"size", doc.SizeBytes,
-	)
+
+	if pub != nil {
+		ihBytes := h.T.InfoHash()
+		pub.Submit(dhtindex.PublishTask{
+			InfoHash:  ihBytes[:],
+			Name:      doc.Name,
+			FileCount: doc.FileCount,
+			SizeBytes: doc.SizeBytes,
+		})
+	}
 }
 
 // indexerDocFromTorrent extracts a TorrentDoc from a live anacrolix/torrent
@@ -449,6 +539,11 @@ func (e *Engine) Close() error {
 		// Stop the pipeline first so in-flight extracts finish before the
 		// underlying torrent.Client's storage shuts down underneath them.
 		e.pipeline.Stop()
+	}
+	if e.publisher != nil {
+		// Stop the publisher next so any in-flight Put traversal finishes
+		// before the DHT server is torn down by Client.Close.
+		e.publisher.Stop()
 	}
 	for _, h := range e.handles {
 		h.pieceSub.Close()
