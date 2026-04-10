@@ -18,6 +18,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="search">Search</button>
     <button class="tab" data-tab="add">Add torrent</button>
+    <button class="tab" data-tab="downloads">Downloads</button>
     <button class="tab" data-tab="status">Status</button>
     <button class="tab" data-tab="settings">Sharing</button>
   </nav>
@@ -62,6 +63,16 @@
         index automatically.
       </p>
       <div id="add-result"></div>
+    </section>
+
+    <!-- ===================== DOWNLOADS ===================== -->
+    <section class="panel hidden" id="panel-downloads">
+      <p class="hint">Active torrents in this daemon. Live progress
+      with pause/resume/remove controls. Polls every 2 seconds while
+      this tab is visible.</p>
+      <div id="downloads-list">
+        <p class="hint">loading…</p>
+      </div>
     </section>
 
     <!-- ===================== STATUS ===================== -->
