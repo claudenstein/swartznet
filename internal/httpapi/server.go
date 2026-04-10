@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/swartznet/swartznet/internal/dhtindex"
+	"github.com/swartznet/swartznet/internal/httpapi/web"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
@@ -104,6 +106,20 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("POST /confirm", s.handleConfirm)
 	mux.HandleFunc("POST /flag", s.handleFlag)
+
+	// Web UI: serve the embedded index.html at / and the
+	// static assets at /static/. The HTTP API endpoints above
+	// are registered first so they take precedence over the
+	// catch-all root handler.
+	if assetsFS, err := fs.Sub(web.Assets(), "."); err == nil {
+		fileServer := http.FileServer(http.FS(assetsFS))
+		mux.Handle("GET /static/", fileServer)
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFileFS(w, r, assetsFS, "index.html")
+		})
+	} else {
+		s.log.Warn("httpapi.web_assets_unavailable", "err", err)
+	}
 
 	srv := &http.Server{
 		Handler:     mux,
@@ -511,7 +527,16 @@ func (s *Server) handleFlag(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(FlagResponse{OK: true, InfoHash: req.InfoHash})
 }
 
+// HealthzVersion is overridden by the swartznet binary at build
+// time so /healthz can report the running version. Defaults to a
+// dev placeholder when the field is not set.
+var HealthzVersion = ""
+
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"ok":true}`))
+	type healthzBody struct {
+		OK      bool   `json:"ok"`
+		Version string `json:"version,omitempty"`
+	}
+	_ = json.NewEncoder(w).Encode(healthzBody{OK: true, Version: HealthzVersion})
 }

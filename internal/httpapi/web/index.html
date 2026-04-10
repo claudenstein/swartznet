@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwartzNet</title>
+  <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+  <header>
+    <h1>SwartzNet</h1>
+    <div class="header-meta">
+      <span id="health-badge" class="badge badge-unknown">checking…</span>
+      <span class="version" id="version-text"></span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="search">Search</button>
+    <button class="tab" data-tab="add">Add torrent</button>
+    <button class="tab" data-tab="status">Status</button>
+    <button class="tab" data-tab="settings">Sharing</button>
+  </nav>
+
+  <main>
+    <!-- ===================== SEARCH ===================== -->
+    <section class="panel" id="panel-search">
+      <form id="search-form" autocomplete="off">
+        <input type="text" id="search-query" name="q"
+               placeholder="search torrent names, files, contents…"
+               aria-label="search query" required>
+        <div class="search-options">
+          <label><input type="checkbox" id="opt-swarm"> swarm peers</label>
+          <label><input type="checkbox" id="opt-dht"> DHT</label>
+          <label>limit
+            <input type="number" id="opt-limit" value="20" min="1" max="100">
+          </label>
+          <button type="submit">Search</button>
+        </div>
+      </form>
+
+      <div class="results" id="results">
+        <p class="hint">Type a query above and press Search. Local results
+        appear instantly; the swarm and DHT layers are opt-in.</p>
+      </div>
+    </section>
+
+    <!-- ===================== ADD ===================== -->
+    <section class="panel hidden" id="panel-add">
+      <form id="add-form" autocomplete="off">
+        <label>
+          Magnet URI
+          <input type="text" id="add-uri"
+                 placeholder="magnet:?xt=urn:btih:…"
+                 aria-label="magnet uri" required>
+        </label>
+        <button type="submit">Add</button>
+      </form>
+      <p class="hint">
+        The torrent will start downloading in the background and its
+        metadata + extracted file content will be added to the local
+        index automatically.
+      </p>
+      <div id="add-result"></div>
+    </section>
+
+    <!-- ===================== STATUS ===================== -->
+    <section class="panel hidden" id="panel-status">
+      <p class="hint">Live snapshot of the daemon's three layers and
+      the spam-resistance state. Refreshes every few seconds.</p>
+      <div id="status-display">
+        <p class="hint">loading…</p>
+      </div>
+    </section>
+
+    <!-- ===================== SETTINGS / SHARING ===================== -->
+    <section class="panel hidden" id="panel-settings">
+      <h2>What you share with peers</h2>
+      <p class="hint">
+        These toggles control how much of your local index is exposed
+        to other SwartzNet peers via the <code>sn_search</code>
+        BEP-10 extension. None of these settings affect the local
+        HTTP API (which always stays on localhost) or the Layer-D
+        DHT publisher (which is controlled separately by the
+        <code>--no-dht</code> flag at startup).
+      </p>
+
+      <fieldset id="cap-fieldset">
+        <legend>sn_search capability level</legend>
+        <label>
+          <input type="radio" name="cap-share" value="0">
+          <strong>L0 — Don't answer search queries from peers at all.</strong>
+          You can still query other peers; they just can't query you.
+        </label>
+        <label>
+          <input type="radio" name="cap-share" value="1">
+          <strong>L1 — Answer only for torrents we are currently in the swarm of.</strong>
+          Peers can ask you about torrents you and they share.
+        </label>
+        <label>
+          <input type="radio" name="cap-share" value="2" checked>
+          <strong>L2 — Answer for the entire local index. (default)</strong>
+          Peers can search anything you have indexed.
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Hit-level details</legend>
+        <label>
+          <input type="checkbox" id="cap-files">
+          Include file-list matches in responses (BEP-52 file paths)
+        </label>
+        <label>
+          <input type="checkbox" id="cap-content">
+          Include content-level matches (extracted text snippets)
+        </label>
+      </fieldset>
+
+      <button id="cap-save">Save sharing settings</button>
+      <p id="cap-saved" class="hint"></p>
+    </section>
+  </main>
+
+  <footer>
+    <a href="https://github.com/claudenstein/swartznet">github.com/claudenstein/swartznet</a>
+  </footer>
+
+  <script src="static/app.js"></script>
+</body>
+</html>

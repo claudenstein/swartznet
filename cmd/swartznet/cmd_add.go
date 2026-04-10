@@ -86,8 +86,12 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	// another terminal can talk to this running daemon. Empty
 	// --api-addr disables it entirely. The API now also exposes
 	// the M4 publisher and DHT lookup so search --dht and the
-	// status command both work end-to-end.
+	// status command both work end-to-end. Browse to
+	// http://localhost:7654/ for the bundled web UI.
 	if apiAddr != "" {
+		// Hand the running version to /healthz so the web UI
+		// badge can show it.
+		httpapi.HealthzVersion = Version
 		api := httpapi.NewWithOptions(apiAddr, log, httpapi.Options{
 			Index:     idx,
 			Swarm:     eng.SwarmSearch(),
