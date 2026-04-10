@@ -56,6 +56,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "add":
 		return cmdAdd(rest, stdout, stderr)
+	case "search":
+		return cmdSearch(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -71,14 +73,21 @@ Usage:
 
 Commands:
   add <magnet-uri | path.torrent>   Add a torrent and start downloading (Ctrl-C to stop).
+  search <query...>                 Search the local Bleve index.
   version                           Print the version and exit.
   help                              Print this message.
 
 Flags for 'add':
   --data-dir <path>   Override the data directory (default: ~/.local/share/swartznet/data).
+  --index-dir <path>  Override the Bleve index directory.
   --port <int>        Override the listen port (default: 42069, 0 = OS-assigned).
   --no-dht            Disable the mainline DHT.
   --leech-only        Do not upload to peers (debugging only).
+
+Flags for 'search':
+  --index-dir <path>  Override the Bleve index directory.
+  --limit N           Max results (default: 20).
+  --json              Emit JSON instead of text.
 
 Documentation:
   Research reports and the full design are in the docs/ directory.

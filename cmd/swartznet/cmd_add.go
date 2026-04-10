@@ -10,6 +10,7 @@ import (
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
+	"github.com/swartznet/swartznet/internal/indexer"
 )
 
 // cmdAdd implements `swartznet add <magnet-uri | path.torrent>`.
@@ -23,14 +24,18 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var (
 		dataDir   string
+		indexDir  string
 		port      int
 		noDHT     bool
 		leechOnly bool
+		noIndex   bool
 	)
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for downloaded content")
+	fs.StringVar(&indexDir, "index-dir", "", "Bleve index directory (default: ~/.local/share/swartznet/index)")
 	fs.IntVar(&port, "port", -1, "listen port (0 = OS-assigned)")
 	fs.BoolVar(&noDHT, "no-dht", false, "disable the mainline DHT")
 	fs.BoolVar(&leechOnly, "leech-only", false, "disable uploading (debug)")
+	fs.BoolVar(&noIndex, "no-index", false, "don't write this torrent to the local index")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -43,6 +48,9 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	cfg := config.Default()
 	if dataDir != "" {
 		cfg.DataDir = dataDir
+	}
+	if indexDir != "" {
+		cfg.IndexDir = indexDir
 	}
 	if port >= 0 {
 		cfg.ListenPort = port
@@ -59,6 +67,15 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		return reportRunErr(err, stderr)
 	}
 	defer func() { _ = eng.Close() }()
+
+	if !noIndex {
+		idx, err := indexer.Open(cfg.IndexDir)
+		if err != nil {
+			return reportRunErr(fmt.Errorf("open index: %w", err), stderr)
+		}
+		defer idx.Close()
+		eng.SetIndex(idx)
+	}
 
 	h, err := addTorrent(eng, target)
 	if err != nil {

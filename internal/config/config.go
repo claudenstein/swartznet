@@ -40,6 +40,11 @@ type Config struct {
 	// HTTPUserAgent overrides the HTTP user-agent string sent to trackers.
 	// Leave empty to use anacrolix/torrent's default.
 	HTTPUserAgent string
+
+	// IndexDir is the filesystem directory where the local Bleve full-text
+	// index is stored. It is created if missing. Default:
+	// ~/.local/share/swartznet/index.
+	IndexDir string
 }
 
 // Default returns a Config populated with sensible defaults for a normal
@@ -53,12 +58,13 @@ func Default() Config {
 		NoUpload:      false,
 		DisableDHT:    false,
 		HTTPUserAgent: "", // use anacrolix default
+		IndexDir:      defaultIndexDir(),
 	}
 }
 
 // Validate checks invariants that cannot be enforced by the type system and
-// creates the DataDir if it doesn't already exist. Returns a non-nil error if
-// the Config cannot be used.
+// creates the DataDir and IndexDir if they don't already exist. Returns a
+// non-nil error if the Config cannot be used.
 func (c *Config) Validate() error {
 	if c.DataDir == "" {
 		return fmt.Errorf("config: DataDir must not be empty")
@@ -69,6 +75,12 @@ func (c *Config) Validate() error {
 	if err := os.MkdirAll(c.DataDir, 0o755); err != nil {
 		return fmt.Errorf("config: cannot create DataDir %q: %w", c.DataDir, err)
 	}
+	if c.IndexDir != "" {
+		// IndexDir's parent must exist; Bleve itself creates the leaf.
+		if err := os.MkdirAll(filepath.Dir(c.IndexDir), 0o755); err != nil {
+			return fmt.Errorf("config: cannot create parent of IndexDir %q: %w", c.IndexDir, err)
+		}
+	}
 	return nil
 }
 
@@ -78,11 +90,23 @@ func (c *Config) Validate() error {
 //  2. $HOME/.local/share/swartznet/data  (Linux/XDG fallback)
 //  3. ./swartznet-data  (last resort if HOME is unset)
 func defaultDataDir() string {
+	return filepath.Join(swartznetShareRoot(), "data")
+}
+
+// defaultIndexDir returns the platform-appropriate default Bleve index dir.
+// It sits next to DataDir under the shared SwartzNet share root.
+func defaultIndexDir() string {
+	return filepath.Join(swartznetShareRoot(), "index")
+}
+
+// swartznetShareRoot returns the per-user root directory SwartzNet uses for
+// all its persistent state (torrent data, index, later keys + reputation db).
+func swartznetShareRoot() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "swartznet", "data")
+		return filepath.Join(xdg, "swartznet")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".local", "share", "swartznet", "data")
+		return filepath.Join(home, ".local", "share", "swartznet")
 	}
-	return "./swartznet-data"
+	return "./swartznet-state"
 }

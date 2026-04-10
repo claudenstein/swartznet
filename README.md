@@ -13,8 +13,11 @@ research and design documents that motivate the architecture.
 | Milestone | Status | What works |
 |---|---|---|
 | **Research & design** | ✅ Complete | Five reports in `docs/` totalling ~4,400 lines. |
-| **M1 — Go scaffold + engine smoke test** | 🚧 In progress | Minimal CLI wraps `anacrolix/torrent`, adds a magnet link, downloads and seeds. |
-| M2 — Local Bleve index (Layer L) | Planned | Piece-complete hook → text extractor → local full-text index. |
+| **M1 — Go scaffold + engine smoke test** | ✅ Complete | Minimal CLI wraps `anacrolix/torrent`, adds a magnet link, downloads and seeds. Engine wrapper exposes the extension hooks M2/M3 depend on. |
+| **M2.0 — Torrent-level metadata index (Layer L start)** | ✅ Complete | Bleve full-text index auto-populated on torrent add; `swartznet search <query>` works over torrent names, file paths, and trackers. |
+| M2.1 — Piece-to-file completion tracker | 🚧 Next | File-complete events synthesised from the piece-state subscription. |
+| M2.2 — Text extractors + file-content indexing | Planned | Plain text, subtitle, source code extractors feed Bleve with actual file contents. |
+| M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
 | M5 — Spam resistance | Planned | Per-pubkey reputation + client-side Bloom filter. |
@@ -69,15 +72,30 @@ go build ./cmd/swartznet
 ./swartznet --help
 ```
 
-## Running (M1)
+## Running
 
 ```bash
 # Add and download a torrent from a magnet link, seed on completion.
+# The torrent's metadata (name, files, trackers) is automatically written
+# to the local Bleve index as soon as it arrives from the swarm.
 ./swartznet add "magnet:?xt=urn:btih:..."
 
-# See current swarm status.
-./swartznet status
+# Search the local index. Supports Bleve's query-string syntax:
+#     ubuntu              -- bag-of-words match
+#     "ubuntu 24.04"      -- phrase match
+#     name:debian         -- fielded query
+#     ubuntu -server      -- boolean exclusion
+./swartznet search ubuntu
+./swartznet search --json --limit 50 "ubuntu 24.04"
+
+# Print the version.
+./swartznet version
 ```
+
+Defaults:
+- Downloaded data:  `~/.local/share/swartznet/data`
+- Local search index: `~/.local/share/swartznet/index`
+- Both honour `$XDG_DATA_HOME`; both can be overridden with `--data-dir` / `--index-dir`.
 
 More commands will be added as milestones land.
 

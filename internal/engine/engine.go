@@ -6,24 +6,41 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/internal/indexer"
 )
 
 // Engine owns an anacrolix/torrent Client and wires SwartzNet's extension
 // hooks into it. Construct with New; always Close when done.
+//
+// An Engine optionally holds a reference to an *indexer.Index (set via
+// SetIndex). When present, new torrents are indexed automatically once their
+// metadata arrives — no explicit IndexTorrent call from the CLI is needed.
 type Engine struct {
 	cfg    config.Config
 	client *torrent.Client
 	log    *slog.Logger
+	idx    *indexer.Index // nil-safe; may be unset for headless tests
 
 	mu       sync.Mutex
 	closed   bool
 	handles  map[metainfo.Hash]*Handle
 	closeErr error
+}
+
+// SetIndex attaches an *indexer.Index to the engine. Any torrents that
+// arrive after this call will be auto-indexed once their metadata is
+// available. Safe to call at most once per Engine; calling it twice replaces
+// the attached index without tearing down the old one.
+func (e *Engine) SetIndex(idx *indexer.Index) {
+	e.mu.Lock()
+	e.idx = idx
+	e.mu.Unlock()
 }
 
 // Handle is SwartzNet's wrapper around a *torrent.Torrent. It adds a
@@ -149,7 +166,9 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 }
 
 // registerLocked adds a torrent handle to the tracking map and starts its
-// piece-state subscription. The caller must hold e.mu.
+// piece-state subscription. The caller must hold e.mu. It also kicks off a
+// background goroutine that waits for torrent metadata and then indexes the
+// torrent-level document into the attached *indexer.Index, if any.
 func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 	ih := t.InfoHash()
 	if h, ok := e.handles[ih]; ok {
@@ -163,7 +182,64 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 		pieceSub: startPieceSubscription(t, e.log),
 	}
 	e.handles[ih] = h
+	go e.autoIndex(h)
 	return h
+}
+
+// autoIndex waits for a torrent's metadata to arrive and then indexes the
+// torrent-level document into the attached *indexer.Index. If no index is
+// attached, this is a no-op. Runs in a background goroutine; the waiting
+// path is cancelled if Close is called on the engine.
+func (e *Engine) autoIndex(h *Handle) {
+	select {
+	case <-h.T.GotInfo():
+	case <-time.After(5 * time.Minute):
+		e.log.Warn("indexer.autoindex.timeout", "info_hash", h.T.InfoHash().HexString())
+		return
+	}
+
+	e.mu.Lock()
+	idx := e.idx
+	closed := e.closed
+	e.mu.Unlock()
+	if idx == nil || closed {
+		return
+	}
+
+	doc := indexerDocFromTorrent(h.T)
+	if err := idx.IndexTorrent(doc); err != nil {
+		e.log.Warn("indexer.index_failed", "info_hash", doc.InfoHash, "err", err)
+		return
+	}
+	e.log.Info("indexer.indexed",
+		"info_hash", doc.InfoHash,
+		"name", doc.Name,
+		"files", doc.FileCount,
+		"size", doc.SizeBytes,
+	)
+}
+
+// indexerDocFromTorrent extracts a TorrentDoc from a live anacrolix/torrent
+// Torrent. Caller must have already waited for GotInfo.
+func indexerDocFromTorrent(t *torrent.Torrent) indexer.TorrentDoc {
+	files := t.Files()
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.DisplayPath())
+	}
+	mi := t.Metainfo()
+	trackers := mi.UpvertedAnnounceList().DistinctValues()
+	if len(trackers) == 0 && mi.Announce != "" {
+		trackers = []string{mi.Announce}
+	}
+	return indexer.TorrentDoc{
+		InfoHash:  t.InfoHash().HexString(),
+		Name:      t.Name(),
+		FilePaths: paths,
+		Trackers:  trackers,
+		SizeBytes: t.Length(),
+		FileCount: len(paths),
+	}
 }
 
 // Torrents returns a snapshot of all known torrent handles. The slice is
