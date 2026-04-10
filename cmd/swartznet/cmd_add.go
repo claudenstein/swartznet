@@ -93,6 +93,8 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 			Swarm:     eng.SwarmSearch(),
 			Publisher: eng.Publisher(),
 			Lookup:    eng.Lookup(),
+			Bloom:     eng.KnownGoodBloom(),
+			Tracker:   eng.ReputationTracker(),
 		})
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
@@ -25,6 +27,8 @@ type Server struct {
 	swarm     *swarmsearch.Protocol
 	publisher *dhtindex.Publisher
 	lookup    *dhtindex.Lookup
+	bloom     *reputation.BloomFilter
+	tracker   *reputation.Tracker
 	timeout   time.Duration
 
 	httpServer *http.Server
@@ -39,6 +43,8 @@ type Options struct {
 	Swarm     *swarmsearch.Protocol
 	Publisher *dhtindex.Publisher
 	Lookup    *dhtindex.Lookup
+	Bloom     *reputation.BloomFilter
+	Tracker   *reputation.Tracker
 }
 
 // New constructs a Server with the legacy index+swarm signature.
@@ -65,6 +71,8 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		swarm:     opts.Swarm,
 		publisher: opts.Publisher,
 		lookup:    opts.Lookup,
+		bloom:     opts.Bloom,
+		tracker:   opts.Tracker,
 		timeout:   10 * time.Second,
 	}
 }
@@ -94,6 +102,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /search", s.handleSearch)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("POST /confirm", s.handleConfirm)
+	mux.HandleFunc("POST /flag", s.handleFlag)
 
 	srv := &http.Server{
 		Handler:     mux,
@@ -312,12 +322,37 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // StatusResponse is the JSON body returned from GET /status. It
-// summarises the running daemon's local index, swarm peer set, and
-// DHT publisher state.
+// summarises the running daemon's local index, swarm peer set,
+// DHT publisher state, and the M5 spam-resistance helpers.
 type StatusResponse struct {
-	Local     LocalStatus     `json:"local"`
-	Swarm     SwarmStatus     `json:"swarm"`
-	Publisher PublisherStatus `json:"publisher"`
+	Local      LocalStatus      `json:"local"`
+	Swarm      SwarmStatus      `json:"swarm"`
+	Publisher  PublisherStatus  `json:"publisher"`
+	Bloom      *BloomStatus     `json:"bloom,omitempty"`
+	Reputation *ReputationStat  `json:"reputation,omitempty"`
+}
+
+// BloomStatus is the M5 known-good Bloom filter view.
+type BloomStatus struct {
+	BitSize        uint64  `json:"bit_size"`
+	HashFunctions  uint64  `json:"hash_functions"`
+	PopulationBits uint64  `json:"population_bits"`
+	EstimatedItems float64 `json:"estimated_items"`
+}
+
+// ReputationStat is the M5 per-pubkey reputation summary.
+type ReputationStat struct {
+	KnownIndexers int                        `json:"known_indexers"`
+	TopIndexers   []ReputationIndexerSummary `json:"top_indexers,omitempty"`
+}
+
+// ReputationIndexerSummary is one row of the top-N indexer table.
+type ReputationIndexerSummary struct {
+	PubKey        string  `json:"pubkey"`
+	Score         float64 `json:"score"`
+	HitsReturned  int     `json:"hits_returned"`
+	HitsConfirmed int     `json:"hits_confirmed"`
+	HitsFlagged   int     `json:"hits_flagged"`
 }
 
 type LocalStatus struct {
@@ -375,9 +410,105 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			out.Publisher.Keywords = append(out.Publisher.Keywords, entry)
 		}
 	}
+	if s.bloom != nil {
+		out.Bloom = &BloomStatus{
+			BitSize:        s.bloom.Bits(),
+			HashFunctions:  s.bloom.HashFunctions(),
+			PopulationBits: s.bloom.PopulationCount(),
+			EstimatedItems: s.bloom.EstimatedItems(),
+		}
+	}
+	if s.tracker != nil {
+		snap := s.tracker.Snapshot()
+		rep := &ReputationStat{KnownIndexers: len(snap)}
+		topN := snap
+		if len(topN) > 10 {
+			topN = topN[:10]
+		}
+		for _, e := range topN {
+			rep.TopIndexers = append(rep.TopIndexers, ReputationIndexerSummary{
+				PubKey:        string(e.PubKey),
+				Score:         e.Score,
+				HitsReturned:  e.Counters.HitsReturned,
+				HitsConfirmed: e.Counters.HitsConfirmed,
+				HitsFlagged:   e.Counters.HitsFlagged,
+			})
+		}
+		out.Reputation = rep
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// FlagRequest / ConfirmRequest is the JSON body for the
+// POST /flag and POST /confirm endpoints respectively. Both take
+// a single 40-char hex infohash; the rest of the work happens
+// inside the engine.
+type FlagRequest struct {
+	InfoHash string `json:"infohash"`
+}
+
+type ConfirmRequest = FlagRequest
+
+// FlagResponse is the JSON body returned from /flag and /confirm.
+type FlagResponse struct {
+	OK       bool   `json:"ok"`
+	InfoHash string `json:"infohash"`
+}
+
+func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
+	var req ConfirmRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	ih, err := hex.DecodeString(req.InfoHash)
+	if err != nil || len(ih) != 20 {
+		http.Error(w, "infohash must be 40 hex characters", http.StatusBadRequest)
+		return
+	}
+	if s.bloom == nil {
+		http.Error(w, "bloom filter not configured", http.StatusServiceUnavailable)
+		return
+	}
+	s.bloom.Add(ih)
+	s.log.Info("httpapi.confirm", "infohash", req.InfoHash)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(FlagResponse{OK: true, InfoHash: req.InfoHash})
+}
+
+func (s *Server) handleFlag(w http.ResponseWriter, r *http.Request) {
+	var req FlagRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	ih, err := hex.DecodeString(req.InfoHash)
+	if err != nil || len(ih) != 20 {
+		http.Error(w, "infohash must be 40 hex characters", http.StatusBadRequest)
+		return
+	}
+	if s.tracker == nil {
+		http.Error(w, "reputation tracker not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// We don't have a per-infohash → indexer-pubkey association
+	// stored at the API layer; the M5d simple version flags
+	// against EVERY known indexer, which is the safest fallback
+	// because it forces user-flagged content to drag down every
+	// publisher claiming the hit. M6 will track per-hit sources
+	// and flag only the indexer(s) that actually returned this
+	// infohash.
+	snap := s.tracker.Snapshot()
+	pks := make([]reputation.PubKeyHex, 0, len(snap))
+	for _, e := range snap {
+		pks = append(pks, e.PubKey)
+	}
+	s.tracker.RecordFlagged(pks...)
+	s.log.Info("httpapi.flag", "infohash", req.InfoHash, "indexers", len(pks))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(FlagResponse{OK: true, InfoHash: req.InfoHash})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

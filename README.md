@@ -25,7 +25,8 @@ research and design documents that motivate the architecture.
 | **M3c — Outbound Query fan-out + result aggregation** | ✅ Complete | `Protocol.Query()` generates a monotonic txid, fans the query out to every known search-capable peer via the `swarmSender`, collects responses on a per-query channel, and merges by infohash with per-peer source attribution. Honors context cancellation + per-query timeout. |
 | **M3d — CLI `--swarm` flag + local HTTP API** | ✅ Complete | `swartznet add` starts a loopback-only HTTP API on `localhost:7654`; `swartznet search --swarm` POSTs to it to run combined local + swarm search against the running daemon. JSON and text output modes both supported. |
 | **M4 — BEP-44 keyword publisher (Layer D)** | ✅ Complete | Persistent ed25519 publisher identity, keyword tokenizer, BEP-44 mutable-item put/get wrapper, publisher worker with on-disk shard manifest, parallel lookup fan-out across known indexer pubkeys, `swartznet search --dht`, and `swartznet status`. |
-| M5 — Spam resistance | 🚧 Next | Per-pubkey reputation + client-side Bloom filter of known-good infohashes. |
+| **M5 — Spam resistance** | ✅ Complete | Persistent Bloom filter of known-good infohashes (1M items @ 1% FP, ~1.2 MB), Bayesian-smoothed per-pubkey reputation tracker, lookup auto-skips low-reputation indexers, Bloom-hit results boost to the top, auto-confirm on download completion, `swartznet flag/confirm` CLI commands. |
+| M6 — EPUB / DOCX / ODT extractors | 🚧 Next | Additional binary-format extractors alongside the existing PDF backend. |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
@@ -113,8 +114,18 @@ go build ./cmd/swartznet
 # lookup against every known indexer pubkey alongside the swarm path.
 ./swartznet search --swarm --dht ubuntu
 
-# Snapshot of the running daemon's index, peer set, and DHT publisher.
+# Snapshot of the running daemon's index, peer set, DHT publisher,
+# Bloom filter population, and per-pubkey reputation table.
 ./swartznet status
+
+# Mark an infohash as known-good. Boosts it in future DHT lookups.
+# (Auto-confirm runs on every successful download — usually you do
+# not need to call this manually.)
+./swartznet confirm <40-char-hex-infohash>
+
+# Mark an infohash as spam. Lowers the reputation of every indexer
+# pubkey that has been associated with it.
+./swartznet flag <40-char-hex-infohash>
 
 # Print the version.
 ./swartznet version

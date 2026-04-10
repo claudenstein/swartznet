@@ -459,7 +459,42 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 	e.handles[ih] = h
 	go e.autoIndex(h)
 	go e.ingestFileEvents(h)
+	go e.autoConfirmOnComplete(h)
 	return h
+}
+
+// autoConfirmOnComplete waits for a torrent to finish downloading
+// and, if a known-good Bloom filter is wired in, adds the torrent's
+// infohash to it. Successful downloads are the strongest possible
+// "this hit was real" signal — every infohash a user actually fetches
+// gets a permanent boost in future Layer-D queries.
+//
+// The goroutine exits if the engine is closed before the torrent
+// completes.
+func (e *Engine) autoConfirmOnComplete(h *Handle) {
+	complete := h.T.Complete().On()
+	select {
+	case <-complete:
+	case <-time.After(24 * time.Hour):
+		// Long timeout: better to leak the goroutine than to hang
+		// forever waiting on a torrent that never completes.
+		return
+	}
+
+	e.mu.Lock()
+	bf := e.bloom
+	closed := e.closed
+	e.mu.Unlock()
+	if closed || bf == nil {
+		return
+	}
+
+	ih := h.T.InfoHash()
+	bf.Add(ih[:])
+	e.log.Info("engine.bloom.auto_confirmed",
+		"info_hash", ih.HexString(),
+		"name", h.T.Name(),
+	)
 }
 
 // ingestFileEvents drains a Handle's FileEvents() channel and submits each

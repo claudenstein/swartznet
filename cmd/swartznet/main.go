@@ -60,6 +60,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSearch(rest, stdout, stderr)
 	case "status":
 		return cmdStatus(rest, stdout, stderr)
+	case "flag":
+		return cmdFlag(rest, stdout, stderr)
+	case "confirm":
+		return cmdConfirm(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -77,6 +81,8 @@ Commands:
   add <magnet-uri | path.torrent>   Add a torrent and start downloading (Ctrl-C to stop).
   search <query...>                 Search the local index, swarm peers, and/or DHT.
   status                            Show the running daemon's index/swarm/publisher state.
+  confirm <infohash>                Mark an infohash as known-good (boosts it in DHT lookups).
+  flag <infohash>                   Mark an infohash as spam (lowers reputation of every claiming indexer).
   version                           Print the version and exit.
   help                              Print this message.
 
