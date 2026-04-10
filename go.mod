@@ -1,12 +1,11 @@
 module github.com/swartznet/swartznet
 
-go 1.24.0
-
-toolchain go1.24.1
+go 1.24.1
 
 require (
 	github.com/anacrolix/torrent v1.61.0
 	github.com/blevesearch/bleve/v2 v2.5.7
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 )
 
 require (
