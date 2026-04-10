@@ -34,26 +34,30 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 		limit       int
 		asJSON      bool
 		useSwarm    bool
+		useDHT      bool
 		apiAddr     string
 		swarmTimeMs int
+		dhtTimeMs   int
 	)
 	fs.StringVar(&indexDir, "index-dir", "", "path to the Bleve index (default: ~/.local/share/swartznet/index)")
 	fs.IntVar(&limit, "limit", 20, "maximum results to return")
 	fs.BoolVar(&asJSON, "json", false, "emit JSON instead of text")
 	fs.BoolVar(&useSwarm, "swarm", false, "also query search-capable peers (requires a running `swartznet add` daemon)")
+	fs.BoolVar(&useDHT, "dht", false, "also query the BEP-44 DHT keyword index across known indexer pubkeys")
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	fs.IntVar(&swarmTimeMs, "swarm-timeout-ms", 2000, "swarm fan-out timeout in milliseconds")
+	fs.IntVar(&dhtTimeMs, "dht-timeout-ms", 5000, "DHT lookup timeout in milliseconds")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
 	if fs.NArg() == 0 {
-		fmt.Fprintln(stderr, "usage: swartznet search [--limit N] [--json] [--swarm] <query...>")
+		fmt.Fprintln(stderr, "usage: swartznet search [--limit N] [--json] [--swarm] [--dht] <query...>")
 		return exitUsage
 	}
 	query := strings.Join(fs.Args(), " ")
 
-	if useSwarm {
-		return cmdSearchViaAPI(stdout, stderr, apiAddr, query, limit, swarmTimeMs, asJSON)
+	if useSwarm || useDHT {
+		return cmdSearchViaAPI(stdout, stderr, apiAddr, query, limit, swarmTimeMs, dhtTimeMs, useSwarm, useDHT, asJSON)
 	}
 
 	// Direct local-only path: open the Bleve index in-process.
@@ -80,19 +84,22 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdSearchViaAPI talks to a running `swartznet add` daemon over the
-// local HTTP API to run a combined local + swarm search.
-func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swarmTimeoutMs int, asJSON bool) int {
+// local HTTP API to run a combined local + swarm + DHT search.
+func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swarmTimeoutMs, dhtTimeoutMs int, useSwarm, useDHT bool, asJSON bool) int {
 	body, err := json.Marshal(httpapi.SearchRequest{
 		Q:              query,
 		Limit:          limit,
-		Swarm:          true,
+		Swarm:          useSwarm,
+		DHT:            useDHT,
 		SwarmTimeoutMs: swarmTimeoutMs,
+		DHTTimeoutMs:   dhtTimeoutMs,
 	})
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(swarmTimeoutMs+2000)*time.Millisecond)
+	deadline := swarmTimeoutMs + dhtTimeoutMs + 2000
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(deadline)*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+apiAddr+"/search", bytes.NewReader(body))
 	if err != nil {
@@ -130,8 +137,8 @@ func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swa
 	return emitSwarmText(stdout, &apiResp, query)
 }
 
-// emitSwarmText prints a combined local + swarm result set in the
-// human-readable text format.
+// emitSwarmText prints a combined local + swarm + DHT result set in
+// the human-readable text format.
 func emitSwarmText(w io.Writer, res *httpapi.SearchResponse, query string) int {
 	fmt.Fprintf(w, "Query: %s\n", query)
 	fmt.Fprintf(w, "Local: %d hits\n", res.Local.Total)
@@ -142,26 +149,49 @@ func emitSwarmText(w io.Writer, res *httpapi.SearchResponse, query string) int {
 			fmt.Fprintf(w, "Swarm error: %s\n", res.Swarm.Error)
 		}
 	}
+	if res.DHT != nil {
+		fmt.Fprintf(w, "DHT:   asked=%d, responded=%d, hits=%d\n",
+			res.DHT.IndexersAsked, res.DHT.IndexersResponded, len(res.DHT.Hits))
+		if res.DHT.Error != "" {
+			fmt.Fprintf(w, "DHT error: %s\n", res.DHT.Error)
+		}
+	}
 	fmt.Fprintln(w)
 
-	if len(res.Local.Hits) == 0 && (res.Swarm == nil || len(res.Swarm.Hits) == 0) {
+	emptyLocal := len(res.Local.Hits) == 0
+	emptySwarm := res.Swarm == nil || len(res.Swarm.Hits) == 0
+	emptyDHT := res.DHT == nil || len(res.DHT.Hits) == 0
+	if emptyLocal && emptySwarm && emptyDHT {
 		fmt.Fprintln(w, "(no results)")
 		return exitOK
 	}
 
-	if len(res.Local.Hits) > 0 {
+	if !emptyLocal {
 		fmt.Fprintln(w, "=== LOCAL ===")
 		for i, h := range res.Local.Hits {
 			printLocalHit(w, i+1, h)
 		}
 	}
-	if res.Swarm != nil && len(res.Swarm.Hits) > 0 {
+	if !emptySwarm {
 		fmt.Fprintln(w, "=== SWARM ===")
 		for i, h := range res.Swarm.Hits {
 			printSwarmHit(w, i+1, h)
 		}
 	}
+	if !emptyDHT {
+		fmt.Fprintln(w, "=== DHT ===")
+		for i, h := range res.DHT.Hits {
+			printDHTHit(w, i+1, h)
+		}
+	}
 	return exitOK
+}
+
+func printDHTHit(w io.Writer, n int, h httpapi.DHTHit) {
+	fmt.Fprintf(w, "%3d. %s\n", n, h.Name)
+	fmt.Fprintf(w, "     infohash: %s  size=%s  seeders=%d  files=%d  sources=%d\n",
+		h.InfoHash, humanBytes(h.Size), h.Seeders, h.Files, len(h.Sources))
+	fmt.Fprintln(w)
 }
 
 func printLocalHit(w io.Writer, n int, h httpapi.LocalHit) {

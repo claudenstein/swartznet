@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
@@ -18,20 +19,39 @@ import (
 // gracefully. A single Server can be reused across multiple
 // Start/Stop cycles (a new http.Server is created each cycle).
 type Server struct {
-	addr    string
-	log     *slog.Logger
-	idx     *indexer.Index
-	swarm   *swarmsearch.Protocol
-	timeout time.Duration
+	addr      string
+	log       *slog.Logger
+	idx       *indexer.Index
+	swarm     *swarmsearch.Protocol
+	publisher *dhtindex.Publisher
+	lookup    *dhtindex.Lookup
+	timeout   time.Duration
 
 	httpServer *http.Server
 	listener   net.Listener
 }
 
-// New constructs a Server. Pass nil for idx or swarm to disable the
-// corresponding search layer — requests for a disabled layer return
-// an empty hit list rather than an error.
+// Options bundles the optional collaborators a Server can wire to.
+// All fields are optional; the corresponding endpoints return empty
+// or "not configured" responses when the field is nil.
+type Options struct {
+	Index     *indexer.Index
+	Swarm     *swarmsearch.Protocol
+	Publisher *dhtindex.Publisher
+	Lookup    *dhtindex.Lookup
+}
+
+// New constructs a Server with the legacy index+swarm signature.
+// New collaborators added in M4 (publisher, lookup) are optional;
+// callers that need them should use NewWithOptions instead.
 func New(addr string, idx *indexer.Index, swarm *swarmsearch.Protocol, log *slog.Logger) *Server {
+	return NewWithOptions(addr, log, Options{Index: idx, Swarm: swarm})
+}
+
+// NewWithOptions constructs a Server from a richer Options bundle.
+// Used by `swartznet add` to expose the publisher status and the
+// DHT lookup via HTTP.
+func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -39,11 +59,13 @@ func New(addr string, idx *indexer.Index, swarm *swarmsearch.Protocol, log *slog
 		addr = "localhost:7654"
 	}
 	return &Server{
-		addr:    addr,
-		log:     log,
-		idx:     idx,
-		swarm:   swarm,
-		timeout: 10 * time.Second,
+		addr:      addr,
+		log:       log,
+		idx:       opts.Index,
+		swarm:     opts.Swarm,
+		publisher: opts.Publisher,
+		lookup:    opts.Lookup,
+		timeout:   10 * time.Second,
 	}
 }
 
@@ -71,6 +93,7 @@ func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /search", s.handleSearch)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /status", s.handleStatus)
 
 	srv := &http.Server{
 		Handler:     mux,
@@ -106,16 +129,40 @@ type SearchRequest struct {
 	Q     string `json:"q"`
 	Limit int    `json:"limit,omitempty"`
 	Swarm bool   `json:"swarm,omitempty"`
+	// DHT, when true, also runs a Layer-D lookup against every
+	// known indexer pubkey via dhtindex.Lookup. Hits are returned
+	// in the response's "dht" section.
+	DHT bool `json:"dht,omitempty"`
 	// SwarmTimeoutMs bounds the Layer-S fan-out. Zero → 2s default.
 	SwarmTimeoutMs int `json:"swarm_timeout_ms,omitempty"`
+	// DHTTimeoutMs bounds the Layer-D get traversal. Zero → 5s.
+	DHTTimeoutMs int `json:"dht_timeout_ms,omitempty"`
 }
 
 // SearchResponse is the JSON body returned from POST /search. It is
 // deliberately flat so that CLI clients can marshal it with encoding/json
 // and print it without additional plumbing.
 type SearchResponse struct {
-	Local LocalResult `json:"local"`
+	Local LocalResult  `json:"local"`
 	Swarm *SwarmResult `json:"swarm,omitempty"`
+	DHT   *DHTResult   `json:"dht,omitempty"`
+}
+
+// DHTResult is the merged dhtindex.LookupResponse in JSON form.
+type DHTResult struct {
+	IndexersAsked     int      `json:"indexers_asked"`
+	IndexersResponded int      `json:"indexers_responded"`
+	Hits              []DHTHit `json:"hits"`
+	Error             string   `json:"error,omitempty"`
+}
+
+type DHTHit struct {
+	InfoHash string   `json:"infohash"`
+	Name     string   `json:"name,omitempty"`
+	Seeders  int      `json:"seeders,omitempty"`
+	Size     int64    `json:"size,omitempty"`
+	Files    int      `json:"files,omitempty"`
+	Sources  []string `json:"sources,omitempty"`
 }
 
 // LocalResult mirrors indexer.SearchResponse in JSON-friendly form.
@@ -231,8 +278,106 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		resp.Swarm = swarmResp
 	}
 
+	// DHT lookup — optional, requires a configured Lookup.
+	if req.DHT && s.lookup != nil {
+		timeout := time.Duration(req.DHTTimeoutMs) * time.Millisecond
+		if timeout == 0 {
+			timeout = 5 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout+500*time.Millisecond)
+		defer cancel()
+		out, err := s.lookup.Query(ctx, req.Q)
+		dhtResp := &DHTResult{Hits: []DHTHit{}}
+		if err != nil {
+			dhtResp.Error = err.Error()
+		} else {
+			dhtResp.IndexersAsked = out.IndexersAsked
+			dhtResp.IndexersResponded = out.IndexersResponded
+			for _, h := range out.Hits {
+				dhtResp.Hits = append(dhtResp.Hits, DHTHit{
+					InfoHash: h.InfoHash,
+					Name:     h.Name,
+					Seeders:  h.Seeders,
+					Size:     h.Size,
+					Files:    h.Files,
+					Sources:  h.Sources,
+				})
+			}
+		}
+		resp.DHT = dhtResp
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// StatusResponse is the JSON body returned from GET /status. It
+// summarises the running daemon's local index, swarm peer set, and
+// DHT publisher state.
+type StatusResponse struct {
+	Local     LocalStatus     `json:"local"`
+	Swarm     SwarmStatus     `json:"swarm"`
+	Publisher PublisherStatus `json:"publisher"`
+}
+
+type LocalStatus struct {
+	Indexed bool   `json:"indexed"`
+	DocCount uint64 `json:"doc_count"`
+}
+
+type SwarmStatus struct {
+	KnownPeers   int `json:"known_peers"`
+	CapablePeers int `json:"capable_peers"`
+}
+
+type PublisherStatus struct {
+	PubKey        string                  `json:"pubkey,omitempty"`
+	TotalKeywords int                     `json:"total_keywords"`
+	TotalHits     int                     `json:"total_hits"`
+	Keywords      []PublisherKeywordEntry `json:"keywords,omitempty"`
+}
+
+type PublisherKeywordEntry struct {
+	Keyword       string `json:"keyword"`
+	HitsCount     int    `json:"hits_count"`
+	LastPublished string `json:"last_published,omitempty"`
+	PublishCount  int    `json:"publish_count"`
+	LastError     string `json:"last_error,omitempty"`
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	out := StatusResponse{}
+	if s.idx != nil {
+		out.Local.Indexed = true
+		if n, err := s.idx.DocCount(); err == nil {
+			out.Local.DocCount = n
+		}
+	}
+	if s.swarm != nil {
+		peers := s.swarm.KnownPeers()
+		out.Swarm.KnownPeers = len(peers)
+		out.Swarm.CapablePeers = s.swarm.CapablePeerCount()
+	}
+	if s.publisher != nil {
+		st := s.publisher.Status()
+		out.Publisher.TotalKeywords = st.TotalKeywords
+		out.Publisher.TotalHits = st.TotalHits
+		for _, ks := range st.LastPublishes {
+			entry := PublisherKeywordEntry{
+				Keyword:      ks.Keyword,
+				HitsCount:    ks.HitsCount,
+				PublishCount: ks.PublishCount,
+				LastError:    ks.LastError,
+			}
+			if !ks.LastPublished.IsZero() {
+				entry.LastPublished = ks.LastPublished.UTC().Format(time.RFC3339)
+			}
+			out.Publisher.Keywords = append(out.Publisher.Keywords, entry)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

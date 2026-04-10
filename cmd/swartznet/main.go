@@ -58,6 +58,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdAdd(rest, stdout, stderr)
 	case "search":
 		return cmdSearch(rest, stdout, stderr)
+	case "status":
+		return cmdStatus(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -73,7 +75,8 @@ Usage:
 
 Commands:
   add <magnet-uri | path.torrent>   Add a torrent and start downloading (Ctrl-C to stop).
-  search <query...>                 Search the local Bleve index.
+  search <query...>                 Search the local index, swarm peers, and/or DHT.
+  status                            Show the running daemon's index/swarm/publisher state.
   version                           Print the version and exit.
   help                              Print this message.
 
@@ -91,8 +94,14 @@ Flags for 'search':
   --limit N               Max results (default: 20).
   --json                  Emit JSON instead of text.
   --swarm                 Also query search-capable peers (requires a running daemon).
+  --dht                   Also query the BEP-44 DHT keyword index (requires a running daemon).
   --api-addr <addr>       Running daemon's HTTP API address (default: localhost:7654).
   --swarm-timeout-ms N    Swarm fan-out timeout in ms (default: 2000).
+  --dht-timeout-ms N      DHT lookup timeout in ms (default: 5000).
+
+Flags for 'status':
+  --api-addr <addr>       Running daemon's HTTP API address (default: localhost:7654).
+  --json                  Emit JSON instead of text.
 
 Documentation:
   Research reports and the full design are in the docs/ directory.

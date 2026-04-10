@@ -84,9 +84,16 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 
 	// Start the local HTTP API so `swartznet search --swarm` in
 	// another terminal can talk to this running daemon. Empty
-	// --api-addr disables it entirely.
+	// --api-addr disables it entirely. The API now also exposes
+	// the M4 publisher and DHT lookup so search --dht and the
+	// status command both work end-to-end.
 	if apiAddr != "" {
-		api := httpapi.New(apiAddr, idx, eng.SwarmSearch(), log)
+		api := httpapi.NewWithOptions(apiAddr, log, httpapi.Options{
+			Index:     idx,
+			Swarm:     eng.SwarmSearch(),
+			Publisher: eng.Publisher(),
+			Lookup:    eng.Lookup(),
+		})
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
 		} else {
