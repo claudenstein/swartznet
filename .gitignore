@@ -1,0 +1,30 @@
+# Build output
+/swartznet
+/swartznet.exe
+/dist/
+/build/
+
+# Go
+*.test
+*.out
+/vendor/
+coverage.txt
+coverage.html
+
+# Runtime data (downloaded torrents, local index, logs)
+/data/
+/var/
+*.log
+
+# Upstream research clones — not part of this repo. The five reports in docs/
+# are the canonical written output of that research; the full clones are kept
+# locally only.
+/research/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
