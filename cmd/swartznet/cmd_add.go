@@ -10,6 +10,7 @@ import (
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
+	"github.com/swartznet/swartznet/internal/httpapi"
 	"github.com/swartznet/swartznet/internal/indexer"
 )
 
@@ -29,6 +30,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		noDHT     bool
 		leechOnly bool
 		noIndex   bool
+		apiAddr   string
 	)
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for downloaded content")
 	fs.StringVar(&indexDir, "index-dir", "", "Bleve index directory (default: ~/.local/share/swartznet/index)")
@@ -36,6 +38,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&noDHT, "no-dht", false, "disable the mainline DHT")
 	fs.BoolVar(&leechOnly, "leech-only", false, "disable uploading (debug)")
 	fs.BoolVar(&noIndex, "no-index", false, "don't write this torrent to the local index")
+	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -68,13 +71,32 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = eng.Close() }()
 
+	var idx *indexer.Index
 	if !noIndex {
-		idx, err := indexer.Open(cfg.IndexDir)
+		var err error
+		idx, err = indexer.Open(cfg.IndexDir)
 		if err != nil {
 			return reportRunErr(fmt.Errorf("open index: %w", err), stderr)
 		}
 		defer idx.Close()
 		eng.SetIndex(idx)
+	}
+
+	// Start the local HTTP API so `swartznet search --swarm` in
+	// another terminal can talk to this running daemon. Empty
+	// --api-addr disables it entirely.
+	if apiAddr != "" {
+		api := httpapi.New(apiAddr, idx, eng.SwarmSearch(), log)
+		if err := api.Start(); err != nil {
+			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
+		} else {
+			defer func() {
+				shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = api.Stop(shutdown)
+			}()
+			fmt.Fprintf(stdout, "HTTP API listening on %s\n", api.Addr())
+		}
 	}
 
 	h, err := addTorrent(eng, target)

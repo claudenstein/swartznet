@@ -23,7 +23,8 @@ research and design documents that motivate the architecture.
 | **M3a — sn_search LTEP registration + capability discovery** | ✅ Complete | New `internal/swarmsearch` package owns a `Protocol` that registers `sn_search` in every outbound LTEP handshake and observes remote handshakes to detect which peers speak the extension. Per-peer state tracked with their chosen extension id. No message handling yet. |
 | **M3b — sn_search wire format + inbound query handler** | ✅ Complete | Bencoded query/result/reject messages (`internal/swarmsearch/wire.go`), plus a handler that answers inbound queries from the local Bleve index via an `indexerSearcher` adapter. Torrent-level and content-level hits are merged per infohash on the wire. |
 | **M3c — Outbound Query fan-out + result aggregation** | ✅ Complete | `Protocol.Query()` generates a monotonic txid, fans the query out to every known search-capable peer via the `swarmSender`, collects responses on a per-query channel, and merges by infohash with per-peer source attribution. Honors context cancellation + per-query timeout. |
-| M3d — CLI `--swarm` flag merges local + swarm hits | 🚧 Next | `swartznet search --swarm <query>` runs both Layer L and Layer S in parallel and deduplicates the combined result set. |
+| **M3d — CLI `--swarm` flag + local HTTP API** | ✅ Complete | `swartznet add` starts a loopback-only HTTP API on `localhost:7654`; `swartznet search --swarm` POSTs to it to run combined local + swarm search against the running daemon. JSON and text output modes both supported. |
+| M4 — BEP-44 keyword publisher (Layer D) | 🚧 Next | Publish `keyword → infohash` entries to mainline DHT as BEP-44 mutable items, per-publisher ed25519 keys with keyword salt. |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
@@ -84,16 +85,28 @@ go build ./cmd/swartznet
 ```bash
 # Add and download a torrent from a magnet link, seed on completion.
 # The torrent's metadata (name, files, trackers) is automatically written
-# to the local Bleve index as soon as it arrives from the swarm.
+# to the local Bleve index as soon as it arrives from the swarm, and
+# text content from completed files (PDFs, subtitles, source code, etc.)
+# is extracted and indexed as each file finishes.
+#
+# While this daemon is running it also exposes an HTTP API on
+# localhost:7654 that the `search --swarm` subcommand uses to issue
+# distributed swarm-wide queries over sn_search.
 ./swartznet add "magnet:?xt=urn:btih:..."
 
-# Search the local index. Supports Bleve's query-string syntax:
+# Search the local index only (works without a running daemon).
+# Supports Bleve's query-string syntax:
 #     ubuntu              -- bag-of-words match
 #     "ubuntu 24.04"      -- phrase match
 #     name:debian         -- fielded query
 #     ubuntu -server      -- boolean exclusion
 ./swartznet search ubuntu
 ./swartznet search --json --limit 50 "ubuntu 24.04"
+
+# Combined local + swarm search. Requires a running `swartznet add`
+# daemon with peers connected; asks every peer that advertises the
+# sn_search BEP-10 extension and merges the results.
+./swartznet search --swarm ubuntu
 
 # Print the version.
 ./swartznet version

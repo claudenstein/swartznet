@@ -81,13 +81,18 @@ Flags for 'add':
   --data-dir <path>   Override the data directory (default: ~/.local/share/swartznet/data).
   --index-dir <path>  Override the Bleve index directory.
   --port <int>        Override the listen port (default: 42069, 0 = OS-assigned).
+  --api-addr <addr>   HTTP API listen address (default: localhost:7654, "" to disable).
   --no-dht            Disable the mainline DHT.
   --leech-only        Do not upload to peers (debugging only).
+  --no-index          Do not write this torrent to the local index.
 
 Flags for 'search':
-  --index-dir <path>  Override the Bleve index directory.
-  --limit N           Max results (default: 20).
-  --json              Emit JSON instead of text.
+  --index-dir <path>      Override the Bleve index directory.
+  --limit N               Max results (default: 20).
+  --json                  Emit JSON instead of text.
+  --swarm                 Also query search-capable peers (requires a running daemon).
+  --api-addr <addr>       Running daemon's HTTP API address (default: localhost:7654).
+  --swarm-timeout-ms N    Swarm fan-out timeout in ms (default: 2000).
 
 Documentation:
   Research reports and the full design are in the docs/ directory.
