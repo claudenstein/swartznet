@@ -37,11 +37,44 @@ type Engine struct {
 	idx      *indexer.Index        // nil-safe; may be unset for headless tests
 	pipeline *indexer.Pipeline     // nil iff idx == nil
 	swarm    *swarmsearch.Protocol // always non-nil after New
+	peers    *peerTracker          // addr → *torrent.PeerConn, for swarmSender
 
 	mu       sync.Mutex
 	closed   bool
 	handles  map[metainfo.Hash]*Handle
 	closeErr error
+}
+
+// peerTracker maintains a thread-safe address → *torrent.PeerConn map.
+// Populated by the PeerConnAdded callback and cleaned by PeerConnClosed.
+// swarmSender reads it to look up a specific peer when Query() fans a
+// message out by address.
+type peerTracker struct {
+	mu    sync.RWMutex
+	conns map[string]*torrent.PeerConn
+}
+
+func newPeerTracker() *peerTracker {
+	return &peerTracker{conns: make(map[string]*torrent.PeerConn)}
+}
+
+func (pt *peerTracker) add(addr string, pc *torrent.PeerConn) {
+	pt.mu.Lock()
+	pt.conns[addr] = pc
+	pt.mu.Unlock()
+}
+
+func (pt *peerTracker) remove(addr string) {
+	pt.mu.Lock()
+	delete(pt.conns, addr)
+	pt.mu.Unlock()
+}
+
+func (pt *peerTracker) get(addr string) (*torrent.PeerConn, bool) {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	pc, ok := pt.conns[addr]
+	return pc, ok
 }
 
 // SwarmSearch returns the engine's sn_search protocol handle. Callers
@@ -158,15 +191,23 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 			)
 		},
 	)
+	// peers is the map the swarmSender (see swarmadapter.go) consults
+	// when fanning a query out to a specific address. Declared here
+	// so the callbacks can close over it; the Engine holds the same
+	// pointer below.
+	peers := newPeerTracker()
+
 	tc.Callbacks.PeerConnAdded = append(tc.Callbacks.PeerConnAdded,
 		func(pc *torrent.PeerConn) {
 			// Per anacrolix's callback contract: "This is a good time to
 			// alter the supported extension protocols." We add sn_search
 			// to pc.LocalLtepProtocolMap so our outbound LTEP handshake
 			// advertises it to this peer, then record the peer in our
-			// own state map.
+			// own state maps.
 			swarm.AdvertiseOn(pc.LocalLtepProtocolMap)
-			swarm.NotePeerAdded(pc.RemoteAddr.String())
+			addr := pc.RemoteAddr.String()
+			swarm.NotePeerAdded(addr)
+			peers.add(addr, pc)
 		},
 	)
 	// ReadExtendedHandshake fires after the remote peer sends its LTEP
@@ -197,7 +238,9 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// PeerConnClosed lets us drop stale peer state from the
 	// sn_search tracker so long-running processes do not leak memory.
 	tc.Callbacks.PeerConnClosed = func(pc *torrent.PeerConn) {
-		swarm.OnPeerClosed(pc.RemoteAddr.String())
+		addr := pc.RemoteAddr.String()
+		swarm.OnPeerClosed(addr)
+		peers.remove(addr)
 	}
 
 	cl, err := torrent.NewClient(tc)
@@ -212,13 +255,19 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		"dht_enabled", !cfg.DisableDHT,
 	)
 
-	return &Engine{
+	eng := &Engine{
 		cfg:     cfg,
 		client:  cl,
 		log:     log,
 		swarm:   swarm,
 		handles: make(map[metainfo.Hash]*Handle),
-	}, nil
+		peers:   peers,
+	}
+	// Hand the peer tracker to the swarmSender so Query fan-out can
+	// find specific peers by address. The callbacks above and this
+	// sender share the same peerTracker instance.
+	swarm.SetSender(&swarmSender{peers: peers})
+	return eng, nil
 }
 
 // AddMagnet queues a magnet URI for download. The returned Handle exposes a

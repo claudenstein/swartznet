@@ -93,12 +93,21 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 	case MsgTypeQuery:
 		p.handleQuery(peerAddr, payload, reply)
 	case MsgTypeResult:
-		// M3c: route to the pending-query channel for this txid.
-		p.log.Debug("swarmsearch.rx_result",
-			"peer", peerAddr, "txid", hdr.TxID)
+		res, err := DecodeResult(payload)
+		if err != nil {
+			p.log.Debug("swarmsearch.rx_result.decode_err",
+				"peer", peerAddr, "err", err)
+			return
+		}
+		p.routeResult(peerAddr, res)
 	case MsgTypeReject:
-		p.log.Debug("swarmsearch.rx_reject",
-			"peer", peerAddr, "txid", hdr.TxID)
+		rj, err := DecodeReject(payload)
+		if err != nil {
+			p.log.Debug("swarmsearch.rx_reject.decode_err",
+				"peer", peerAddr, "err", err)
+			return
+		}
+		p.routeReject(peerAddr, rj)
 	case MsgTypePeerAnnounce:
 		p.log.Debug("swarmsearch.rx_peer_announce", "peer", peerAddr)
 	default:

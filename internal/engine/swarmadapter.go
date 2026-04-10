@@ -1,9 +1,28 @@
 package engine
 
 import (
+	"fmt"
+
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
+
+// swarmSender implements swarmsearch.Sender by looking up the target
+// *torrent.PeerConn in the engine's peerTracker and forwarding the
+// payload through anacrolix's WriteExtendedMessage. M3c uses this to
+// fan outbound queries out to every known search-capable peer.
+type swarmSender struct {
+	peers *peerTracker
+}
+
+// Send implements swarmsearch.Sender.
+func (s *swarmSender) Send(peerAddr string, payload []byte) error {
+	pc, ok := s.peers.get(peerAddr)
+	if !ok {
+		return fmt.Errorf("engine: swarmSender: no peer with addr %q", peerAddr)
+	}
+	return pc.WriteExtendedMessage(swarmsearch.ExtensionName, payload)
+}
 
 // indexerSearcher adapts an *indexer.Index to the
 // swarmsearch.LocalSearcher interface. The adapter exists so the

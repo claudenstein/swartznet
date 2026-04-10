@@ -84,6 +84,16 @@ type Protocol struct {
 	peers    map[string]*PeerState // keyed by peer addr ("ip:port")
 	searcher LocalSearcher         // attached in M3b; nil means "reject all inbound queries"
 	sender   Sender                // attached by engine; nil means "decode only, don't reply"
+
+	// txidCounter is incremented by nextTxID() for each outbound
+	// Query fan-out (M3c). Accessed with sync/atomic.
+	txidCounter uint32
+
+	// pendingMu guards pending. Separate from mu because we hold
+	// pendingMu across channel sends in routeResult, and we don't
+	// want that to block peer-state updates.
+	pendingMu sync.RWMutex
+	pending   map[uint32]*pendingQuery
 }
 
 // New constructs a Protocol with default capabilities.
