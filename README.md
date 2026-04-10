@@ -28,6 +28,7 @@ research and design documents that motivate the architecture.
 | **M5 — Spam resistance** | ✅ Complete | Persistent Bloom filter of known-good infohashes (1M items @ 1% FP, ~1.2 MB), Bayesian-smoothed per-pubkey reputation tracker, lookup auto-skips low-reputation indexers, Bloom-hit results boost to the top, auto-confirm on download completion, `swartznet flag/confirm` CLI commands. |
 | **M6 — EPUB / DOCX / ODT extractors** | ✅ Complete | Three new binary-format text extractors. EPUB iterates XHTML chapters and strips HTML via golang.org/x/net/html. DOCX walks word/document.xml's `<w:t>` elements via stdlib encoding/xml. ODT does the same for content.xml's `<text:p>` elements while skipping `<office:automatic-styles>` noise. All zero-cgo, all use the existing chunker. |
 | **M7 — Documentation polish for v1** | ✅ Complete | Two draft BEP specs (`docs/06-bep-sn_search-draft.md` and `docs/07-bep-dht-keyword-index-draft.md`), an operations guide (`docs/08-operations.md`), and a [CHANGELOG](CHANGELOG.md) covering every milestone. v1.0.0 release pending real-world swarm testing. |
+| **M8 — Local web UI** | ✅ Complete | Static HTML/CSS/JS embedded into the binary via `go:embed` and served by the existing httpapi daemon. Browse to `http://localhost:7654/` to get a four-tab UI: Search (across all three layers), Add torrent, Status, and Sharing (with the per-instance `sn_search` capability toggles wired through new `GET`/`POST /capabilities` endpoints). Localhost-only by design — the GUI controls the daemon and is fundamentally separate from the per-peer search-result interfaces (`sn_search`, BEP-44). |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
@@ -107,7 +108,10 @@ go build ./cmd/swartznet
 #
 # While this daemon is running it also exposes an HTTP API on
 # localhost:7654 that the `search --swarm` subcommand uses to issue
-# distributed swarm-wide queries over sn_search.
+# distributed swarm-wide queries over sn_search. Open the same URL
+# in any browser to use the bundled web UI:
+#
+#   http://localhost:7654/
 ./swartznet add "magnet:?xt=urn:btih:..."
 
 # Search the local index only (works without a running daemon).
@@ -127,6 +131,10 @@ go build ./cmd/swartznet
 # Combined local + swarm + DHT search. Adds a parallel BEP-44 mutable-item
 # lookup against every known indexer pubkey alongside the swarm path.
 ./swartznet search --swarm --dht ubuntu
+
+# Or use the browser-based web UI for everything above:
+#   http://localhost:7654/
+# (the same daemon serves both the JSON API and the embedded UI)
 
 # Snapshot of the running daemon's index, peer set, DHT publisher,
 # Bloom filter population, and per-pubkey reputation table.

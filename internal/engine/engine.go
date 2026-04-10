@@ -405,6 +405,33 @@ func (e *Engine) dhtServer() *dht.Server {
 	return nil
 }
 
+// AddMagnetURI is the narrow adapter for httpapi.TorrentAdder. It
+// wraps AddMagnet so the HTTP API can submit a magnet URI without
+// depending on the full *Handle return type. Returns the
+// 40-character lowercase hex infohash, parsed from the URI itself
+// (so the call returns immediately; metadata fetch from the swarm
+// continues asynchronously).
+//
+// Wraps the underlying AddMagnet in a recover() because
+// anacrolix/torrent occasionally panics on pathological input
+// (e.g. an all-zero infohash hits a defensive panicif.Zero check
+// in client.AddTorrentOpt). The API must never crash the daemon
+// over a malformed user input — every panic becomes a clean
+// error returned to the HTTP handler, which then returns 400.
+func (e *Engine) AddMagnetURI(uri string) (infohash string, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			infohash = ""
+			err = fmt.Errorf("engine: AddMagnetURI panic: %v", rec)
+		}
+	}()
+	h, err := e.AddMagnet(uri)
+	if err != nil {
+		return "", err
+	}
+	return h.T.InfoHash().HexString(), nil
+}
+
 // AddMagnet queues a magnet URI for download. The returned Handle exposes a
 // piece-state subscription; callers MUST drain PieceEvents (via Next) or call
 // Handle.Close to avoid blocking anacrolix's internal publisher.

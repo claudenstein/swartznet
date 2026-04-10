@@ -18,6 +18,21 @@ import (
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
+// TorrentAdder is the narrow interface the HTTP API needs from
+// the engine in order to satisfy POST /torrent. The engine
+// satisfies it via an adapter method (see internal/engine).
+//
+// Defined as a local interface so the httpapi package keeps zero
+// dependency on internal/engine — the adapter pattern is the
+// same one used for indexer + swarmsearch + dhtindex.
+type TorrentAdder interface {
+	// AddMagnetURI queues the magnet URI for download and
+	// returns its infohash as a 40-char lowercase hex string.
+	// Returns immediately; metadata fetch happens
+	// asynchronously in the background.
+	AddMagnetURI(uri string) (infohash string, err error)
+}
+
 // Server is the HTTP entry point into a running SwartzNet instance.
 // Construct with New, call Start once, and Stop to tear down
 // gracefully. A single Server can be reused across multiple
@@ -31,6 +46,7 @@ type Server struct {
 	lookup    *dhtindex.Lookup
 	bloom     *reputation.BloomFilter
 	tracker   *reputation.Tracker
+	adder     TorrentAdder
 	timeout   time.Duration
 
 	httpServer *http.Server
@@ -47,6 +63,7 @@ type Options struct {
 	Lookup    *dhtindex.Lookup
 	Bloom     *reputation.BloomFilter
 	Tracker   *reputation.Tracker
+	Adder     TorrentAdder
 }
 
 // New constructs a Server with the legacy index+swarm signature.
@@ -75,6 +92,7 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		lookup:    opts.Lookup,
 		bloom:     opts.Bloom,
 		tracker:   opts.Tracker,
+		adder:     opts.Adder,
 		timeout:   10 * time.Second,
 	}
 }
@@ -106,6 +124,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("POST /confirm", s.handleConfirm)
 	mux.HandleFunc("POST /flag", s.handleFlag)
+	mux.HandleFunc("POST /torrent", s.handleAddTorrent)
+	mux.HandleFunc("GET /capabilities", s.handleGetCapabilities)
+	mux.HandleFunc("POST /capabilities", s.handleSetCapabilities)
 
 	// Web UI: serve the embedded index.html at / and the
 	// static assets at /static/. The HTTP API endpoints above
@@ -525,6 +546,107 @@ func (s *Server) handleFlag(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("httpapi.flag", "infohash", req.InfoHash, "indexers", len(pks))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(FlagResponse{OK: true, InfoHash: req.InfoHash})
+}
+
+// AddTorrentRequest is the JSON body for POST /torrent.
+type AddTorrentRequest struct {
+	URI string `json:"uri"`
+}
+
+// AddTorrentResponse is the JSON body returned by POST /torrent.
+// The infohash is parsed from the magnet URI itself and is
+// available immediately; metadata fetch from the swarm happens
+// asynchronously after the response is sent.
+type AddTorrentResponse struct {
+	OK       bool   `json:"ok"`
+	InfoHash string `json:"infohash"`
+}
+
+func (s *Server) handleAddTorrent(w http.ResponseWriter, r *http.Request) {
+	if s.adder == nil {
+		http.Error(w, "torrent adder not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req AddTorrentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.URI == "" {
+		http.Error(w, "missing 'uri' field", http.StatusBadRequest)
+		return
+	}
+	infoHash, err := s.adder.AddMagnetURI(req.URI)
+	if err != nil {
+		http.Error(w, "add: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.log.Info("httpapi.add_torrent", "infohash", infoHash)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(AddTorrentResponse{OK: true, InfoHash: infoHash})
+}
+
+// CapabilitiesBody is both the request body for POST /capabilities
+// AND the response body for GET /capabilities. Field names match
+// swarmsearch.Capabilities so the round trip is straightforward.
+type CapabilitiesBody struct {
+	ShareLocal  int `json:"share_local"`
+	FileHits    int `json:"file_hits"`
+	ContentHits int `json:"content_hits"`
+	Publisher   int `json:"publisher"`
+}
+
+func (s *Server) handleGetCapabilities(w http.ResponseWriter, _ *http.Request) {
+	if s.swarm == nil {
+		http.Error(w, "swarmsearch not configured", http.StatusServiceUnavailable)
+		return
+	}
+	c := s.swarm.Capabilities()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(CapabilitiesBody{
+		ShareLocal:  c.ShareLocal,
+		FileHits:    c.FileHits,
+		ContentHits: c.ContentHits,
+		Publisher:   c.Publisher,
+	})
+}
+
+func (s *Server) handleSetCapabilities(w http.ResponseWriter, r *http.Request) {
+	if s.swarm == nil {
+		http.Error(w, "swarmsearch not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req CapabilitiesBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Clamp ShareLocal to {0,1,2}; FileHits/ContentHits/Publisher to {0,1}.
+	clamp := func(v, lo, hi int) int {
+		if v < lo {
+			return lo
+		}
+		if v > hi {
+			return hi
+		}
+		return v
+	}
+	s.swarm.SetCapabilities(swarmsearch.Capabilities{
+		ShareLocal:  clamp(req.ShareLocal, 0, 2),
+		FileHits:    clamp(req.FileHits, 0, 1),
+		ContentHits: clamp(req.ContentHits, 0, 1),
+		Publisher:   clamp(req.Publisher, 0, 1),
+	})
+	c := s.swarm.Capabilities()
+	s.log.Info("httpapi.set_capabilities",
+		"share", c.ShareLocal, "file", c.FileHits, "content", c.ContentHits)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(CapabilitiesBody{
+		ShareLocal:  c.ShareLocal,
+		FileHits:    c.FileHits,
+		ContentHits: c.ContentHits,
+		Publisher:   c.Publisher,
+	})
 }
 
 // HealthzVersion is overridden by the swartznet binary at build

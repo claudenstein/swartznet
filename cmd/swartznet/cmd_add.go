@@ -99,6 +99,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 			Lookup:    eng.Lookup(),
 			Bloom:     eng.KnownGoodBloom(),
 			Tracker:   eng.ReputationTracker(),
+			Adder:     eng,
 		})
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
