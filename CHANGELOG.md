@@ -9,6 +9,30 @@ format follows [Keep a Changelog][kac]; the project follows
 
 ## Unreleased
 
+### M8 — Local web UI
+
+- **M8a+b**: HTML/CSS/JS embedded into the binary via go:embed
+  and served from the existing httpapi daemon at `GET /` and
+  `GET /static/*`. Four tabs (Search, Add torrent, Status,
+  Sharing) using the same JSON endpoints the CLI uses. No build
+  step, no JavaScript bundler, no external dependencies. Lives
+  at `internal/httpapi/web/{embed.go, index.html,
+  static/style.css, static/app.js}`. /healthz now reports the
+  build version so the UI badge can show the running version.
+- **M8c**: Three new HTTP endpoints to round out the UI's
+  functionality:
+  - `POST /torrent {uri}` adds a magnet via the new
+    `httpapi.TorrentAdder` interface (`engine.AddMagnetURI`
+    satisfies it). Includes a `recover()` guard so a malformed
+    magnet returns a clean 400 instead of crashing the daemon.
+  - `GET /capabilities` reports the current `sn_search`
+    `share_local` / `file_hits` / `content_hits` / `publisher`
+    flags from `swarmsearch.Protocol`.
+  - `POST /capabilities` updates them with input clamping.
+- All nine packages still green under `go test -race ./...`.
+
+### Release tooling
+
 - **scripts/build-release.sh**: one-command cross-compile for
   linux/amd64+arm64, darwin/amd64+arm64, windows/amd64. Pure-Go,
   CGO-disabled, fully static binaries with stripped symbols and
