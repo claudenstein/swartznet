@@ -83,7 +83,9 @@ func (e *PlaintextExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, erro
 	if trimmed == "" {
 		return nil, nil
 	}
-	return []Chunk{{Text: out, Offset: 0}}, nil
+	// Split into ~10 KiB chunks at paragraph boundaries. Small files
+	// come back as a single chunk (see chunker.go smallFileFactor).
+	return chunkText(out, DefaultChunkTargetBytes), nil
 }
 
 // sanitizeUTF8 walks a byte slice and replaces every invalid UTF-8

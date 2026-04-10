@@ -18,7 +18,8 @@ research and design documents that motivate the architecture.
 | **M2.1 — Piece-to-file completion tracker** | ✅ Complete | `FileCompleteEvent` stream synthesised from the piece-state subscription; handles resume (seeds pending counts from current piece state). Unit-tested on single-file, multi-file, and zero-length-file layouts. |
 | **M2.2a — Extractor framework + plaintext extractor + ingestion pipeline** | ✅ Complete | Bleve schema gains a `content` document type; `Pipeline` worker consumes `FileCompleteEvent`, dispatches to the extractor registry, and writes content docs. Plaintext extractor handles .txt/.md/.html/.json/source code. `swartznet search` now returns both torrent-level and content-level hits, clearly labelled. |
 | **M2.2b — Subtitle-aware extractor** | ✅ Complete | SRT/VTT parser strips timestamps, cue numbers, HTML/ASS markup, and WebVTT headers/NOTE blocks; only dialog text is indexed. Dialog is often the single most valuable text inside a movie/TV torrent. |
-| M2.2c — Chunker for large files | 🚧 Next | Split large extractions at paragraph boundaries near 10 KB to improve snippet quality on books and long logs. |
+| **M2.2c — Chunker for large files** | ✅ Complete | Plaintext extractions larger than ~12 KiB are split into ~10 KiB chunks at paragraph boundaries (falling back to line boundaries, then arbitrary positions for minified inputs). Each chunk carries its source-byte offset for future snippet-highlight UI. |
+| M2.3 — PDF extractor | 🚧 Next | Pure-Go PDF text extraction registered as its own extractor backend. |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
