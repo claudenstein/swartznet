@@ -26,7 +26,8 @@ research and design documents that motivate the architecture.
 | **M3d — CLI `--swarm` flag + local HTTP API** | ✅ Complete | `swartznet add` starts a loopback-only HTTP API on `localhost:7654`; `swartznet search --swarm` POSTs to it to run combined local + swarm search against the running daemon. JSON and text output modes both supported. |
 | **M4 — BEP-44 keyword publisher (Layer D)** | ✅ Complete | Persistent ed25519 publisher identity, keyword tokenizer, BEP-44 mutable-item put/get wrapper, publisher worker with on-disk shard manifest, parallel lookup fan-out across known indexer pubkeys, `swartznet search --dht`, and `swartznet status`. |
 | **M5 — Spam resistance** | ✅ Complete | Persistent Bloom filter of known-good infohashes (1M items @ 1% FP, ~1.2 MB), Bayesian-smoothed per-pubkey reputation tracker, lookup auto-skips low-reputation indexers, Bloom-hit results boost to the top, auto-confirm on download completion, `swartznet flag/confirm` CLI commands. |
-| M6 — EPUB / DOCX / ODT extractors | 🚧 Next | Additional binary-format extractors alongside the existing PDF backend. |
+| **M6 — EPUB / DOCX / ODT extractors** | ✅ Complete | Three new binary-format text extractors. EPUB iterates XHTML chapters and strips HTML via golang.org/x/net/html. DOCX walks word/document.xml's `<w:t>` elements via stdlib encoding/xml. ODT does the same for content.xml's `<text:p>` elements while skipping `<office:automatic-styles>` noise. All zero-cgo, all use the existing chunker. |
+| M7 — v1 release | 🚧 Next | Stabilise the sn_search and Layer-D wire formats; write the draft BEP; document operationally. |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
