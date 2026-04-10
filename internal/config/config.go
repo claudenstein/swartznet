@@ -45,6 +45,13 @@ type Config struct {
 	// index is stored. It is created if missing. Default:
 	// ~/.local/share/swartznet/index.
 	IndexDir string
+
+	// IdentityPath is where the persistent ed25519 keypair lives.
+	// Default: ~/.local/share/swartznet/identity.key. The key is
+	// generated on first run and reused thereafter; it identifies
+	// this node as a publisher of BEP-44 keyword-index entries
+	// (Layer D, M4).
+	IdentityPath string
 }
 
 // Default returns a Config populated with sensible defaults for a normal
@@ -59,6 +66,7 @@ func Default() Config {
 		DisableDHT:    false,
 		HTTPUserAgent: "", // use anacrolix default
 		IndexDir:      defaultIndexDir(),
+		IdentityPath:  defaultIdentityPath(),
 	}
 }
 
@@ -97,6 +105,12 @@ func defaultDataDir() string {
 // It sits next to DataDir under the shared SwartzNet share root.
 func defaultIndexDir() string {
 	return filepath.Join(swartznetShareRoot(), "index")
+}
+
+// defaultIdentityPath returns the platform-appropriate default path
+// for the persistent ed25519 publisher key.
+func defaultIdentityPath() string {
+	return filepath.Join(swartznetShareRoot(), "identity.key")
 }
 
 // swartznetShareRoot returns the per-user root directory SwartzNet uses for
