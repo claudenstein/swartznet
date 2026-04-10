@@ -103,6 +103,37 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// Start the F3 companion-index subscriber worker (M11d) once
+	// we have an index AND a DHT getter. The follow list is
+	// loaded from cfg.CompanionFollowFile (or empty if missing).
+	// The worker runs as long as the daemon does and re-syncs
+	// every followed publisher every hour.
+	var compSub *companion.SubscriberWorker
+	if idx != nil && eng.PointerGetter() != nil && cfg.CompanionDir != "" {
+		sub, err := companion.NewSubscriber(
+			eng.PointerGetter(), eng, idx,
+			companion.DefaultSubscriberOptions(),
+			log,
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: companion subscriber init failed: %v\n", err)
+		} else {
+			compSub, err = companion.NewSubscriberWorker(sub)
+			if err != nil {
+				fmt.Fprintf(stderr, "warning: companion subscriber worker init failed: %v\n", err)
+			} else {
+				if cfg.CompanionFollowFile != "" {
+					if n := loadFollowFile(compSub, cfg.CompanionFollowFile, stderr); n > 0 {
+						fmt.Fprintf(stdout, "Companion subscriber following %d publishers\n", n)
+					}
+				}
+				compSub.Start()
+				defer compSub.Stop()
+				fmt.Fprintln(stdout, "Companion subscriber started")
+			}
+		}
+	}
+
 	// Start the local HTTP API so `swartznet search --swarm` in
 	// another terminal can talk to this running daemon. Empty
 	// --api-addr disables it entirely. The API now also exposes

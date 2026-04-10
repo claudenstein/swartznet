@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -47,6 +48,7 @@ type Engine struct {
 	publisher     *dhtindex.Publisher       // nil if no DHT or no identity
 	manifest      *dhtindex.Manifest        // owned by publisher; nil iff publisher nil
 	pointerPutter *dhtindex.AnacrolixPutter // shared by Publisher AND companion.Publisher; nil iff publisher nil
+	pointerGetter *dhtindex.AnacrolixGetter // shared by Lookup AND companion.Subscriber; nil iff no DHT
 	lookup        *dhtindex.Lookup          // M4e DHT keyword lookup; nil iff no DHT
 	bloom         *reputation.BloomFilter   // M5 known-good infohash filter; nil if disabled
 	tracker       *reputation.Tracker       // M5 per-pubkey reputation tracker; nil if disabled
@@ -71,6 +73,12 @@ func (e *Engine) Publisher() *dhtindex.Publisher { return e.publisher }
 // M11c companion publisher to publish a content-index pointer
 // under the salt SaltContentIndex.
 func (e *Engine) PointerPutter() *dhtindex.AnacrolixPutter { return e.pointerPutter }
+
+// PointerGetter returns the engine's BEP-46-style mutable-item
+// getter, or nil if the engine has no DHT. Mirrors PointerPutter
+// for the read side. The M11d companion subscriber uses it to
+// resolve content-index pointers published by other nodes.
+func (e *Engine) PointerGetter() *dhtindex.AnacrolixGetter { return e.pointerGetter }
 
 // Identity returns the engine's persistent ed25519 keypair, or nil
 // if no identity was loaded.
@@ -421,6 +429,9 @@ func (e *Engine) startPublisher() error {
 	if err != nil {
 		return fmt.Errorf("engine: new anacrolix getter: %w", err)
 	}
+	// Stash the getter so the M11d companion subscriber can
+	// reuse it for BEP-46 pointer gets.
+	e.pointerGetter = getter
 	e.lookup = dhtindex.NewLookup(getter)
 	e.lookup.AddIndexer(e.identity.PublicKeyBytes(), "self")
 	// Wire the M5 spam-resistance helpers if they were loaded,
@@ -511,6 +522,92 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 		return nil, fmt.Errorf("engine: add torrent: %w", err)
 	}
 	return e.registerLocked(t), nil
+}
+
+// AddInfoHash adds a torrent by raw 20-byte infohash. Equivalent
+// to constructing a magnet URI with no display name and no
+// trackers and calling AddMagnet, but skips the URI parse step.
+// The returned Handle's metadata fetch happens asynchronously
+// over the swarm — the caller must wait on T.GotInfo() before
+// inspecting the file list.
+//
+// Used by the M11d companion subscriber to fetch a content-index
+// torrent given only the infohash from a BEP-46 pointer.
+func (e *Engine) AddInfoHash(infoHash [20]byte) (*Handle, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return nil, errors.New("engine: closed")
+	}
+	t, _ := e.client.AddTorrentInfoHash(metainfo.Hash(infoHash))
+	return e.registerLocked(t), nil
+}
+
+// FetchCompanionTorrent satisfies companion.CompanionFetcher. It
+// adds the torrent identified by infohash to the engine, waits
+// for metadata to arrive over the swarm, asks the engine to
+// download every piece, then blocks until the (single) file
+// inside is fully downloaded. Returns the absolute on-disk path.
+//
+// Multi-file companion torrents are rejected — the M11 format
+// puts everything inside one gzipped JSON file, so a multi-file
+// torrent indicates either a malformed publisher or an attempt
+// to slip a non-companion torrent past the subscriber.
+//
+// ctx cancellation aborts the wait but does NOT remove the
+// torrent from the engine; subsequent retries can reuse the
+// existing handle.
+func (e *Engine) FetchCompanionTorrent(ctx context.Context, infoHash [20]byte) (string, error) {
+	h, err := e.AddInfoHash(infoHash)
+	if err != nil {
+		return "", err
+	}
+
+	// Wait for metadata.
+	select {
+	case <-h.T.GotInfo():
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
+	files := h.T.Files()
+	if len(files) != 1 {
+		return "", fmt.Errorf("engine: companion torrent has %d files, want exactly 1", len(files))
+	}
+	target := files[0]
+	target.Download()
+	h.T.DownloadAll()
+
+	// Wait for the file to fully download. Poll every 250 ms;
+	// anacrolix does not expose a per-file completion channel
+	// in this version, so we synthesise one with BytesCompleted.
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if target.BytesCompleted() >= target.Length() {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-tick.C:
+		}
+	}
+
+	// Build the absolute path: anacrolix puts the file at
+	// DataDir/<torrent name>/<file path> for multi-file torrents
+	// and DataDir/<file path> for single-file ones.
+	// torrent.File.Path() gives the path relative to the torrent
+	// root, so the full path is DataDir + (torrent name iff
+	// multi-file) + relative path. For our companion torrents we
+	// always have exactly one file, so the layout is:
+	// DataDir/<info.Name>.
+	info := h.T.Info()
+	if info == nil {
+		// We waited for GotInfo above, so this is paranoid.
+		return "", errors.New("engine: companion torrent has no info after GotInfo")
+	}
+	return filepath.Join(e.cfg.DataDir, info.Name), nil
 }
 
 // AddTorrentMetaInfo adds an in-memory metainfo to the engine and

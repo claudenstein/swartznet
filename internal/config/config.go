@@ -81,6 +81,15 @@ type Config struct {
 	// search and Layer-D queries; it just does not advertise its
 	// content via a companion-index torrent).
 	CompanionDir string
+
+	// CompanionFollowFile is the on-disk JSON file that lists
+	// publishers the M11d subscriber should follow. The file
+	// holds a single JSON array of objects of the form
+	// {"pubkey":"<64-char hex>","label":"<name>"}. Default:
+	// ~/.local/share/swartznet/companion-follows.json. The file
+	// is created on demand by the GUI; if it does not exist on
+	// startup the subscriber starts with an empty follow list.
+	CompanionFollowFile string
 }
 
 // Default returns a Config populated with sensible defaults for a normal
@@ -97,10 +106,11 @@ func Default() Config {
 		IndexDir:          defaultIndexDir(),
 		IdentityPath:      defaultIdentityPath(),
 		PublisherManifest: defaultPublisherManifest(),
-		ReputationPath:    defaultReputationPath(),
-		BloomPath:         defaultBloomPath(),
-		MinIndexerScore:   0,
-		CompanionDir:      defaultCompanionDir(),
+		ReputationPath:      defaultReputationPath(),
+		BloomPath:           defaultBloomPath(),
+		MinIndexerScore:     0,
+		CompanionDir:        defaultCompanionDir(),
+		CompanionFollowFile: defaultCompanionFollowFile(),
 	}
 }
 
@@ -169,6 +179,12 @@ func defaultBloomPath() string {
 // directory for the F3 companion publisher's on-disk artefacts.
 func defaultCompanionDir() string {
 	return filepath.Join(swartznetShareRoot(), "companion")
+}
+
+// defaultCompanionFollowFile returns the platform-appropriate
+// default path for the F3 companion subscriber's follow list.
+func defaultCompanionFollowFile() string {
+	return filepath.Join(swartznetShareRoot(), "companion-follows.json")
 }
 
 // swartznetShareRoot returns the per-user root directory SwartzNet uses for

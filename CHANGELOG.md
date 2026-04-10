@@ -76,6 +76,29 @@ draft to Final).
   daemon has both an index and an identity. New
   `config.CompanionDir` (default `~/.local/share/swartznet/companion`)
   controls the on-disk artefacts directory.
+- **M11d**: New `companion.Subscriber` and
+  `companion.SubscriberWorker` — the read side of the F3 story.
+  `Subscriber.Sync` resolves a publisher's BEP-46 pointer,
+  fetches the underlying torrent, decodes the gzipped JSON, and
+  ingests every record into the local Bleve index.
+  `SubscriberWorker` runs the same pipeline against a follow
+  list every hour. Narrow `PointerGetter`, `CompanionFetcher`,
+  and `Ingester` interfaces keep the package decoupled from
+  internal/engine and internal/dhtindex.
+  `engine.AddInfoHash` adds a torrent by raw 20-byte infohash;
+  `engine.FetchCompanionTorrent` orchestrates add → wait for
+  metadata → wait for download → return the on-disk path, and
+  satisfies `companion.CompanionFetcher`. `engine.PointerGetter`
+  exposes the shared `*dhtindex.AnacrolixGetter`. New
+  `config.CompanionFollowFile` (default
+  `~/.local/share/swartznet/companion-follows.json`) is the JSON
+  array of `{pubkey, label}` rows the subscriber follows on
+  startup; the file is loaded by a tiny `cmd/swartznet/companion_follows.go`
+  helper. `cmd_add.go` starts the subscriber worker after the
+  publisher whenever the daemon has both an index and a DHT
+  getter. Six new tests covering happy path, pointer/fetcher
+  failures, partial-ingest failure, the worker lifecycle, and
+  IngestReader. All pass under `-race`.
 
 ## v0.2.0 — 2026-04-10
 
