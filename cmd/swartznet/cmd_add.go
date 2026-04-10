@@ -141,18 +141,28 @@ func printInfo(w io.Writer, h *engine.Handle) {
 	fmt.Fprintln(w, "")
 }
 
-// progressLoop prints a one-line status every few seconds while draining the
-// piece-events channel. Returns when ctx is cancelled.
+// progressLoop prints a one-line status every few seconds while draining
+// both the piece-events and file-complete channels. Returns when ctx is
+// cancelled. File completions are reported inline so the user can see the
+// M2.1 tracker working end-to-end against a real torrent.
 func progressLoop(ctx context.Context, w io.Writer, h *engine.Handle) {
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
-	var piecesSeen int
+	var piecesSeen, filesSeen int
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-h.PieceEvents():
 			piecesSeen++
+		case ev, ok := <-h.FileEvents():
+			if !ok {
+				// Tracker shut down (engine closed); keep the loop alive
+				// until ctx cancels so the UI stops cleanly.
+				continue
+			}
+			filesSeen++
+			fmt.Fprintf(w, "  ✓ file complete: %s  (%s)\n", ev.Path, humanBytes(ev.Size))
 		case <-tick.C:
 			s := h.T.Stats()
 			total := h.T.Length()
@@ -162,7 +172,7 @@ func progressLoop(ctx context.Context, w io.Writer, h *engine.Handle) {
 				pct = 100 * float64(have) / float64(total)
 			}
 			fmt.Fprintf(w,
-				"[%s] %5.1f%%  %s / %s  peers=%d/%d  piece-events=%d\n",
+				"[%s] %5.1f%%  %s / %s  peers=%d/%d  piece-events=%d  files-done=%d\n",
 				time.Now().Format("15:04:05"),
 				pct,
 				humanBytes(have),
@@ -170,6 +180,7 @@ func progressLoop(ctx context.Context, w io.Writer, h *engine.Handle) {
 				s.ActivePeers,
 				s.TotalPeers,
 				piecesSeen,
+				filesSeen,
 			)
 		}
 	}

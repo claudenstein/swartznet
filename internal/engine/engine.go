@@ -43,9 +43,12 @@ func (e *Engine) SetIndex(idx *indexer.Index) {
 	e.mu.Unlock()
 }
 
-// Handle is SwartzNet's wrapper around a *torrent.Torrent. It adds a
-// piece-state subscription that will feed the local indexer in M2, plus a
-// cancellation hook that detaches the subscription on close.
+// Handle is SwartzNet's wrapper around a *torrent.Torrent. It owns a piece
+// state subscription (for live progress UI) AND a file-completion tracker
+// (M2.1) whose events feed the M2.2 text extractor pipeline.
+//
+// Both subscriptions are torn down by Engine.Close via Handle's internal
+// close hooks; callers do not need to do anything explicit.
 type Handle struct {
 	// T is the underlying anacrolix torrent. Exported for read-only callers
 	// that need fields we haven't re-exported yet; prefer the wrapper methods
@@ -55,14 +58,26 @@ type Handle struct {
 	// pieceSub is the live subscription to T.SubscribePieceStateChanges. It
 	// fans events out on PieceEvents (via the Events accessor).
 	pieceSub *pieceSubscription
+
+	// fileSub is the file-completion tracker that watches piece events and
+	// emits one FileCompleteEvent per file the first time that file reaches
+	// a fully-verified state.
+	fileSub *fileTracker
 }
 
 // PieceEvents returns a receive-only channel of piece state-change events
 // for this torrent. Readers MUST drain this channel; if they fall behind,
-// events are dropped (see piece_sub.go for the drop policy). In M2 the
-// indexer will be the primary consumer.
+// events are dropped (see piece_sub.go for the drop policy). Useful for
+// live-progress UI code.
 func (h *Handle) PieceEvents() <-chan torrent.PieceStateChange {
 	return h.pieceSub.Events()
+}
+
+// FileEvents returns a receive-only channel of FileCompleteEvent values,
+// each fired once when a file inside this torrent becomes fully complete.
+// The channel is closed when the Engine is closed.
+func (h *Handle) FileEvents() <-chan FileCompleteEvent {
+	return h.fileSub.Events()
 }
 
 // New constructs an Engine with the given config. The config is validated and
@@ -180,6 +195,7 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 	h := &Handle{
 		T:        t,
 		pieceSub: startPieceSubscription(t, e.log),
+		fileSub:  startFileTracker(t, e.log),
 	}
 	e.handles[ih] = h
 	go e.autoIndex(h)
@@ -267,6 +283,7 @@ func (e *Engine) Close() error {
 	e.closed = true
 	for _, h := range e.handles {
 		h.pieceSub.Close()
+		h.fileSub.Close()
 	}
 	errs := e.client.Close()
 	if len(errs) > 0 {

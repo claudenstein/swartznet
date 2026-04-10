@@ -15,8 +15,8 @@ research and design documents that motivate the architecture.
 | **Research & design** | ✅ Complete | Five reports in `docs/` totalling ~4,400 lines. |
 | **M1 — Go scaffold + engine smoke test** | ✅ Complete | Minimal CLI wraps `anacrolix/torrent`, adds a magnet link, downloads and seeds. Engine wrapper exposes the extension hooks M2/M3 depend on. |
 | **M2.0 — Torrent-level metadata index (Layer L start)** | ✅ Complete | Bleve full-text index auto-populated on torrent add; `swartznet search <query>` works over torrent names, file paths, and trackers. |
-| M2.1 — Piece-to-file completion tracker | 🚧 Next | File-complete events synthesised from the piece-state subscription. |
-| M2.2 — Text extractors + file-content indexing | Planned | Plain text, subtitle, source code extractors feed Bleve with actual file contents. |
+| **M2.1 — Piece-to-file completion tracker** | ✅ Complete | `FileCompleteEvent` stream synthesised from the piece-state subscription; handles resume (seeds pending counts from current piece state). Unit-tested on single-file, multi-file, and zero-length-file layouts. |
+| M2.2 — Text extractors + file-content indexing | 🚧 Next | Plain text, subtitle, source code extractors subscribe to FileCompleteEvent and feed Bleve with actual file contents. |
 | M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
 | M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
 | M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
