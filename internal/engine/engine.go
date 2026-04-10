@@ -178,6 +178,22 @@ type Handle struct {
 	// emits one FileCompleteEvent per file the first time that file reaches
 	// a fully-verified state.
 	fileSub *fileTracker
+
+	// pausedMu guards paused. anacrolix/torrent's
+	// dataDownloadDisallowed field is private, so we mirror the
+	// state here for the M10 GUI download controls.
+	pausedMu sync.Mutex
+	paused   bool
+}
+
+// IsPaused reports whether this torrent has been explicitly
+// paused via Engine.PauseTorrent. Pause is currently a soft
+// state — the torrent stays in the engine but stops requesting
+// pieces and stops responding to peer requests.
+func (h *Handle) IsPaused() bool {
+	h.pausedMu.Lock()
+	defer h.pausedMu.Unlock()
+	return h.paused
 }
 
 // PieceEvents returns a receive-only channel of piece state-change events
@@ -666,6 +682,219 @@ func (e *Engine) Torrents() []*Handle {
 		out = append(out, h)
 	}
 	return out
+}
+
+// TorrentSnapshot is the read-only view of a torrent's state for
+// the GUI download list. Computed at call time from the underlying
+// anacrolix torrent and the engine's pause-state mirror.
+type TorrentSnapshot struct {
+	// InfoHash is the 40-character lowercase hex form.
+	InfoHash string
+	// Name is the human-readable torrent name. Empty until the
+	// metadata fetch completes.
+	Name string
+	// Size is the total bytes in the torrent. Zero until metadata.
+	Size int64
+	// BytesCompleted is the total bytes verified on disk so far.
+	BytesCompleted int64
+	// BytesMissing is the bytes still left to download.
+	BytesMissing int64
+	// Progress is the BytesCompleted / Size ratio in [0, 1]. Zero
+	// when Size is unknown.
+	Progress float64
+	// Files is the count of files in the torrent.
+	Files int
+	// ActivePeers / HalfOpenPeers / PendingPeers / TotalPeers
+	// mirror anacrolix's TorrentStats fields.
+	ActivePeers   int
+	HalfOpenPeers int
+	PendingPeers  int
+	TotalPeers    int
+	// Seeders is the number of currently-connected peers that
+	// have the entire torrent.
+	Seeders int
+	// Paused reports whether the user has paused this torrent
+	// via PauseTorrent. While paused, no piece requests fly out
+	// and no incoming requests are answered.
+	Paused bool
+	// Status is a human-readable summary of the torrent's
+	// current state: "metadata", "downloading", "seeding",
+	// "complete", or "paused".
+	Status string
+}
+
+// TorrentSnapshots returns a TorrentSnapshot for every torrent
+// currently in the engine. Cheap enough to call from a polling
+// HTTP handler — each snapshot is a few field reads plus one
+// anacrolix Stats() call.
+func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
+	handles := e.Torrents()
+	out := make([]TorrentSnapshot, 0, len(handles))
+	for _, h := range handles {
+		out = append(out, snapshotOf(h))
+	}
+	return out
+}
+
+// snapshotOf computes a TorrentSnapshot for a single Handle.
+//
+// Pre-metadata defensive: anacrolix/torrent v1.61.0 panics with a
+// nil pointer dereference inside BytesMissing()/bytesLeft() when
+// the torrent has not yet received its info dictionary. We
+// detect that case via t.Info() == nil and skip every call that
+// would touch the (still-nil) Info. The HTTP handler's
+// net/http panic recovery would otherwise leave the response
+// empty and the client would see "empty reply from server".
+//
+// Files() / Length() / BytesCompleted() / BytesMissing() / Stats()
+// all need the info; only InfoHash() / Name() / IsPaused() are
+// safe pre-metadata.
+func snapshotOf(h *Handle) TorrentSnapshot {
+	t := h.T
+	ih := t.InfoHash().HexString()
+	paused := h.IsPaused()
+
+	if t.Info() == nil {
+		status := "metadata"
+		if paused {
+			status = "paused"
+		}
+		return TorrentSnapshot{
+			InfoHash: ih,
+			Name:     t.Name(),
+			Paused:   paused,
+			Status:   status,
+		}
+	}
+
+	stats := t.Stats()
+	size := t.Length()
+	completed := t.BytesCompleted()
+	missing := t.BytesMissing()
+	files := len(t.Files())
+
+	var progress float64
+	if size > 0 {
+		progress = float64(completed) / float64(size)
+		if progress > 1 {
+			progress = 1
+		}
+	}
+
+	status := "downloading"
+	switch {
+	case paused:
+		status = "paused"
+	case missing == 0 && size > 0:
+		status = "seeding"
+	case completed > 0:
+		status = "downloading"
+	}
+
+	return TorrentSnapshot{
+		InfoHash:       ih,
+		Name:           t.Name(),
+		Size:           size,
+		BytesCompleted: completed,
+		BytesMissing:   missing,
+		Progress:       progress,
+		Files:          files,
+		ActivePeers:    stats.ActivePeers,
+		HalfOpenPeers:  stats.HalfOpenPeers,
+		PendingPeers:   stats.PendingPeers,
+		TotalPeers:     stats.TotalPeers,
+		Seeders:        stats.ConnectedSeeders,
+		Paused:         paused,
+		Status:         status,
+	}
+}
+
+// PauseTorrent disables data download for the torrent identified
+// by the 40-char hex infohash. Idempotent. Returns an error if
+// the infohash is unknown to the engine.
+//
+// Pause is a soft stop: the torrent stays registered with the
+// engine, peer connections stay open for sn_search, but no
+// piece requests fly out. Calling ResumeTorrent later restores
+// normal operation without re-fetching metadata.
+func (e *Engine) PauseTorrent(infoHashHex string) error {
+	h, err := e.handleByHex(infoHashHex)
+	if err != nil {
+		return err
+	}
+	h.pausedMu.Lock()
+	already := h.paused
+	h.paused = true
+	h.pausedMu.Unlock()
+	if already {
+		return nil
+	}
+	h.T.DisallowDataDownload()
+	h.T.DisallowDataUpload()
+	e.log.Info("engine.torrent_paused", "info_hash", infoHashHex)
+	return nil
+}
+
+// ResumeTorrent re-enables data download/upload for the torrent.
+// Idempotent. No-op if the torrent is already running.
+func (e *Engine) ResumeTorrent(infoHashHex string) error {
+	h, err := e.handleByHex(infoHashHex)
+	if err != nil {
+		return err
+	}
+	h.pausedMu.Lock()
+	wasPaused := h.paused
+	h.paused = false
+	h.pausedMu.Unlock()
+	if !wasPaused {
+		return nil
+	}
+	h.T.AllowDataDownload()
+	h.T.AllowDataUpload()
+	e.log.Info("engine.torrent_resumed", "info_hash", infoHashHex)
+	return nil
+}
+
+// RemoveTorrent drops the torrent from the engine entirely. The
+// underlying anacrolix Torrent is dropped (peer connections
+// closed, piece state forgotten); on-disk file content under
+// DataDir is left in place so the user can reuse it. The
+// associated index entries are NOT deleted — call
+// indexer.DeleteContentForTorrent if you want to forget the
+// indexed content as well.
+func (e *Engine) RemoveTorrent(infoHashHex string) error {
+	h, err := e.handleByHex(infoHashHex)
+	if err != nil {
+		return err
+	}
+	// Tear down our subscriptions before dropping the underlying
+	// torrent so the goroutines exit cleanly.
+	h.pieceSub.Close()
+	h.fileSub.Close()
+	h.T.Drop()
+
+	e.mu.Lock()
+	delete(e.handles, h.T.InfoHash())
+	e.mu.Unlock()
+	e.log.Info("engine.torrent_removed", "info_hash", infoHashHex)
+	return nil
+}
+
+// handleByHex parses a 40-char hex infohash and looks up the
+// matching Handle. Returns a descriptive error if the input is
+// malformed or the infohash is not registered.
+func (e *Engine) handleByHex(infoHashHex string) (*Handle, error) {
+	var ih metainfo.Hash
+	if err := ih.FromHexString(infoHashHex); err != nil {
+		return nil, fmt.Errorf("engine: invalid infohash %q: %w", infoHashHex, err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	h, ok := e.handles[ih]
+	if !ok {
+		return nil, fmt.Errorf("engine: no torrent with infohash %s", infoHashHex)
+	}
+	return h, nil
 }
 
 // Close tears down the Client and all handles. Safe to call multiple times;

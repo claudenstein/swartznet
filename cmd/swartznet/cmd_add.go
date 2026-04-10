@@ -101,6 +101,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 			Tracker:   eng.ReputationTracker(),
 			Sources:   eng.SourceTracker(),
 			Adder:     eng,
+			Control:   &controllerAdapter{eng: eng},
 		})
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)

@@ -18,6 +18,51 @@ import (
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
+// TorrentController is the narrow interface the HTTP API needs
+// from the engine for the M10 GUI download controls. The engine
+// satisfies it via direct methods on *engine.Engine.
+//
+// Defined as a local interface so the httpapi package keeps zero
+// dependency on internal/engine — the adapter pattern is the
+// same one used for indexer + swarmsearch + dhtindex. Embeds
+// the older TorrentAdder for backwards compatibility with the
+// M8c POST /torrent path.
+type TorrentController interface {
+	TorrentAdder
+	// TorrentSnapshots returns a snapshot of every active
+	// torrent. Cheap to call from a polling handler.
+	TorrentSnapshots() []TorrentSnapshot
+	// PauseTorrent stops piece requests for the given infohash.
+	// Idempotent.
+	PauseTorrent(infoHashHex string) error
+	// ResumeTorrent re-enables piece requests. Idempotent.
+	ResumeTorrent(infoHashHex string) error
+	// RemoveTorrent drops the torrent entirely (closes peer
+	// connections, forgets piece state). On-disk file content
+	// is left in place.
+	RemoveTorrent(infoHashHex string) error
+}
+
+// TorrentSnapshot mirrors engine.TorrentSnapshot. Re-declared
+// here so the httpapi package does not import internal/engine.
+// The engine's snapshotter returns a slice of these directly.
+type TorrentSnapshot struct {
+	InfoHash       string  `json:"infohash"`
+	Name           string  `json:"name"`
+	Size           int64   `json:"size"`
+	BytesCompleted int64   `json:"bytes_completed"`
+	BytesMissing   int64   `json:"bytes_missing"`
+	Progress       float64 `json:"progress"`
+	Files          int     `json:"files"`
+	ActivePeers    int     `json:"active_peers"`
+	HalfOpenPeers  int     `json:"half_open_peers"`
+	PendingPeers   int     `json:"pending_peers"`
+	TotalPeers     int     `json:"total_peers"`
+	Seeders        int     `json:"seeders"`
+	Paused         bool    `json:"paused"`
+	Status         string  `json:"status"`
+}
+
 // TorrentAdder is the narrow interface the HTTP API needs from
 // the engine in order to satisfy POST /torrent. The engine
 // satisfies it via an adapter method (see internal/engine).
@@ -48,6 +93,7 @@ type Server struct {
 	tracker   *reputation.Tracker
 	sources   *reputation.SourceTracker
 	adder     TorrentAdder
+	control   TorrentController
 	timeout   time.Duration
 
 	httpServer *http.Server
@@ -66,6 +112,7 @@ type Options struct {
 	Tracker   *reputation.Tracker
 	Sources   *reputation.SourceTracker
 	Adder     TorrentAdder
+	Control   TorrentController
 }
 
 // New constructs a Server with the legacy index+swarm signature.
@@ -96,6 +143,7 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		tracker:   opts.Tracker,
 		sources:   opts.Sources,
 		adder:     opts.Adder,
+		control:   opts.Control,
 		timeout:   10 * time.Second,
 	}
 }
@@ -130,6 +178,10 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /torrent", s.handleAddTorrent)
 	mux.HandleFunc("GET /capabilities", s.handleGetCapabilities)
 	mux.HandleFunc("POST /capabilities", s.handleSetCapabilities)
+	mux.HandleFunc("GET /torrents", s.handleListTorrents)
+	mux.HandleFunc("POST /torrents/{infohash}/pause", s.handlePauseTorrent)
+	mux.HandleFunc("POST /torrents/{infohash}/resume", s.handleResumeTorrent)
+	mux.HandleFunc("DELETE /torrents/{infohash}", s.handleDeleteTorrent)
 
 	// Web UI: serve the embedded index.html at / and the
 	// static assets at /static/. The HTTP API endpoints above
@@ -634,6 +686,66 @@ func (s *Server) handleGetCapabilities(w http.ResponseWriter, _ *http.Request) {
 		FileHits:    c.FileHits,
 		ContentHits: c.ContentHits,
 		Publisher:   c.Publisher,
+	})
+}
+
+// TorrentListResponse is the JSON body for GET /torrents.
+type TorrentListResponse struct {
+	Torrents []TorrentSnapshot `json:"torrents"`
+}
+
+func (s *Server) handleListTorrents(w http.ResponseWriter, _ *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(TorrentListResponse{
+		Torrents: s.control.TorrentSnapshots(),
+	})
+}
+
+func (s *Server) handlePauseTorrent(w http.ResponseWriter, r *http.Request) {
+	s.controlOne(w, r, "pause", func(ih string) error {
+		return s.control.PauseTorrent(ih)
+	})
+}
+
+func (s *Server) handleResumeTorrent(w http.ResponseWriter, r *http.Request) {
+	s.controlOne(w, r, "resume", func(ih string) error {
+		return s.control.ResumeTorrent(ih)
+	})
+}
+
+func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
+	s.controlOne(w, r, "remove", func(ih string) error {
+		return s.control.RemoveTorrent(ih)
+	})
+}
+
+// controlOne is the shared body for the three pause / resume /
+// remove handlers. Validates the infohash, calls the supplied
+// engine method, returns a {ok, infohash, action} JSON envelope.
+func (s *Server) controlOne(w http.ResponseWriter, r *http.Request, action string, fn func(ih string) error) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ihHex := r.PathValue("infohash")
+	if _, err := hex.DecodeString(ihHex); err != nil || len(ihHex) != 40 {
+		http.Error(w, "infohash must be 40 hex characters", http.StatusBadRequest)
+		return
+	}
+	if err := fn(ihHex); err != nil {
+		http.Error(w, action+": "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.log.Info("httpapi.torrent_control", "action", action, "infohash", ihHex)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":       true,
+		"infohash": ihHex,
+		"action":   action,
 	})
 }
 
