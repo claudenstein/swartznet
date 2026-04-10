@@ -1,0 +1,215 @@
+package dhtindex
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/sha1"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/anacrolix/dht/v2"
+	"github.com/anacrolix/dht/v2/bep44"
+	"github.com/anacrolix/dht/v2/exts/getput"
+	"github.com/anacrolix/torrent/bencode"
+)
+
+// Putter writes a KeywordValue to the DHT under the publisher's
+// (pubkey, keyword) target. Implementations must sign the value with
+// the publisher's private key per BEP-44.
+type Putter interface {
+	// Put stores the given value under salt. Returns an error if
+	// the put traversal cannot reach a quorum of nodes or if the
+	// value exceeds MaxValueBytes.
+	Put(ctx context.Context, salt []byte, value KeywordValue) error
+}
+
+// Getter looks up a KeywordValue from the DHT under a specific
+// (pubkey, salt) pair. Implementations must verify the BEP-44
+// signature against the requested pubkey before returning a result.
+type Getter interface {
+	Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error)
+}
+
+// AnacrolixPutter is the production Putter, backed by an
+// anacrolix/dht/v2 *dht.Server. Construct with NewAnacrolixPutter
+// after pulling the *dht.Server out of the engine via Engine.DHTServer.
+type AnacrolixPutter struct {
+	server  *dht.Server
+	private ed25519.PrivateKey
+	public  [32]byte
+}
+
+// NewAnacrolixPutter wires a Putter against a live anacrolix DHT
+// server. The private key is used to sign every put.
+func NewAnacrolixPutter(server *dht.Server, priv ed25519.PrivateKey) (*AnacrolixPutter, error) {
+	if server == nil {
+		return nil, errors.New("dhtindex: nil DHT server")
+	}
+	if len(priv) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("dhtindex: bad private key size %d", len(priv))
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok || len(pub) != 32 {
+		return nil, errors.New("dhtindex: cannot derive public key")
+	}
+	var pubArr [32]byte
+	copy(pubArr[:], pub)
+	return &AnacrolixPutter{
+		server:  server,
+		private: priv,
+		public:  pubArr,
+	}, nil
+}
+
+// PublicKey returns the publisher's public key as a [32]byte. Useful
+// for log output and for advertising "the pubkey at which my hits
+// can be found" to other nodes.
+func (a *AnacrolixPutter) PublicKey() [32]byte { return a.public }
+
+// Put implements Putter. It encodes the value, computes the BEP-44
+// target from (publisher_pubkey, salt), and uses anacrolix's getput.Put
+// to publish to the closest k DHT nodes. The provided ctx bounds the
+// total operation time including the get-traversal that getput.Put
+// performs internally to discover the current sequence number.
+func (a *AnacrolixPutter) Put(ctx context.Context, salt []byte, value KeywordValue) error {
+	encoded, err := EncodeValue(value)
+	if err != nil {
+		return err
+	}
+	// We pre-decode the encoded bytes back into an interface{} so
+	// the bep44.Put.Sign call uses bencode.MustMarshal on a value
+	// that round-trips identically to what we just encoded.
+	var v interface{}
+	if err := bencode.Unmarshal(encoded, &v); err != nil {
+		return fmt.Errorf("dhtindex: re-decode for put: %w", err)
+	}
+
+	target := bep44.MakeMutableTarget(a.public, salt)
+	pubArr := a.public
+	seqToPut := func(seq int64) bep44.Put {
+		put := bep44.Put{
+			V:    v,
+			K:    &pubArr,
+			Salt: salt,
+			Seq:  seq + 1,
+		}
+		put.Sign(a.private)
+		return put
+	}
+	_, err = getput.Put(ctx, target, a.server, salt, seqToPut)
+	if err != nil {
+		return fmt.Errorf("dhtindex: put traversal: %w", err)
+	}
+	return nil
+}
+
+// AnacrolixGetter is the production Getter backed by an anacrolix
+// *dht.Server. The Getter does not need a private key.
+type AnacrolixGetter struct {
+	server *dht.Server
+}
+
+// NewAnacrolixGetter wires a Getter against a live anacrolix DHT
+// server.
+func NewAnacrolixGetter(server *dht.Server) (*AnacrolixGetter, error) {
+	if server == nil {
+		return nil, errors.New("dhtindex: nil DHT server")
+	}
+	return &AnacrolixGetter{server: server}, nil
+}
+
+// Get implements Getter. It computes the SHA1(pubkey || salt) target,
+// runs the BEP-44 get traversal, decodes the highest-seq response,
+// and returns the parsed KeywordValue. Signature verification is
+// performed inside the anacrolix get path.
+func (a *AnacrolixGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error) {
+	target := bep44.MakeMutableTarget(pubkey, salt)
+	res, _, err := getput.Get(ctx, target, a.server, nil, salt)
+	if err != nil {
+		return KeywordValue{}, fmt.Errorf("dhtindex: get %x: %w", target, err)
+	}
+	return DecodeValue([]byte(res.V))
+}
+
+// MemoryPutterGetter is an in-process Putter+Getter backed by a
+// concurrent map. It exists so the publisher worker (M4d) and the
+// lookup path (M4e) can be unit-tested without spinning up a real
+// DHT server. Production code should never use this directly.
+type MemoryPutterGetter struct {
+	mu    sync.Mutex
+	store map[[20]byte]storedItem
+	priv  ed25519.PrivateKey
+	pub   [32]byte
+}
+
+type storedItem struct {
+	pubkey [32]byte
+	salt   []byte
+	value  KeywordValue
+	seq    int64
+	stored time.Time
+}
+
+// NewMemoryPutterGetter constructs an in-memory store. The provided
+// private key is used to sign every Put so the on-disk seq numbers
+// behave the same way they would in production. Pass nil to skip
+// signing (the test still works because the in-memory Get path does
+// not verify signatures).
+func NewMemoryPutterGetter(priv ed25519.PrivateKey) *MemoryPutterGetter {
+	m := &MemoryPutterGetter{
+		store: make(map[[20]byte]storedItem),
+	}
+	if priv != nil {
+		m.priv = priv
+		if pub, ok := priv.Public().(ed25519.PublicKey); ok {
+			copy(m.pub[:], pub)
+		}
+	}
+	return m
+}
+
+// Put stores a value under the (pub, salt) target.
+func (m *MemoryPutterGetter) Put(ctx context.Context, salt []byte, value KeywordValue) error {
+	if _, err := EncodeValue(value); err != nil {
+		return err
+	}
+	target := sha1.Sum(append(m.pub[:], salt...))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prev := m.store[target]
+	m.store[target] = storedItem{
+		pubkey: m.pub,
+		salt:   append([]byte(nil), salt...),
+		value:  value,
+		seq:    prev.seq + 1,
+		stored: time.Now(),
+	}
+	return nil
+}
+
+// Get fetches the value at (pubkey, salt) from the in-memory store.
+func (m *MemoryPutterGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error) {
+	target := sha1.Sum(append(pubkey[:], salt...))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	item, ok := m.store[target]
+	if !ok {
+		return KeywordValue{}, errors.New("dhtindex: not found")
+	}
+	return item.value, nil
+}
+
+// Items returns a snapshot of every entry in the store, sorted by
+// the time they were last updated. Used by tests to assert what got
+// stored without poking at internal fields.
+func (m *MemoryPutterGetter) Items() []KeywordValue {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]KeywordValue, 0, len(m.store))
+	for _, it := range m.store {
+		out = append(out, it.value)
+	}
+	return out
+}

@@ -72,15 +72,20 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /search", s.handleSearch)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
-	s.httpServer = &http.Server{
+	srv := &http.Server{
 		Handler:     mux,
 		ReadTimeout: 5 * time.Second,
 	}
-	go func() {
-		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	s.httpServer = srv
+	// Pass srv as a parameter so the goroutine does not race
+	// against Stop() resetting s.httpServer to nil. The goroutine
+	// owns its own pointer; Stop still calls Shutdown on the same
+	// underlying *http.Server through s.httpServer.
+	go func(server *http.Server) {
+		if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.log.Warn("httpapi.serve_err", "err", err)
 		}
-	}()
+	}(srv)
 	s.log.Info("httpapi.listening", "addr", s.Addr())
 	return nil
 }
