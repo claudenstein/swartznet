@@ -46,6 +46,7 @@ type Server struct {
 	lookup    *dhtindex.Lookup
 	bloom     *reputation.BloomFilter
 	tracker   *reputation.Tracker
+	sources   *reputation.SourceTracker
 	adder     TorrentAdder
 	timeout   time.Duration
 
@@ -63,6 +64,7 @@ type Options struct {
 	Lookup    *dhtindex.Lookup
 	Bloom     *reputation.BloomFilter
 	Tracker   *reputation.Tracker
+	Sources   *reputation.SourceTracker
 	Adder     TorrentAdder
 }
 
@@ -92,6 +94,7 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		lookup:    opts.Lookup,
 		bloom:     opts.Bloom,
 		tracker:   opts.Tracker,
+		sources:   opts.Sources,
 		adder:     opts.Adder,
 		timeout:   10 * time.Second,
 	}
@@ -530,20 +533,43 @@ func (s *Server) handleFlag(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reputation tracker not configured", http.StatusServiceUnavailable)
 		return
 	}
-	// We don't have a per-infohash → indexer-pubkey association
-	// stored at the API layer; the M5d simple version flags
-	// against EVERY known indexer, which is the safest fallback
-	// because it forces user-flagged content to drag down every
-	// publisher claiming the hit. M6 will track per-hit sources
-	// and flag only the indexer(s) that actually returned this
-	// infohash.
-	snap := s.tracker.Snapshot()
-	pks := make([]reputation.PubKeyHex, 0, len(snap))
-	for _, e := range snap {
-		pks = append(pks, e.PubKey)
+
+	// M9: prefer per-hit source attribution. The SourceTracker
+	// (populated by Lookup.Query) tells us exactly which indexer
+	// pubkeys returned this hit, so we can demote only those
+	// rather than punishing every known indexer indiscriminately.
+	//
+	// If no source attribution exists for this hash (the user
+	// never queried it through Layer D, or it has been evicted
+	// from the LRU), fall back to the M5d behaviour of demoting
+	// every known indexer — it is the safest fallback because
+	// any indexer that ends up claiming the same hash later will
+	// also lose reputation, which is exactly what we want for a
+	// hash the user has explicitly flagged.
+	var pks []reputation.PubKeyHex
+	var attribution string
+	if s.sources != nil {
+		pks = s.sources.Sources(req.InfoHash)
+	}
+	if len(pks) > 0 {
+		attribution = "targeted"
+	} else {
+		attribution = "fallback"
+		snap := s.tracker.Snapshot()
+		pks = make([]reputation.PubKeyHex, 0, len(snap))
+		for _, e := range snap {
+			pks = append(pks, e.PubKey)
+		}
 	}
 	s.tracker.RecordFlagged(pks...)
-	s.log.Info("httpapi.flag", "infohash", req.InfoHash, "indexers", len(pks))
+	if s.sources != nil {
+		s.sources.Forget(req.InfoHash)
+	}
+	s.log.Info("httpapi.flag",
+		"infohash", req.InfoHash,
+		"indexers", len(pks),
+		"attribution", attribution,
+	)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(FlagResponse{OK: true, InfoHash: req.InfoHash})
 }

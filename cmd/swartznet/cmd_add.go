@@ -99,6 +99,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 			Lookup:    eng.Lookup(),
 			Bloom:     eng.KnownGoodBloom(),
 			Tracker:   eng.ReputationTracker(),
+			Sources:   eng.SourceTracker(),
 			Adder:     eng,
 		})
 		if err := api.Start(); err != nil {

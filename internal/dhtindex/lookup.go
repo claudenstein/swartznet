@@ -27,8 +27,14 @@ import (
 //     boost results whose infohash the user has already downloaded
 //     successfully or explicitly confirmed.
 //
-// Both helpers are nil by default; the M4e tests still pass
-// unchanged. M5d wires them up via the Engine.
+// As of M9, Lookup also writes per-hit source attribution into
+// an optional *reputation.SourceTracker. The HTTP /flag handler
+// then reads from the same tracker so a flag command demotes
+// only the indexers that actually returned the flagged hash,
+// instead of falling back to "demote every known indexer".
+//
+// All helpers are nil by default; the M4e tests still pass
+// unchanged. M5d / M9 wire them up via the Engine.
 //
 // Lookup is safe for concurrent use.
 type Lookup struct {
@@ -38,6 +44,7 @@ type Lookup struct {
 	indexers map[[32]byte]IndexerInfo
 	tracker  *reputation.Tracker
 	bloom    *reputation.BloomFilter
+	sources  *reputation.SourceTracker
 	minScore float64 // skip indexers with score below this
 }
 
@@ -109,6 +116,16 @@ func (l *Lookup) SetTracker(t *reputation.Tracker) {
 func (l *Lookup) SetBloom(b *reputation.BloomFilter) {
 	l.mu.Lock()
 	l.bloom = b
+	l.mu.Unlock()
+}
+
+// SetSourceTracker attaches a per-hit source tracker (M9). When
+// non-nil, Query records every (infohash → indexer pubkey)
+// mapping it observes, so a later flag command can demote only
+// the specific indexers that returned the flagged hash.
+func (l *Lookup) SetSourceTracker(s *reputation.SourceTracker) {
+	l.mu.Lock()
+	l.sources = s
 	l.mu.Unlock()
 }
 
@@ -221,6 +238,7 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 	}
 	tracker := l.tracker
 	bloom := l.bloom
+	sources := l.sources
 	minScore := l.minScore
 	l.mu.RUnlock()
 
@@ -309,6 +327,20 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 	// Compute per-hit score from indexer reputation + bloom flag.
 	for ih, lh := range merged {
 		lh.Score = scoreLookupHit(lh, hitSources[ih], tracker)
+	}
+
+	// Record per-hit source attribution so M9's targeted flag
+	// path can later look up which indexers claimed each hash.
+	// This runs after the merge so each infohash gets one
+	// RecordMany call with the deduplicated source list.
+	if sources != nil {
+		for ih, pks := range hitSources {
+			pkHexes := make([]reputation.PubKeyHex, 0, len(pks))
+			for _, pk := range pks {
+				pkHexes = append(pkHexes, reputation.PubKey(pk))
+			}
+			sources.RecordMany(ih, pkHexes)
+		}
 	}
 
 	for _, lh := range merged {

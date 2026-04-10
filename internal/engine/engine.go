@@ -43,12 +43,13 @@ type Engine struct {
 	swarm    *swarmsearch.Protocol // always non-nil after New
 	peers    *peerTracker          // addr → *torrent.PeerConn, for swarmSender
 
-	identity  *identity.Identity     // ed25519 publisher keypair, nil for tests
-	publisher *dhtindex.Publisher    // nil if no DHT or no identity
-	manifest  *dhtindex.Manifest     // owned by publisher; nil iff publisher nil
-	lookup    *dhtindex.Lookup       // M4e DHT keyword lookup; nil iff no DHT
-	bloom     *reputation.BloomFilter // M5 known-good infohash filter; nil if disabled
-	tracker   *reputation.Tracker    // M5 per-pubkey reputation tracker; nil if disabled
+	identity  *identity.Identity        // ed25519 publisher keypair, nil for tests
+	publisher *dhtindex.Publisher       // nil if no DHT or no identity
+	manifest  *dhtindex.Manifest        // owned by publisher; nil iff publisher nil
+	lookup    *dhtindex.Lookup          // M4e DHT keyword lookup; nil iff no DHT
+	bloom     *reputation.BloomFilter   // M5 known-good infohash filter; nil if disabled
+	tracker   *reputation.Tracker       // M5 per-pubkey reputation tracker; nil if disabled
+	sources   *reputation.SourceTracker // M9 per-hit source tracker; always non-nil after New
 
 	mu       sync.Mutex
 	closed   bool
@@ -78,6 +79,13 @@ func (e *Engine) ReputationTracker() *reputation.Tracker { return e.tracker }
 // KnownGoodBloom returns the engine's known-good infohash Bloom
 // filter, or nil if disabled.
 func (e *Engine) KnownGoodBloom() *reputation.BloomFilter { return e.bloom }
+
+// SourceTracker returns the engine's per-hit source tracker. The
+// httpapi flag handler uses it to demote only the specific
+// indexers that returned a flagged infohash. Always non-nil
+// after engine.New (the tracker has no on-disk persistence; it
+// repopulates naturally as the user runs queries).
+func (e *Engine) SourceTracker() *reputation.SourceTracker { return e.sources }
 
 // peerTracker maintains a thread-safe address → *torrent.PeerConn map.
 // Populated by the PeerConnAdded callback and cleaned by PeerConnClosed.
@@ -325,6 +333,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 			log.Info("engine.reputation_loaded", "path", cfg.ReputationPath)
 		}
 	}
+	// SourceTracker (M9) has no on-disk persistence by design —
+	// its content is the user's recent query history, which is
+	// small and re-populates naturally on use. Constructing it
+	// unconditionally keeps the targeted-flag path always
+	// available even when the daemon was just restarted.
+	eng.sources = reputation.NewSourceTracker(0)
 
 	// Load (or create) the persistent identity, then start a DHT
 	// publisher backed by it. Failures here are non-fatal: a node
@@ -380,12 +394,16 @@ func (e *Engine) startPublisher() error {
 	}
 	e.lookup = dhtindex.NewLookup(getter)
 	e.lookup.AddIndexer(e.identity.PublicKeyBytes(), "self")
-	// Wire the M5 spam-resistance helpers if they were loaded.
+	// Wire the M5 spam-resistance helpers if they were loaded,
+	// plus the M9 source tracker (always present).
 	if e.tracker != nil {
 		e.lookup.SetTracker(e.tracker)
 	}
 	if e.bloom != nil {
 		e.lookup.SetBloom(e.bloom)
+	}
+	if e.sources != nil {
+		e.lookup.SetSourceTracker(e.sources)
 	}
 	if e.cfg.MinIndexerScore > 0 {
 		e.lookup.SetMinIndexerScore(e.cfg.MinIndexerScore)
