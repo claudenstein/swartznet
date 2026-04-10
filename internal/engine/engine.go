@@ -45,6 +45,7 @@ type Engine struct {
 	identity  *identity.Identity   // ed25519 publisher keypair, nil for tests
 	publisher *dhtindex.Publisher  // nil if no DHT or no identity
 	manifest  *dhtindex.Manifest   // owned by publisher; nil iff publisher nil
+	lookup    *dhtindex.Lookup     // M4e DHT keyword lookup; nil iff no DHT
 
 	mu       sync.Mutex
 	closed   bool
@@ -60,6 +61,12 @@ func (e *Engine) Publisher() *dhtindex.Publisher { return e.publisher }
 // Identity returns the engine's persistent ed25519 keypair, or nil
 // if no identity was loaded.
 func (e *Engine) Identity() *identity.Identity { return e.identity }
+
+// Lookup returns the engine's DHT keyword lookup handle, or nil if
+// no DHT server is available. If we have an identity, our own pubkey
+// is automatically added as a known indexer so we can find our own
+// published entries during testing.
+func (e *Engine) Lookup() *dhtindex.Lookup { return e.lookup }
 
 // peerTracker maintains a thread-safe address → *torrent.PeerConn map.
 // Populated by the PeerConnAdded callback and cleaned by PeerConnClosed.
@@ -304,9 +311,10 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	return eng, nil
 }
 
-// startPublisher constructs the DHT keyword publisher if conditions
-// are met (an identity is loaded, the underlying torrent client
-// exposes an anacrolix DHT server). Called once from engine.New.
+// startPublisher constructs the DHT keyword publisher AND lookup if
+// conditions are met (an identity is loaded, the underlying torrent
+// client exposes an anacrolix DHT server). Called once from
+// engine.New.
 func (e *Engine) startPublisher() error {
 	if e.identity == nil {
 		return errors.New("engine: no identity")
@@ -327,6 +335,16 @@ func (e *Engine) startPublisher() error {
 	e.publisher = dhtindex.NewPublisher(put, mf, dhtindex.DefaultPublisherOptions(), e.log)
 	e.publisher.Start()
 	e.log.Info("engine.publisher_started", "manifest", e.cfg.PublisherManifest)
+
+	// Build the matching lookup handle. Self-pubkey is added as a
+	// known indexer so the user can `swartznet search --dht` against
+	// their own freshly-published entries during local testing.
+	getter, err := dhtindex.NewAnacrolixGetter(srv)
+	if err != nil {
+		return fmt.Errorf("engine: new anacrolix getter: %w", err)
+	}
+	e.lookup = dhtindex.NewLookup(getter)
+	e.lookup.AddIndexer(e.identity.PublicKeyBytes(), "self")
 	return nil
 }
 
