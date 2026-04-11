@@ -563,11 +563,17 @@
       class: 'danger',
       text: '✕ remove',
       title: 'Drop this torrent (file content stays on disk)',
-      onclick: async () => {
+      onclick: () => {
         if (!confirm('Remove this torrent from the daemon? (the downloaded files stay on disk)')) {
           return;
         }
-        await controlTorrent('remove', t.infohash);
+        // controlTorrent handles its own errors via alert(), so
+        // the fire-and-forget is intentional — using await here
+        // would create an async onclick whose rejection path is
+        // handled by the nested try/catch in controlTorrent, but
+        // the outer handler looks like it could leak a rejection.
+        // Dropping await removes that concern entirely.
+        controlTorrent('remove', t.infohash);
       },
     }));
     card.appendChild(actions);
@@ -601,20 +607,24 @@
   // ---------- settings (sn_search capability) ----------
 
   document.getElementById('cap-save').addEventListener('click', async () => {
-    const shareLevel = parseInt(document.querySelector('input[name="cap-share"]:checked').value, 10);
+    // The radio group ships with value=2 checked in index.html,
+    // so this should always find a match — but guard anyway so a
+    // hand-edited page or a future layout change can't crash the
+    // click handler.
+    const checked = document.querySelector('input[name="cap-share"]:checked');
+    const shareLevel = checked ? parseInt(checked.value, 10) : 2;
     const fileHits = document.getElementById('cap-files').checked ? 1 : 0;
     const contentHits = document.getElementById('cap-content').checked ? 1 : 0;
+    const msg = document.getElementById('cap-saved');
     try {
       await postJSON('/capabilities', {
         share_local: shareLevel,
         file_hits: fileHits,
         content_hits: contentHits,
       });
-      const msg = document.getElementById('cap-saved');
       msg.textContent = '✓ saved';
       setTimeout(() => { msg.textContent = ''; }, 3000);
     } catch (err) {
-      const msg = document.getElementById('cap-saved');
       msg.textContent = 'error: ' + err.message;
     }
   });

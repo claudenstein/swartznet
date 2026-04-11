@@ -1,5 +1,6 @@
 :root {
   --bg: #0e1116;
+  --bg-elev: #1b2028; /* one step lighter than --bg for nested cards */
   --surface: #161b22;
   --surface-2: #21262d;
   --border: #30363d;
@@ -10,6 +11,7 @@
   --good: #3fb950;
   --bad: #f85149;
   --warn: #d29922;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
