@@ -37,6 +37,16 @@ type Config struct {
 	// DHT. Useful for isolated tests, harmful in normal use.
 	DisableDHT bool
 
+	// DisableDHTPublish, when true, keeps the node joined to the
+	// DHT (so it can do lookups and fetch BEP-46 companion-index
+	// pointers) but skips every outbound BEP-44 mutable-item put.
+	// This is the "leech-only DHT" mode recommended in
+	// docs/08-operations.md for privacy-conscious operators: it
+	// removes the hourly IP-exposure and timing-fingerprint
+	// surface that comes with publishing, at the cost of losing
+	// Layer-D contribution to the network. Default: false.
+	DisableDHTPublish bool
+
 	// HTTPUserAgent overrides the HTTP user-agent string sent to trackers.
 	// Leave empty to use anacrolix/torrent's default.
 	HTTPUserAgent string

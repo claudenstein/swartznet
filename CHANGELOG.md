@@ -155,8 +155,25 @@ below commits are the straightforward follow-through.
   entries). The actual shipping seed list file is not bundled —
   distribution is a post-v1 operational decision.
 
-Still pending from M13: SOCKS5 for the BEP-44 put path +
-threat-model docs (blocker 6).
+- **M13d — privacy & threat model (blocker 6)**: The original
+  research recommendation was "SOCKS5 for the put path", but
+  BEP-44 is UDP and SOCKS5/Tor don't cleanly carry UDP — so
+  the v1 response is the honest subset of that plan instead.
+  New "Privacy and threat model" section in
+  `docs/08-operations.md` enumerates exactly what's visible
+  (IP → ~8 closest DHT nodes; stable pubkey; hourly timing
+  fingerprint; BEP-42 geographic bias) and exactly what isn't
+  (downloads, local queries, companion contents, web UI).
+  Shipping mitigations: `--no-dht` (full disable) and the new
+  `--no-dht-publish` / `cfg.DisableDHTPublish` leech-only mode
+  that keeps the node on the DHT for gets + companion
+  pointers but skips every outbound `put`.
+  `dhtindex.KeywordValue` gains an optional `NextPubKey`
+  bencode field — v1.0.0 ships the field on the wire but
+  never populates it; the rotation logic is scheduled for
+  v1.1 so future clients can adopt it without a format bump.
+  For real publisher anonymity, users layer their own Tor /
+  VPN / i2p on top, as documented.
 
 ### M12 — v1.0.0 preparation
 

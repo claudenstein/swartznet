@@ -25,18 +25,20 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		dataDir   string
-		indexDir  string
-		port      int
-		noDHT     bool
-		leechOnly bool
-		noIndex   bool
-		apiAddr   string
+		dataDir      string
+		indexDir     string
+		port         int
+		noDHT        bool
+		noDHTPublish bool
+		leechOnly    bool
+		noIndex      bool
+		apiAddr      string
 	)
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for downloaded content")
 	fs.StringVar(&indexDir, "index-dir", "", "Bleve index directory (default: ~/.local/share/swartznet/index)")
 	fs.IntVar(&port, "port", -1, "listen port (0 = OS-assigned)")
-	fs.BoolVar(&noDHT, "no-dht", false, "disable the mainline DHT")
+	fs.BoolVar(&noDHT, "no-dht", false, "disable the mainline DHT entirely")
+	fs.BoolVar(&noDHTPublish, "no-dht-publish", false, "stay on the DHT but do not publish any BEP-44 mutable items (privacy mode)")
 	fs.BoolVar(&leechOnly, "leech-only", false, "disable uploading (debug)")
 	fs.BoolVar(&noIndex, "no-index", false, "don't write this torrent to the local index")
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
@@ -60,6 +62,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		cfg.ListenPort = port
 	}
 	cfg.DisableDHT = noDHT
+	cfg.DisableDHTPublish = noDHTPublish
 	cfg.NoUpload = leechOnly
 
 	log := newLogger(stderr)

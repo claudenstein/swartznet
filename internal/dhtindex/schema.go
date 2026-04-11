@@ -41,6 +41,23 @@ type KeywordValue struct {
 	// stored at salts of the form "<keyword>#1", "<keyword>#2", …
 	// Searchers fetch shard 0 first, then fan out to the rest.
 	More int `bencode:"more,omitempty"`
+
+	// NextPubKey is an optional 32-byte ed25519 public key, signed
+	// by the current publisher's private key as part of the BEP-44
+	// mutable item. It points to the publisher's "next" key in a
+	// key-rotation chain, mirroring Tor v3's time-period-key chain.
+	// Subscribers that see this field on a known publisher can
+	// start following the new key automatically while still
+	// trusting the rotation because it rode the current key's
+	// signature.
+	//
+	// v1.0.0 ships the field on the wire but does NOT rotate —
+	// NextPubKey is always empty in v1 puts. The rotation logic is
+	// scheduled for v1.1. Having the field in the v1 schema means
+	// future clients don't need a format bump to start using it.
+	// See the "Privacy and threat model" section of
+	// docs/08-operations.md for the motivation.
+	NextPubKey []byte `bencode:"next_pk,omitempty"`
 }
 
 // KeywordHit is one entry in the Hits list. The field names mirror

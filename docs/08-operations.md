@@ -156,6 +156,86 @@ than the obvious port collision (use `--port`).
 [bep9]: https://www.bittorrent.org/beps/bep_0009.html
 [bep10]: https://www.bittorrent.org/beps/bep_0010.html
 
+## Privacy and threat model
+
+SwartzNet is **spam-resistant, not anonymous**. Running the
+daemon with DHT enabled and an identity loaded exposes the
+following to observers:
+
+### What is visible
+
+1. **Your IP address, to the DHT nodes your puts reach.** Every
+   BEP-44 `put` traverses the mainline DHT toward the ~8 nodes
+   closest to `SHA1(pubkey || salt)`. Those nodes see your
+   source IP (per BEP-42, DHT node IDs are derived from IP, so
+   an adversary running Sybils close to a specific publisher
+   target will reliably observe their puts). The same is true
+   for subscribers doing gets, to a lesser extent.
+2. **Your ed25519 publisher pubkey, as a persistent identity.**
+   The key is regenerated only when you delete `identity.key`;
+   otherwise every BEP-44 mutable item you post is signed by
+   the same key and every Layer-D lookup can correlate past
+   and future puts to the same publisher.
+3. **A hourly timing fingerprint.** The publisher re-announces
+   every keyword once an hour (BEP-44's 2 h TTL with the
+   SwartzNet 55 min put budget). Any observer correlating
+   put times across keys can cluster them to a single
+   publisher even across key rotations.
+4. **Geographic bias in the target set.** Because DHT node IDs
+   derive from IP, the ~8 nodes closest to
+   `SHA1(pubkey || salt)` tend to cluster geographically. This
+   is a property of mainline DHT, not SwartzNet specifically,
+   but it's worth knowing.
+
+### What is NOT visible
+
+- Your downloads themselves (those go through the normal
+  BitTorrent swarm, same as any other client — not through the
+  DHT).
+- Your queries to Layer-L (the local Bleve index, never leaves
+  your machine).
+- The contents of the torrents you publish — Layer D only
+  carries the keyword → infohash mapping, not the data.
+- The local web UI at `localhost:7654`, which is bound to
+  loopback and inaccessible from anywhere but the local
+  machine.
+
+### Mitigations available today
+
+- **Turn off DHT entirely** with `swartznet add --no-dht`. You
+  still get Layer L (local search), Layer S (peer-wire search
+  on the torrents you're actively in the swarm for), and
+  normal BitTorrent downloads. You lose Layer D (no publish,
+  no subscribe to other publishers' keyword indexes).
+- **Run the daemon on a host you're already using Tor/VPN
+  for.** BEP-44 traffic is UDP, which means a SOCKS5 proxy
+  alone is not sufficient (SOCKS5 UDP associate is rarely
+  supported and Tor does not carry UDP at all). The practical
+  approach is full-interface routing via WireGuard/OpenVPN
+  with a privacy-preserving operator, or a VPS-hosted daemon
+  you SSH into.
+- **Rotate `identity.key` between deployments.** Move it aside,
+  let the daemon generate a fresh one, and re-share the new
+  pubkey with your subscribers. This loses accrued reputation.
+
+### What v1.0.0 does NOT ship
+
+- **No onion-routed publish path.** The research in
+  `docs/09-v1-blocker-research.md` confirmed every other
+  production BEP-44 deployment (pkarr, pubky, iroh, btlink)
+  uses stable ed25519 keys with no built-in anonymisation.
+  GNUnet's R5N DHT achieves what we'd want but is incompatible
+  with mainline.
+- **No key rotation schedule.** The Layer-D schema is already
+  forward-prepared with an optional `next_pubkey` field so a
+  future client can publish a new key under the old one's
+  signature, mirroring Tor v3's time-period-key chain — but
+  the actual rotation logic will land in v1.1.
+
+If you need real publisher anonymity, layer your own Tor / VPN
+/ i2p on top. SwartzNet's threat model scope is spam resistance
+in distributed search, not traffic analysis resistance.
+
 ## Troubleshooting
 
 ### "swartznet: cannot reach the daemon at localhost:7654"

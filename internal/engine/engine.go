@@ -430,16 +430,32 @@ func (e *Engine) startPublisher() error {
 		return fmt.Errorf("engine: new anacrolix putter: %w", err)
 	}
 	// Stash the putter so the M11c companion publisher can reuse
-	// it for BEP-46 pointer puts. Same key, same DHT server.
+	// it for BEP-46 pointer puts — this happens even in leech-
+	// only mode (DisableDHTPublish) because companion pointers are
+	// the user's own opt-in publication and are governed by the
+	// separate CompanionDir / follow-list plumbing, not by this
+	// knob. The keyword Publisher worker below is what
+	// DisableDHTPublish actually suppresses.
 	e.pointerPutter = put
-	mf, err := dhtindex.LoadOrCreateManifest(e.cfg.PublisherManifest)
-	if err != nil {
-		return fmt.Errorf("engine: load publisher manifest: %w", err)
+
+	if e.cfg.DisableDHTPublish {
+		// M13d: skip the keyword Publisher worker but keep the
+		// lookup path below intact so the node can still subscribe
+		// to other publishers and fetch companion indexes. This is
+		// the "leech-only DHT" privacy mode.
+		e.log.Info("engine.publisher_disabled_by_config",
+			"reason", "cfg.DisableDHTPublish",
+		)
+	} else {
+		mf, err := dhtindex.LoadOrCreateManifest(e.cfg.PublisherManifest)
+		if err != nil {
+			return fmt.Errorf("engine: load publisher manifest: %w", err)
+		}
+		e.manifest = mf
+		e.publisher = dhtindex.NewPublisher(put, mf, dhtindex.DefaultPublisherOptions(), e.log)
+		e.publisher.Start()
+		e.log.Info("engine.publisher_started", "manifest", e.cfg.PublisherManifest)
 	}
-	e.manifest = mf
-	e.publisher = dhtindex.NewPublisher(put, mf, dhtindex.DefaultPublisherOptions(), e.log)
-	e.publisher.Start()
-	e.log.Info("engine.publisher_started", "manifest", e.cfg.PublisherManifest)
 
 	// Build the matching lookup handle. Self-pubkey is added as a
 	// known indexer so the user can `swartznet search --dht` against
