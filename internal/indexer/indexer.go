@@ -230,6 +230,154 @@ func (i *Index) DocCount() (uint64, error) {
 	return i.bleve.DocCount()
 }
 
+// Stats is the per-index snapshot returned by Stats(). Exposed by
+// the HTTP /index/stats endpoint and the GUI Status tab. All byte
+// counts are "as seen by the file system" — DirSizeBytes is the
+// sum of every regular file under Index.path, so it measures what
+// Bleve's scorch backend actually costs on disk.
+//
+// CorpusTextBytes is the sum of every ContentDoc.Text length in
+// the index — the "raw text we fed to Bleve" number that can be
+// divided into DirSizeBytes to get the text-to-index inflation
+// ratio. This is the measurement that the v1.0.0 open question
+// "how big is Bleve's index per TB of indexed text" wants.
+type Stats struct {
+	// DirBytes is the total on-disk size of the Bleve directory
+	// (the sum of every regular file under Index.path).
+	DirBytes int64 `json:"dir_bytes"`
+	// DocCount is the total number of Bleve documents (torrent +
+	// content, plus the schema sentinel).
+	DocCount uint64 `json:"doc_count"`
+	// TorrentCount is the number of torrent-level documents.
+	TorrentCount uint64 `json:"torrent_count"`
+	// ContentCount is the number of content-level documents
+	// (one per file-chunk extraction).
+	ContentCount uint64 `json:"content_count"`
+	// CorpusTextBytes is the sum of every ContentDoc.Text field
+	// currently in the index. Divide DirBytes by this to get the
+	// index inflation ratio. Zero if the index has no content
+	// docs yet.
+	CorpusTextBytes int64 `json:"corpus_text_bytes"`
+	// InflationRatio is DirBytes / CorpusTextBytes, for when the
+	// corpus is non-empty. Zero otherwise. Useful as a one-number
+	// summary for the GUI.
+	InflationRatio float64 `json:"inflation_ratio"`
+}
+
+// Stats returns a Stats snapshot. Cheap-ish — the corpus-bytes
+// sum requires scanning every content doc via a paginated
+// MatchAll query, so callers should poll at human cadences (e.g.
+// once every few seconds in the GUI), not in tight loops.
+//
+// Used by the HTTP API /index/stats endpoint that exposes the
+// v1.0.0 index-size measurement.
+func (i *Index) Stats() (Stats, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.bleve == nil {
+		return Stats{}, errors.New("indexer: closed")
+	}
+
+	var out Stats
+
+	// Total doc count is straight off the index.
+	total, err := i.bleve.DocCount()
+	if err != nil {
+		return Stats{}, fmt.Errorf("indexer: Stats doc count: %w", err)
+	}
+	out.DocCount = total
+
+	// Per-type counts via two cheap MatchAll queries that only
+	// ask for the type field. We use Size=0 and read Total from
+	// the response envelope so Bleve never has to materialise the
+	// hit list — it's the cheapest "how many docs match" call.
+	for _, tt := range []struct {
+		ty  string
+		dst *uint64
+	}{
+		{typeTorrent, &out.TorrentCount},
+		{typeContent, &out.ContentCount},
+	} {
+		q := bleve.NewQueryStringQuery("+" + fieldType + ":" + tt.ty)
+		sr := bleve.NewSearchRequestOptions(q, 0, 0, false)
+		res, err := i.bleve.Search(sr)
+		if err != nil {
+			return Stats{}, fmt.Errorf("indexer: Stats %s count: %w", tt.ty, err)
+		}
+		*tt.dst = res.Total
+	}
+
+	// Corpus text bytes: walk every content doc in batches and
+	// sum the length of the stored Text field. We ask Bleve to
+	// project only the text field to keep the response payload
+	// small.
+	q := bleve.NewQueryStringQuery("+" + fieldType + ":" + typeContent)
+	const batch = 1000
+	var (
+		from     = 0
+		textSum  int64
+		guardTTL = 64 // bound the loop defensively
+	)
+	for guardTTL > 0 {
+		guardTTL--
+		sr := bleve.NewSearchRequestOptions(q, batch, from, false)
+		sr.Fields = []string{fieldText}
+		res, err := i.bleve.Search(sr)
+		if err != nil {
+			return Stats{}, fmt.Errorf("indexer: Stats text scan: %w", err)
+		}
+		if len(res.Hits) == 0 {
+			break
+		}
+		for _, h := range res.Hits {
+			if v, ok := h.Fields[fieldText].(string); ok {
+				textSum += int64(len(v))
+			}
+		}
+		if len(res.Hits) < batch {
+			break
+		}
+		from += batch
+	}
+	out.CorpusTextBytes = textSum
+
+	// On-disk size: sum every regular file under Index.path.
+	// Follows symlinks but does not descend into them (Bleve
+	// doesn't use symlinks internally).
+	if size, err := dirBytes(i.path); err == nil {
+		out.DirBytes = size
+	}
+
+	if out.CorpusTextBytes > 0 {
+		out.InflationRatio = float64(out.DirBytes) / float64(out.CorpusTextBytes)
+	}
+	return out, nil
+}
+
+// dirBytes sums the size of every regular file under root. Does
+// not recurse into symlinked directories. Returns 0 for a
+// missing or unreadable root so Stats() can degrade gracefully.
+func dirBytes(root string) (int64, error) {
+	var total int64
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			sub, _ := dirBytes(root + "/" + e.Name())
+			total += sub
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	return total, nil
+}
+
 // AllTorrentDocs returns every torrent-level document in the
 // index, reconstructed from the stored fields. Used by the M11
 // companion-index publisher to walk the local index when
@@ -428,8 +576,27 @@ type SearchResponse struct {
 }
 
 // Search runs a query against the index and returns a SearchResponse.
-// For M2.0 the query is always a Bleve QueryString (supports "word1 word2",
-// "exact phrase", fielded queries like "name:ubuntu", and boolean ops).
+//
+// The query is a Bleve QueryString, which supports the following
+// syntax end-users can type directly into the search box:
+//
+//   - `word1 word2` — any document containing any term
+//     (Bleve's default is SHOULD, not MUST).
+//   - `+required` — prefix with `+` to make a term required.
+//   - `-excluded` — prefix with `-` to exclude docs matching it.
+//   - `"exact phrase"` — double quotes for phrase match.
+//   - `name:ubuntu` — restrict a term to a specific field.
+//     Text-analyzed fields (`name`, `files`, `text`) take any
+//     tokenized term. Keyword-analyzed fields (`infohash`,
+//     `trackers`, `file_path`, `mime`, `extractor`) match the
+//     exact stored value only.
+//   - `word~1` — fuzzy match with edit distance 1.
+//   - `word^2` — boost a term.
+//
+// These are all locked down by TestSearchQueryOperators in
+// indexer_test.go. The Layer-S swarm search and Layer-D DHT
+// lookup both pass the raw query string through this same path,
+// so the syntax is consistent across all three layers.
 func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()

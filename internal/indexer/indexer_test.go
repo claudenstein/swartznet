@@ -81,6 +81,222 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSearchQueryOperators pins down the Bleve QueryString
+// operators that Search advertises in its docstring. Any
+// regression here means the public search contract just broke.
+func TestSearchQueryOperators(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// t.Cleanup (not defer) because the sub-tests below are
+	// t.Parallel() — a defer would fire before they resume.
+	t.Cleanup(func() { _ = idx.Close() })
+
+	docs := []indexer.TorrentDoc{
+		{
+			InfoHash: "1111111111111111111111111111111111111111",
+			Name:     "ubuntu 24.04 desktop amd64 iso",
+			FilePaths: []string{
+				"ubuntu-24.04-desktop-amd64.iso",
+				"README.diskdefines",
+			},
+			Trackers: []string{"udp://tracker.example.org/announce"},
+		},
+		{
+			InfoHash: "2222222222222222222222222222222222222222",
+			Name:     "debian bookworm netinst amd64 iso",
+			FilePaths: []string{
+				"debian-12.5.0-amd64-netinst.iso",
+				"SHA256SUMS",
+			},
+			Trackers: []string{"udp://tracker.debian.org/announce"},
+		},
+		{
+			InfoHash:  "3333333333333333333333333333333333333333",
+			Name:      "alpine linux virt",
+			FilePaths: []string{"alpine-3.19-virt-x86_64.iso"},
+		},
+	}
+	for _, d := range docs {
+		if err := idx.IndexTorrent(d); err != nil {
+			t.Fatalf("IndexTorrent: %v", err)
+		}
+	}
+
+	// Each case captures a prefix of the infohash we expect to
+	// find in the result set. wantMiss is a list of prefixes that
+	// MUST NOT appear.
+	cases := []struct {
+		name     string
+		query    string
+		wantHave []string // prefixes that must appear
+		wantMiss []string // prefixes that must NOT appear
+	}{
+		{
+			name:     "bare term",
+			query:    "alpine",
+			wantHave: []string{"3333"},
+		},
+		{
+			name:     "required term excludes non-matches",
+			query:    "+alpine",
+			wantHave: []string{"3333"},
+			wantMiss: []string{"1111", "2222"},
+		},
+		{
+			name:     "negative term excludes docs",
+			query:    "iso -debian -alpine",
+			wantHave: []string{"1111"},
+			wantMiss: []string{"2222", "3333"},
+		},
+		{
+			name:     "phrase match uses term order",
+			query:    `"desktop amd64"`,
+			wantHave: []string{"1111"},
+			wantMiss: []string{"2222", "3333"},
+		},
+		{
+			name:     "fielded query restricts to name",
+			query:    "name:bookworm",
+			wantHave: []string{"2222"},
+			wantMiss: []string{"1111", "3333"},
+		},
+		{
+			name:     "fielded query on keyword-analyzed field",
+			query:    "infohash:2222222222222222222222222222222222222222",
+			wantHave: []string{"2222"},
+			wantMiss: []string{"1111", "3333"},
+		},
+		{
+			name:     "boolean AND (two required terms)",
+			query:    "+amd64 +netinst",
+			wantHave: []string{"2222"},
+			wantMiss: []string{"1111", "3333"},
+		},
+		{
+			name:     "fuzzy match tolerates one typo",
+			query:    "ubunto~1", // one edit from "ubuntu"
+			wantHave: []string{"1111"},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res, err := idx.Search(indexer.SearchRequest{Query: tc.query, Limit: 10})
+			if err != nil {
+				t.Fatalf("Search(%q): %v", tc.query, err)
+			}
+			found := make(map[string]bool)
+			for _, h := range res.Hits {
+				if len(h.InfoHash) >= 4 {
+					found[h.InfoHash[:4]] = true
+				}
+			}
+			for _, want := range tc.wantHave {
+				if !found[want] {
+					t.Errorf("Search(%q) missing expected prefix %s; got hits=%+v", tc.query, want, res.Hits)
+				}
+			}
+			for _, miss := range tc.wantMiss {
+				if found[miss] {
+					t.Errorf("Search(%q) wrongly returned prefix %s; hits=%+v", tc.query, miss, res.Hits)
+				}
+			}
+		})
+	}
+}
+
+// TestIndexStats covers the M12b index-size measurement endpoint.
+// Indexes two torrents and three content docs, then asserts every
+// field on the Stats snapshot — doc counts by type, corpus text
+// bytes, non-zero dir size, and a sensible inflation ratio.
+func TestIndexStats(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	// Empty index: everything zero except DirBytes (Bleve
+	// writes schema metadata on create).
+	empty, err := idx.Stats()
+	if err != nil {
+		t.Fatalf("Stats (empty): %v", err)
+	}
+	if empty.TorrentCount != 0 || empty.ContentCount != 0 {
+		t.Errorf("empty counts not zero: %+v", empty)
+	}
+	if empty.InflationRatio != 0 {
+		t.Errorf("empty InflationRatio = %v, want 0", empty.InflationRatio)
+	}
+
+	// Add two torrents + three content docs.
+	torrents := []indexer.TorrentDoc{
+		{InfoHash: "1111111111111111111111111111111111111111", Name: "ubuntu"},
+		{InfoHash: "2222222222222222222222222222222222222222", Name: "debian"},
+	}
+	for _, d := range torrents {
+		if err := idx.IndexTorrent(d); err != nil {
+			t.Fatalf("IndexTorrent: %v", err)
+		}
+	}
+	contents := []indexer.ContentDoc{
+		{
+			InfoHash: "1111111111111111111111111111111111111111",
+			FilePath: "README.md",
+			Text:     "the quick brown fox", // 19 bytes
+		},
+		{
+			InfoHash: "1111111111111111111111111111111111111111",
+			FilePath: "README.md",
+			Text:     "jumps over the lazy dog", // 23 bytes
+			ChunkIndex: 1,
+		},
+		{
+			InfoHash: "2222222222222222222222222222222222222222",
+			FilePath: "notes.txt",
+			Text:     "hello world", // 11 bytes
+		},
+	}
+	var wantText int64
+	for _, d := range contents {
+		wantText += int64(len(d.Text))
+		if err := idx.IndexContent(d); err != nil {
+			t.Fatalf("IndexContent: %v", err)
+		}
+	}
+
+	st, err := idx.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if st.TorrentCount != 2 {
+		t.Errorf("TorrentCount = %d, want 2", st.TorrentCount)
+	}
+	if st.ContentCount != 3 {
+		t.Errorf("ContentCount = %d, want 3", st.ContentCount)
+	}
+	if st.CorpusTextBytes != wantText {
+		t.Errorf("CorpusTextBytes = %d, want %d", st.CorpusTextBytes, wantText)
+	}
+	if st.DirBytes <= 0 {
+		t.Errorf("DirBytes = %d, want positive", st.DirBytes)
+	}
+	// Inflation ratio should be a reasonable positive float
+	// (Bleve writes a lot of metadata for a handful of tiny
+	// docs, so we only assert the ratio is >0 and finite).
+	if st.InflationRatio <= 0 {
+		t.Errorf("InflationRatio = %v, want >0", st.InflationRatio)
+	}
+}
+
 // TestUpdateSemantics verifies that re-indexing the same infohash replaces
 // the earlier document rather than creating a duplicate.
 func TestUpdateSemantics(t *testing.T) {

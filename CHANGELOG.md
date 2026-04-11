@@ -99,6 +99,46 @@ draft to Final).
   getter. Six new tests covering happy path, pointer/fetcher
   failures, partial-ingest failure, the worker lifecycle, and
   IngestReader. All pass under `-race`.
+### M12 — v1.0.0 preparation
+
+Everything below is work toward answering the six "open questions
+that block v1" in `docs/05-integration-design.md` §13, plus
+tactical post-v1 items from §12 that were already clear enough to
+ship without research.
+
+- **M12a — README status table refresh**: Backfilled M9, M10, and
+  M11 into the top-of-README milestone table, removed the stale
+  "Planned" rows for M2.3 / M3 / M4 / M5 / M6 that had been
+  complete since earlier releases.
+- **M12b — index-size measurement tooling**: New `indexer.Stats()`
+  method + `GET /index/stats` endpoint reporting on-disk directory
+  bytes, per-type document counts (torrents vs. content chunks),
+  sum of every stored `ContentDoc.Text` byte, and the resulting
+  inflation ratio. The Status tab in the web UI now shows these as
+  part of the Local Index card, so anyone running the daemon for a
+  day can produce the data that answers v1 open question #1 ("how
+  big is Bleve's index per TB of indexed text"). `TestIndexStats`
+  pins down every field against a seeded index.
+- **M12c — dht-smoke concurrent-publish stress test**: Added
+  `-stress N`, `-stress-concurrent`, and `-stress-timeout` flags
+  to `cmd/dht-smoke`. After the single-put smoke, the stress phase
+  publishes `N` distinct BEP-44 mutable items against the live
+  mainline DHT with bounded concurrency and reports per-put
+  latency (min / p50 / p95 / max), total success rate, wall-clock
+  elapsed, post-run DHT routing stats, and a round-trip Get from
+  one successful keyword. Answers v1 open question #2 ("how many
+  concurrent BEP-44 publishes can anacrolix/dht/v2 sustain"). Fails
+  the exit status only when every put fails — a partial failure is
+  the interesting measurement.
+- **M12d — multi-word + boolean query support**: Bleve's
+  `QueryStringQuery` already supported `+required` / `-excluded` /
+  `"phrase"` / `field:term` / `fuzzy~1` — this commit just pins
+  those guarantees down behind `TestSearchQueryOperators` (8
+  sub-cases covering each operator), rewrites the `Index.Search`
+  docstring to enumerate the supported syntax, and adds a one-line
+  hint under the web UI's search box so end-users can discover the
+  advanced operators.
+
 - **M11e**: GUI integration. New `httpapi.CompanionController`
   interface and four endpoints: `GET /companion` (status of
   publisher + every followed publisher), `POST /companion/refresh`

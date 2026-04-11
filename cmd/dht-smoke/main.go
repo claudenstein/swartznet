@@ -8,9 +8,21 @@
 // real network.
 //
 // Run from the SwartzNet repo root with:
-//   go run /tmp/dht_smoke/main.go
 //
-// Exits with status 0 if Put + Get both succeed.
+//	go run ./cmd/dht-smoke            # single put/get, the original smoke
+//	go run ./cmd/dht-smoke -stress 20 # after the smoke, 20 concurrent puts
+//
+// The -stress mode addresses v1.0.0 open question #2 — "how many
+// concurrent BEP-44 mutable-item publishes can the anacrolix DHT
+// library sustain before it starts getting rate-limited by other
+// DHT nodes?". It reports per-put latency (min / p50 / p95 / max),
+// total success rate, and the get-back round trip from a sample
+// of the successful puts.
+//
+// Exits with status 0 if the single smoke Put + Get succeed. The
+// stress phase always logs results but does not fail the exit
+// status unless ALL puts fail (in which case the DHT path is
+// clearly broken).
 package main
 
 import (
@@ -18,9 +30,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/dht/v2"
@@ -28,7 +43,15 @@ import (
 	"github.com/swartznet/swartznet/internal/dhtindex"
 )
 
+// Command-line flags.
+var (
+	stressN          = flag.Int("stress", 0, "after the basic smoke, run N concurrent mutable-item puts against the live DHT (0 = skip)")
+	stressTimeout    = flag.Duration("stress-timeout", 60*time.Second, "bound for a single stress put")
+	stressConcurrent = flag.Int("stress-concurrent", 8, "maximum concurrent puts during -stress (0 = serial)")
+)
+
 func main() {
+	flag.Parse()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := run(logger); err != nil {
 		fmt.Fprintln(os.Stderr, "FAIL:", err)
@@ -141,6 +164,165 @@ func run(log *slog.Logger) error {
 	}
 	if got.Hits[0].N != "smoke test" {
 		return fmt.Errorf("Get returned name %q, want 'smoke test'", got.Hits[0].N)
+	}
+
+	// Optional: stress phase. Publishes *stressN synthetic
+	// keywords in parallel (respecting stressConcurrent), then
+	// reports a latency summary.
+	if *stressN > 0 {
+		if err := runStress(log, srv, putter, getter, pub); err != nil {
+			log.Warn("stress.error", "err", err)
+			// Do not fail the exit status unless every put failed —
+			// a partial failure is the interesting measurement.
+		}
+	}
+	return nil
+}
+
+// stressResult holds the outcome of one concurrent put.
+type stressResult struct {
+	keyword string
+	elapsed time.Duration
+	err     error
+}
+
+// runStress publishes stressN synthetic keywords in parallel
+// against the live DHT and reports per-put latency + success
+// rate. Addresses the v1.0.0 open question about BEP-44 behavior
+// under concurrent load.
+func runStress(
+	log *slog.Logger,
+	srv *dht.Server,
+	putter *dhtindex.AnacrolixPutter,
+	getter *dhtindex.AnacrolixGetter,
+	pub ed25519.PublicKey,
+) error {
+	total := *stressN
+	concurrency := *stressConcurrent
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > total {
+		concurrency = total
+	}
+	log.Info("stress.start",
+		"total_puts", total,
+		"concurrency", concurrency,
+		"per_put_timeout", stressTimeout.String())
+
+	sem := make(chan struct{}, concurrency)
+	results := make([]stressResult, total)
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			keyword := fmt.Sprintf("swartznet_stress_%d_%d", time.Now().UnixNano(), idx)
+			salt, err := dhtindex.SaltForKeyword(keyword)
+			if err != nil {
+				results[idx] = stressResult{keyword: keyword, err: err}
+				return
+			}
+			value := dhtindex.KeywordValue{
+				Hits: []dhtindex.KeywordHit{{
+					IH: bytes.Repeat([]byte{byte(idx)}, 20),
+					N:  fmt.Sprintf("stress hit %d", idx),
+					S:  1,
+				}},
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), *stressTimeout)
+			defer cancel()
+			putStart := time.Now()
+			err = putter.Put(ctx, salt, value)
+			results[idx] = stressResult{
+				keyword: keyword,
+				elapsed: time.Since(putStart),
+				err:     err,
+			}
+		}(i)
+	}
+	wg.Wait()
+	wallclock := time.Since(start)
+
+	// Aggregate: success count, latency distribution, error list.
+	var ok int
+	latencies := make([]time.Duration, 0, total)
+	errCounts := make(map[string]int)
+	for _, r := range results {
+		if r.err == nil {
+			ok++
+			latencies = append(latencies, r.elapsed)
+		} else {
+			errCounts[r.err.Error()]++
+		}
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+
+	pick := func(p float64) time.Duration {
+		if len(latencies) == 0 {
+			return 0
+		}
+		idx := int(float64(len(latencies)-1) * p)
+		return latencies[idx]
+	}
+	log.Info("stress.summary",
+		"total", total,
+		"success", ok,
+		"fail", total-ok,
+		"success_rate", fmt.Sprintf("%.1f%%", 100*float64(ok)/float64(total)),
+		"wall_clock", wallclock.String(),
+	)
+	if ok > 0 {
+		log.Info("stress.latency",
+			"min", latencies[0].String(),
+			"p50", pick(0.50).String(),
+			"p95", pick(0.95).String(),
+			"max", latencies[len(latencies)-1].String(),
+		)
+	}
+	for msg, n := range errCounts {
+		log.Warn("stress.error_bucket", "count", n, "err", msg)
+	}
+	// Final DHT routing stats after the load, for context on
+	// whether the stress mutated the routing table visibly.
+	s := srv.Stats()
+	log.Info("stress.dht_after",
+		"good_nodes", s.GoodNodes,
+		"nodes", s.Nodes,
+		"outbound_attempted", s.OutboundQueriesAttempted,
+	)
+
+	if ok == 0 {
+		return fmt.Errorf("stress: all %d puts failed", total)
+	}
+
+	// Sanity: pick the first successful keyword and round-trip
+	// it back via Get. If this fails the item may have expired or
+	// not propagated; log but don't fail.
+	for i, r := range results {
+		if r.err != nil {
+			continue
+		}
+		salt, err := dhtindex.SaltForKeyword(r.keyword)
+		if err != nil {
+			continue
+		}
+		var pk32 [32]byte
+		copy(pk32[:], pub)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err = getter.Get(ctx, pk32, salt)
+		cancel()
+		if err != nil {
+			log.Warn("stress.roundtrip_fail", "idx", i, "keyword", r.keyword, "err", err)
+		} else {
+			log.Info("stress.roundtrip_ok", "idx", i, "keyword", r.keyword)
+		}
+		break
 	}
 	return nil
 }

@@ -189,6 +189,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /companion/refresh", s.handleCompanionRefresh)
 	mux.HandleFunc("POST /companion/follow", s.handleCompanionFollow)
 	mux.HandleFunc("POST /companion/unfollow", s.handleCompanionUnfollow)
+	mux.HandleFunc("GET /index/stats", s.handleIndexStats)
 
 	// Web UI: serve the embedded index.html at / and the
 	// static assets at /static/. The HTTP API endpoints above
@@ -477,6 +478,45 @@ type PublisherKeywordEntry struct {
 	LastPublished string `json:"last_published,omitempty"`
 	PublishCount  int    `json:"publish_count"`
 	LastError     string `json:"last_error,omitempty"`
+}
+
+// IndexStats is the JSON shape for GET /index/stats. Mirrors
+// indexer.Stats one-for-one but lives here so the httpapi package
+// does not leak the indexer type into the HTTP response schema.
+type IndexStats struct {
+	DirBytes        int64   `json:"dir_bytes"`
+	DocCount        uint64  `json:"doc_count"`
+	TorrentCount    uint64  `json:"torrent_count"`
+	ContentCount    uint64  `json:"content_count"`
+	CorpusTextBytes int64   `json:"corpus_text_bytes"`
+	InflationRatio  float64 `json:"inflation_ratio"`
+}
+
+// handleIndexStats serves GET /index/stats. The response is the
+// v1.0.0 "how big is the Bleve index per TB of indexed text"
+// measurement that anyone running the daemon can produce without
+// scraping internal state. Cheap-ish — the corpus-bytes sum
+// scans every content doc — so the GUI should poll at human
+// cadences only.
+func (s *Server) handleIndexStats(w http.ResponseWriter, _ *http.Request) {
+	if s.idx == nil {
+		http.Error(w, "index not configured", http.StatusServiceUnavailable)
+		return
+	}
+	st, err := s.idx.Stats()
+	if err != nil {
+		http.Error(w, "stats: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(IndexStats{
+		DirBytes:        st.DirBytes,
+		DocCount:        st.DocCount,
+		TorrentCount:    st.TorrentCount,
+		ContentCount:    st.ContentCount,
+		CorpusTextBytes: st.CorpusTextBytes,
+		InflationRatio:  st.InflationRatio,
+	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {

@@ -324,8 +324,11 @@
 
   async function refreshStatus() {
     try {
-      const s = await getJSON('/status');
-      renderStatus(s);
+      const [s, ixStats] = await Promise.all([
+        getJSON('/status'),
+        getJSON('/index/stats').catch(() => null), // optional — tolerate older daemons
+      ]);
+      renderStatus(s, ixStats);
     } catch (err) {
       statusDisplay.innerHTML = '';
       statusDisplay.appendChild(elt('p', { class: 'hint', text: 'error: ' + err.message }));
@@ -336,14 +339,27 @@
     }
   }
 
-  function renderStatus(s) {
+  function renderStatus(s, ixStats) {
     statusDisplay.innerHTML = '';
     const grid = elt('div', { class: 'status-grid' });
 
-    grid.appendChild(card('Local index (L)', [
+    // Local index card. If the new /index/stats endpoint
+    // answered, enrich the card with dir size + corpus text +
+    // inflation ratio — the v1.0.0 measurement numbers.
+    const localRows = [
       ['enabled', s.local && s.local.indexed ? 'yes' : 'no'],
       ['documents', String((s.local && s.local.doc_count) || 0)],
-    ]));
+    ];
+    if (ixStats) {
+      localRows.push(['torrents', String(ixStats.torrent_count || 0)]);
+      localRows.push(['content rows', String(ixStats.content_count || 0)]);
+      localRows.push(['on-disk', humanBytes(ixStats.dir_bytes || 0)]);
+      localRows.push(['corpus text', humanBytes(ixStats.corpus_text_bytes || 0)]);
+      if (ixStats.inflation_ratio > 0) {
+        localRows.push(['inflation', ixStats.inflation_ratio.toFixed(2) + '×']);
+      }
+    }
+    grid.appendChild(card('Local index (L)', localRows));
 
     grid.appendChild(card('Swarm peers (S)', [
       ['known peers', String((s.swarm && s.swarm.known_peers) || 0)],

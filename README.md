@@ -29,15 +29,13 @@ research and design documents that motivate the architecture.
 | **M6 — EPUB / DOCX / ODT extractors** | ✅ Complete | Three new binary-format text extractors. EPUB iterates XHTML chapters and strips HTML via golang.org/x/net/html. DOCX walks word/document.xml's `<w:t>` elements via stdlib encoding/xml. ODT does the same for content.xml's `<text:p>` elements while skipping `<office:automatic-styles>` noise. All zero-cgo, all use the existing chunker. |
 | **M7 — Documentation polish for v1** | ✅ Complete | Two draft BEP specs (`docs/06-bep-sn_search-draft.md` and `docs/07-bep-dht-keyword-index-draft.md`), an operations guide (`docs/08-operations.md`), and a [CHANGELOG](CHANGELOG.md) covering every milestone. v1.0.0 release pending real-world swarm testing. |
 | **M8 — Local web UI** | ✅ Complete | Static HTML/CSS/JS embedded into the binary via `go:embed` and served by the existing httpapi daemon. Browse to `http://localhost:7654/` to get a four-tab UI: Search (across all three layers), Add torrent, Status, and Sharing (with the per-instance `sn_search` capability toggles wired through new `GET`/`POST /capabilities` endpoints). Localhost-only by design — the GUI controls the daemon and is fundamentally separate from the per-peer search-result interfaces (`sn_search`, BEP-44). |
-| M2.3 — PDF / EPUB / DOCX extractors | Planned | Heavier file format support; each commit adds one extractor. |
-| M3 — Peer-wire `sn_search` extension (Layer S) | Planned | BEP-10 extension for peer-to-peer keyword queries. |
-| M4 — DHT keyword publisher (Layer D) | Planned | BEP-44 mutable items carrying `keyword → [infohash]`. |
-| M5 — Spam resistance | Planned | Per-pubkey reputation + client-side Bloom filter. |
-| M6 — Full text extractor set | Planned | PDF, EPUB, DOCX, subtitles, source code. |
-| M7 — v1 release | Planned | — |
+| **M9 — Per-hit source tracking + targeted flag** | ✅ Complete | LRU-bounded `reputation.SourceTracker` records which indexer pubkey returned which infohash during a Layer-D query; `POST /flag` uses that attribution to demote only the indexers actually responsible for a flagged hit instead of everyone returned in the last query. |
+| **M10 — GUI download controls** | ✅ Complete | New `engine.TorrentSnapshots` + pause/resume/remove APIs, four new HTTP endpoints (`GET /torrents`, `POST /torrents/{ih}/{pause,resume}`, `DELETE /torrents/{ih}`), and a Downloads tab in the web UI with live progress bars, status pills, and per-torrent controls polling every 2 s. |
+| **M11 — F3 companion content-index torrents** | ✅ Complete | SwartzNet's distributed content-search story. The daemon periodically serialises its local Bleve index to a gzipped JSON document, wraps it in a v1 `.torrent` metainfo, seeds it, and publishes a BEP-46-style mutable pointer at salt `_sn_content_index` (`companion.Publisher`). Subscribers follow publishers by their ed25519 pubkey; the `companion.SubscriberWorker` resolves each pointer, downloads the torrent, decodes the payload, and merges the records into the local index. New Companion tab in the web UI exposes the whole pipeline — publisher status, manual refresh, and an on-disk follow list managed through `/companion/{follow,unfollow,refresh}`. Closes the "distributed search" promise of the project's tagline without any new network protocol beyond the existing BitTorrent + BEP-44 stack. |
 
 The full roadmap and per-milestone rationale is in
 [`docs/05-integration-design.md`](docs/05-integration-design.md) §12.
+See [CHANGELOG.md](CHANGELOG.md) for the per-commit release notes.
 
 ## Design in one paragraph
 
