@@ -143,6 +143,7 @@
         limit: parseInt(optLimit.value, 10) || 20,
         swarm: optSwarm.checked,
         dht: optDHT.checked,
+        highlight: true,
       };
       const res = await postJSON('/search', body);
       renderResults(res, q);
@@ -202,20 +203,63 @@
   function renderLocalHit(h) {
     const hit = elt('div', { class: 'hit' });
     if (h.doc_type === 'content') {
-      hit.appendChild(elt('div', { class: 'hit-name hit-content' },
-        ['📄 ' + (h.file_path || h.name || '(unnamed)')]));
+      // Prefer highlighted name for the title row when Bleve
+      // matched terms in the torrent name (rare for content
+      // hits, but possible). Fall back to plain file path.
+      const titleText = '📄 ' + (h.file_path || h.name || '(unnamed)');
+      hit.appendChild(elt('div', { class: 'hit-name hit-content' }, [titleText]));
       hit.appendChild(elt('div', { class: 'hit-meta' },
         [h.infohash + ' · ' + humanBytes(h.size_bytes) +
           ' · extractor=' + (h.extractor || '?') +
           ' · score=' + (h.score || 0).toFixed(3)]));
+      // Snippet fragments from the matched text body.
+      appendFragments(hit, h, 'text');
     } else {
-      hit.appendChild(elt('div', { class: 'hit-name' }, [h.name || '(unnamed)']));
+      hit.appendChild(renderHighlightedName(h));
       hit.appendChild(elt('div', { class: 'hit-meta' },
         [h.infohash + ' · ' + humanBytes(h.size_bytes) +
           ' · score=' + (h.score || 0).toFixed(3)]));
+      // File-list fragments on torrent hits help show which
+      // file path matched.
+      appendFragments(hit, h, 'files');
     }
     hit.appendChild(renderHitActions(h.infohash));
     return hit;
+  }
+
+  // renderHighlightedName renders a torrent-hit title using
+  // Bleve's highlighted `name` fragment when present, otherwise
+  // the plain name. The <mark>...</mark> markup Bleve emits is
+  // inserted via innerHTML — it is pre-escaped by Bleve so this
+  // is safe.
+  function renderHighlightedName(h) {
+    const div = elt('div', { class: 'hit-name' });
+    const frag = h.fragments && h.fragments.name && h.fragments.name[0];
+    if (frag) {
+      div.innerHTML = frag;
+    } else {
+      div.textContent = h.name || '(unnamed)';
+    }
+    return div;
+  }
+
+  // appendFragments renders Bleve highlight fragments for a
+  // specific field as a snippet block under the hit meta row.
+  // Shows up to 2 fragments to keep the result card compact.
+  function appendFragments(parent, h, field) {
+    if (!h.fragments || !h.fragments[field] || h.fragments[field].length === 0) {
+      return;
+    }
+    const block = elt('div', { class: 'hit-snippets' });
+    const frags = h.fragments[field].slice(0, 2);
+    for (const f of frags) {
+      const p = elt('div', { class: 'hit-snippet' });
+      // Bleve's html highlighter already escapes the text and
+      // wraps matches in <mark>, so innerHTML is safe here.
+      p.innerHTML = f;
+      block.appendChild(p);
+    }
+    parent.appendChild(block);
   }
 
   function renderSwarmSection(hits) {

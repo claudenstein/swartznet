@@ -247,6 +247,13 @@ type SearchRequest struct {
 	SwarmTimeoutMs int `json:"swarm_timeout_ms,omitempty"`
 	// DHTTimeoutMs bounds the Layer-D get traversal. Zero → 5s.
 	DHTTimeoutMs int `json:"dht_timeout_ms,omitempty"`
+	// Highlight, when true, asks the local indexer to return
+	// matched-text fragments on each hit (LocalHit.Fragments).
+	// Fragments are wrapped with <mark>...</mark> by Bleve's
+	// HTML highlighter. The default is false to keep the
+	// response small for programmatic callers; the web UI
+	// always sets it.
+	Highlight bool `json:"highlight,omitempty"`
 }
 
 // SearchResponse is the JSON body returned from POST /search. It is
@@ -282,15 +289,20 @@ type LocalResult struct {
 }
 
 type LocalHit struct {
-	DocType   string `json:"doc_type"`
-	InfoHash  string `json:"infohash"`
-	Name      string `json:"name,omitempty"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
-	FileIndex int    `json:"file_index,omitempty"`
-	FilePath  string `json:"file_path,omitempty"`
-	Mime      string `json:"mime,omitempty"`
-	Extractor string `json:"extractor,omitempty"`
+	DocType   string  `json:"doc_type"`
+	InfoHash  string  `json:"infohash"`
+	Name      string  `json:"name,omitempty"`
+	SizeBytes int64   `json:"size_bytes,omitempty"`
+	FileIndex int     `json:"file_index,omitempty"`
+	FilePath  string  `json:"file_path,omitempty"`
+	Mime      string  `json:"mime,omitempty"`
+	Extractor string  `json:"extractor,omitempty"`
 	Score     float64 `json:"score"`
+	// Fragments maps a Bleve field name to a list of matched
+	// text fragments, pre-wrapped by Bleve's HTML highlighter
+	// so that matching terms appear as <mark>term</mark>.
+	// Populated only when SearchRequest.Highlight is true.
+	Fragments map[string][]string `json:"fragments,omitempty"`
 }
 
 // SwarmResult is the merged swarmsearch.QueryResponse in JSON form.
@@ -332,7 +344,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Local search — always available if an index is attached.
 	if s.idx != nil {
-		res, err := s.idx.Search(indexer.SearchRequest{Query: req.Q, Limit: req.Limit})
+		res, err := s.idx.Search(indexer.SearchRequest{
+			Query:     req.Q,
+			Limit:     req.Limit,
+			Highlight: req.Highlight,
+		})
 		if err != nil {
 			s.log.Warn("httpapi.local_err", "err", err)
 			http.Error(w, "local search failed: "+err.Error(), http.StatusInternalServerError)
@@ -350,6 +366,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				Mime:      h.Mime,
 				Extractor: h.Extractor,
 				Score:     h.Score,
+				Fragments: h.Fragments,
 			})
 		}
 	}

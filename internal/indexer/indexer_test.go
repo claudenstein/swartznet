@@ -2,6 +2,7 @@ package indexer_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +79,100 @@ func TestRoundTrip(t *testing.T) {
 				t.Errorf("Search(%q) top = %s; want prefix %s", tc.query, top, tc.wantInfoHas)
 			}
 		})
+	}
+}
+
+// TestSearchHighlight pins down the M12e snippet-highlighting
+// path: SearchRequest.Highlight=true yields Fragments wrapped in
+// <mark>...</mark> HTML. Fragments are keyed by Bleve field
+// name.
+func TestSearchHighlight(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	if err := idx.IndexTorrent(indexer.TorrentDoc{
+		InfoHash: "1111111111111111111111111111111111111111",
+		Name:     "ubuntu 24.04 desktop amd64 iso",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexContent(indexer.ContentDoc{
+		InfoHash: "1111111111111111111111111111111111111111",
+		FilePath: "README.md",
+		Text:     "The quick brown fox jumps over the lazy dog.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Highlight off: Fragments must be nil on every hit.
+	plain, err := idx.Search(indexer.SearchRequest{Query: "fox", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range plain.Hits {
+		if h.Fragments != nil {
+			t.Errorf("Highlight=false hit has Fragments=%v", h.Fragments)
+		}
+	}
+
+	// Highlight on: content hit must carry a text fragment with
+	// a <mark>fox</mark> wrapper.
+	res, err := idx.Search(indexer.SearchRequest{
+		Query:     "fox",
+		Limit:     5,
+		Highlight: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content *indexer.SearchHit
+	for i := range res.Hits {
+		if res.Hits[i].DocType == "content" {
+			content = &res.Hits[i]
+			break
+		}
+	}
+	if content == nil {
+		t.Fatal("no content hit returned")
+	}
+	if content.Fragments == nil || len(content.Fragments["text"]) == 0 {
+		t.Fatalf("no text fragments: %+v", content.Fragments)
+	}
+	if !strings.Contains(content.Fragments["text"][0], "<mark>fox</mark>") {
+		t.Errorf("fragment missing <mark>fox</mark> wrapper: %q", content.Fragments["text"][0])
+	}
+
+	// Torrent hit on a name match should carry a name fragment.
+	nameRes, err := idx.Search(indexer.SearchRequest{
+		Query:     "ubuntu",
+		Limit:     5,
+		Highlight: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nameRes.Hits) == 0 {
+		t.Fatal("no hits for ubuntu")
+	}
+	var torrent *indexer.SearchHit
+	for i := range nameRes.Hits {
+		if nameRes.Hits[i].DocType == "torrent" {
+			torrent = &nameRes.Hits[i]
+			break
+		}
+	}
+	if torrent == nil {
+		t.Fatal("no torrent hit for ubuntu")
+	}
+	if len(torrent.Fragments["name"]) == 0 {
+		t.Errorf("no name fragment on torrent hit: %+v", torrent.Fragments)
+	} else if !strings.Contains(torrent.Fragments["name"][0], "<mark>ubuntu</mark>") {
+		t.Errorf("name fragment missing mark: %q", torrent.Fragments["name"][0])
 	}
 }
 

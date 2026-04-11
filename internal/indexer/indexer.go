@@ -542,6 +542,12 @@ func contentDocFromFields(fields map[string]any) ContentDoc {
 type SearchRequest struct {
 	Query string // free-form text; matches against name and file paths
 	Limit int    // max hits to return; defaults to 20 if zero
+	// Highlight, when true, asks Bleve to return matched text
+	// fragments on each hit (SearchHit.Fragments). Fragments are
+	// wrapped with <mark>...</mark> by Bleve's HTML highlighter
+	// and are most useful for content-level hits where the caller
+	// wants to show the match in context.
+	Highlight bool
 }
 
 // SearchHit is a single result row returned by Search. Fields marked
@@ -566,6 +572,18 @@ type SearchHit struct {
 	FileSize  int64  // file bytes on disk
 	Mime      string // MIME type
 	Extractor string // producer extractor name
+
+	// Fragments maps a Bleve field name to a list of matched
+	// text fragments, pre-wrapped by Bleve's HTML highlighter
+	// so that matching terms appear as <mark>term</mark>.
+	// Populated by Search() whenever SearchRequest.Highlight is
+	// true. Callers rendering to plain text should strip the
+	// <mark> wrappers; the web UI renders them as emphasised
+	// spans.
+	//
+	// The most useful field names here are "text" (content hits)
+	// and "name"/"files" (torrent hits).
+	Fragments map[string][]string
 }
 
 // SearchResponse is the result envelope for a Search call.
@@ -619,6 +637,14 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 		fieldName, fieldSizeBytes, fieldFileCount, fieldTrackers,
 		// content fields
 		fieldFileIndex, fieldFilePath, fieldFileSize, fieldMime, fieldExtractor,
+	}
+	if req.Highlight {
+		// html highlighter wraps matches with <mark>...</mark>.
+		// We scope it to the fields most useful for the UI
+		// rather than the default "every stored field" so the
+		// payload stays small.
+		sr.Highlight = bleve.NewHighlightWithStyle("html")
+		sr.Highlight.Fields = []string{fieldName, fieldFilePaths, fieldText}
 	}
 
 	res, err := i.bleve.Search(sr)
@@ -674,6 +700,15 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 		}
 		if v, ok := h.Fields[fieldExtractor].(string); ok {
 			hit.Extractor = v
+		}
+		// Copy Bleve's highlighted fragment map straight through
+		// when the request asked for it. The map is nil when
+		// Highlight is false, which is what callers expect.
+		if len(h.Fragments) > 0 {
+			hit.Fragments = make(map[string][]string, len(h.Fragments))
+			for k, v := range h.Fragments {
+				hit.Fragments[k] = append([]string(nil), v...)
+			}
 		}
 		out.Hits = append(out.Hits, hit)
 	}

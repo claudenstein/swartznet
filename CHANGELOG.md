@@ -130,6 +130,16 @@ ship without research.
   concurrent BEP-44 publishes can anacrolix/dht/v2 sustain"). Fails
   the exit status only when every put fails — a partial failure is
   the interesting measurement.
+- **M12e — search result snippet highlighting**: `SearchRequest`
+  gains a `Highlight` bool; when true, Bleve's HTML highlighter
+  runs on the `name` / `files` / `text` fields and returns
+  matched-text fragments wrapped in `<mark>...</mark>`. Fragments
+  flow through to `LocalHit.Fragments` on `POST /search` and are
+  rendered in the web UI as a small indented snippet block under
+  each hit. `TestSearchHighlight` covers both the nil-when-off
+  case and the marked-fragment-when-on case. The CLI still omits
+  `Highlight` (its output is plain text), so this is strictly a
+  GUI enhancement.
 - **M12d — multi-word + boolean query support**: Bleve's
   `QueryStringQuery` already supported `+required` / `-excluded` /
   `"phrase"` / `field:term` / `fuzzy~1` — this commit just pins

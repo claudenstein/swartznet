@@ -235,6 +235,36 @@ button:disabled {
   word-break: break-all;
 }
 
+/* Snippet block (M12e) — one or two highlighted text fragments
+ * per hit, rendered in a slightly indented box to distinguish
+ * them visually from the hit-meta line. */
+.hit-snippets {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.hit-snippet {
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--text);
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-elev);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.hit-snippet mark,
+.hit-name mark {
+  background: var(--accent);
+  color: var(--bg);
+  padding: 0 0.15rem;
+  border-radius: 2px;
+}
+
 .hit-actions {
   margin-top: 0.6rem;
   display: flex;
