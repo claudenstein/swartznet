@@ -20,12 +20,12 @@ import (
 // Calling SetPointer arms the next get; Sync is the only thing
 // that observes its state.
 type fakeGetter struct {
-	mu        sync.Mutex
-	pointer   [20]byte
-	calls     int
-	failWith  error
-	lastPub   [32]byte
-	lastSalt  []byte
+	mu       sync.Mutex
+	pointer  [20]byte
+	calls    int
+	failWith error
+	lastPub  [32]byte
+	lastSalt []byte
 }
 
 func (g *fakeGetter) SetPointer(ih [20]byte) {
@@ -73,7 +73,7 @@ type recorderIngester struct {
 	mu       sync.Mutex
 	torrents []indexer.TorrentDoc
 	contents []indexer.ContentDoc
-	failNth  int  // 0 = never fail; otherwise fail on the Nth call
+	failNth  int // 0 = never fail; otherwise fail on the Nth call
 	calls    int
 }
 

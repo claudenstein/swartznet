@@ -122,8 +122,8 @@ func TestSourceTrackerLRUTouchOnQuery(t *testing.T) {
 func TestSourceTrackerEmptyArgs(t *testing.T) {
 	t.Parallel()
 	st := reputation.NewSourceTracker(0)
-	st.Record("", pk(0x01))   // empty infohash → no-op
-	st.Record("aaa", "")      // empty pubkey → no-op
+	st.Record("", pk(0x01)) // empty infohash → no-op
+	st.Record("aaa", "")    // empty pubkey → no-op
 	st.RecordMany("", nil)
 	st.Forget("")
 	if st.Sources("") != nil {

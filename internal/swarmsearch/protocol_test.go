@@ -56,8 +56,8 @@ func TestProtocolOnRemoteHandshakeCapable(t *testing.T) {
 
 	hs := &pp.ExtendedHandshakeMessage{
 		M: map[pp.ExtensionName]pp.ExtensionNumber{
-			"ut_metadata":         3,
-			"ut_pex":              2,
+			"ut_metadata":             3,
+			"ut_pex":                  2,
 			swarmsearch.ExtensionName: 11,
 		},
 		V: "SwartzNet 0.x",

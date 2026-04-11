@@ -79,9 +79,9 @@ var (
 // sent out and is waiting for responses. The inbound handler looks
 // it up by txid and routes each Result into results.
 type pendingQuery struct {
-	txid      uint32
-	results   chan incomingResult
-	expected  int // number of peers we fired the query to
+	txid     uint32
+	results  chan incomingResult
+	expected int // number of peers we fired the query to
 }
 
 // incomingResult bundles a decoded Result with the address of the

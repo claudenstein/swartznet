@@ -197,9 +197,9 @@ func TestEPUBOnlyXHTMLEntriesContribute(t *testing.T) {
 	// An EPUB with non-XHTML files (cover image, OPF, NCX) should
 	// still extract just the chapter text.
 	data := buildMinimalEPUB(t, map[string]string{
-		"OEBPS/chapter1.xhtml": sampleChapter1,
-		"OEBPS/cover.jpg":      "BINARY-IMAGE-DATA",
-		"OEBPS/toc.ncx":        "<ncx>navigation only</ncx>",
+		"OEBPS/chapter1.xhtml":  sampleChapter1,
+		"OEBPS/cover.jpg":       "BINARY-IMAGE-DATA",
+		"OEBPS/toc.ncx":         "<ncx>navigation only</ncx>",
 		"OEBPS/styles/main.css": "body { color: red; }",
 	})
 	e := NewEPUBExtractor()

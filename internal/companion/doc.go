@@ -19,16 +19,16 @@
 // File split:
 //
 //   - types.go     : the JSON schema (CompanionIndex / TorrentRecord
-//                    / FileRecord / ContentChunk)
+//     / FileRecord / ContentChunk)
 //   - serialize.go : Encode / Decode with gzip framing
 //   - build.go     : (M11b) BuildFromIndex helper that walks an
-//                    indexer.Index and produces a CompanionIndex
+//     indexer.Index and produces a CompanionIndex
 //   - torrent.go   : (M11b) Wrap a serialised companion file in a
-//                    v1 .torrent and return the metainfo
+//     v1 .torrent and return the metainfo
 //   - import.go    : (M11d) Decode + import into a target Bleve
-//                    index, namespacing each record so the
-//                    subscriber knows which publisher contributed
-//                    which document
+//     index, namespacing each record so the
+//     subscriber knows which publisher contributed
+//     which document
 //
 // M11a (this file's commit) implements just the schema and the
 // encode/decode round trip. The build/import paths land in M11b

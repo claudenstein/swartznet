@@ -73,7 +73,7 @@ func TestPublisherRefreshHappyPath(t *testing.T) {
 
 	opts := companion.DefaultPublisherOptions()
 	opts.Dir = dir
-	opts.Interval = time.Hour    // we trigger manually
+	opts.Interval = time.Hour          // we trigger manually
 	opts.MinInterval = time.Nanosecond // do not throttle inside the test
 	opts.PutTimeout = 5 * time.Second
 

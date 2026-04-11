@@ -20,9 +20,9 @@ import (
 func extractHTMLText(r io.Reader) (string, error) {
 	tz := html.NewTokenizer(r)
 	var (
-		out      strings.Builder
-		skipDepth int    // counts nested <script>/<style> blocks we are inside
-		lastChar byte // tracks the last byte we appended for whitespace collapsing
+		out       strings.Builder
+		skipDepth int  // counts nested <script>/<style> blocks we are inside
+		lastChar  byte // tracks the last byte we appended for whitespace collapsing
 	)
 
 	appendText := func(s string) {

@@ -349,9 +349,9 @@ func TestIndexStats(t *testing.T) {
 			Text:     "the quick brown fox", // 19 bytes
 		},
 		{
-			InfoHash: "1111111111111111111111111111111111111111",
-			FilePath: "README.md",
-			Text:     "jumps over the lazy dog", // 23 bytes
+			InfoHash:   "1111111111111111111111111111111111111111",
+			FilePath:   "README.md",
+			Text:       "jumps over the lazy dog", // 23 bytes
 			ChunkIndex: 1,
 		},
 		{
@@ -459,5 +459,53 @@ func TestReopenPersistsDocuments(t *testing.T) {
 
 	if n, err := reopened.DocCount(); err != nil || n != 1 {
 		t.Fatalf("reopened DocCount = %d, %v; want 1, nil", n, err)
+	}
+}
+
+// TestDeleteTorrent exercises the remove-by-infohash path. After
+// Delete the doc must no longer appear in Search results and
+// DocCount must drop. A second delete for the same infohash is
+// a no-op per the contract.
+func TestDeleteTorrent(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+
+	ih := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	if err := idx.IndexTorrent(indexer.TorrentDoc{
+		InfoHash: ih,
+		Name:     "to be deleted",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := idx.Search(indexer.SearchRequest{Query: "deleted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hits) != 1 {
+		t.Fatalf("pre-delete hits=%d, want 1", len(res.Hits))
+	}
+
+	if err := idx.DeleteTorrent(ih); err != nil {
+		t.Fatalf("DeleteTorrent: %v", err)
+	}
+
+	res, err = idx.Search(indexer.SearchRequest{Query: "deleted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hits) != 0 {
+		t.Errorf("post-delete hits=%d, want 0", len(res.Hits))
+	}
+
+	// Second delete for a missing infohash must not return an
+	// error per the DeleteTorrent contract.
+	if err := idx.DeleteTorrent(ih); err != nil {
+		t.Errorf("second delete: %v", err)
 	}
 }

@@ -88,7 +88,7 @@ func TestTrackerSnapshotSortsByScore(t *testing.T) {
 	tr.RecordConfirmed(repeat(pk(0x10), 40)...) // good
 	tr.RecordReturned(pk(0x20), 50)
 	tr.RecordFlagged(repeat(pk(0x20), 30)...) // bad
-	tr.RecordReturned(pk(0x30), 1) // unknown-ish
+	tr.RecordReturned(pk(0x30), 1)            // unknown-ish
 
 	snap := tr.Snapshot()
 	if len(snap) != 3 {

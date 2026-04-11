@@ -117,15 +117,15 @@ type Config struct {
 // the XDG Base Directory spec where possible.
 func Default() Config {
 	return Config{
-		DataDir:           defaultDataDir(),
-		ListenPort:        42069, // same as anacrolix/torrent's default; reduces port surprise
-		Seed:              true,
-		NoUpload:          false,
-		DisableDHT:        false,
-		HTTPUserAgent:     "", // use anacrolix default
-		IndexDir:          defaultIndexDir(),
-		IdentityPath:      defaultIdentityPath(),
-		PublisherManifest: defaultPublisherManifest(),
+		DataDir:             defaultDataDir(),
+		ListenPort:          42069, // same as anacrolix/torrent's default; reduces port surprise
+		Seed:                true,
+		NoUpload:            false,
+		DisableDHT:          false,
+		HTTPUserAgent:       "", // use anacrolix default
+		IndexDir:            defaultIndexDir(),
+		IdentityPath:        defaultIdentityPath(),
+		PublisherManifest:   defaultPublisherManifest(),
 		ReputationPath:      defaultReputationPath(),
 		SeedListPath:        defaultSeedListPath(),
 		BloomPath:           defaultBloomPath(),

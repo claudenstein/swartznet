@@ -322,7 +322,7 @@ type SubscriberWorker struct {
 	sub *Subscriber
 
 	mu        sync.Mutex
-	follows   map[[32]byte]string  // pubkey → human label
+	follows   map[[32]byte]string // pubkey → human label
 	lastSync  map[[32]byte]SyncResult
 	stopCh    chan struct{}
 	stopOnce  sync.Once

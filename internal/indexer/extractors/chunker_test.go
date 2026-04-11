@@ -92,9 +92,9 @@ func TestChunkTextOffsetsPointToParagraphs(t *testing.T) {
 	// Build paragraphs large enough that each lands in its own chunk,
 	// so we can verify the first-byte offset of each chunk matches
 	// the paragraph start in the input.
-	p1 := strings.Repeat("alpha ", 1500)   // ~9 KB
-	p2 := strings.Repeat("beta ", 1500)    // ~7.5 KB
-	p3 := strings.Repeat("gamma ", 1500)   // ~9 KB
+	p1 := strings.Repeat("alpha ", 1500) // ~9 KB
+	p2 := strings.Repeat("beta ", 1500)  // ~7.5 KB
+	p3 := strings.Repeat("gamma ", 1500) // ~9 KB
 	text := p1 + "\n\n" + p2 + "\n\n" + p3
 
 	chunks := chunkText(text, DefaultChunkTargetBytes)

@@ -28,5 +28,5 @@
 //   - bloom.go    : Bloom filter type with on-disk persistence.
 //   - reputation.go : per-pubkey reputation tracker (M5b).
 //   - filter.go     : helper that combines both into a single
-//                     "is this hit good?" decision (M5c).
+//     "is this hit good?" decision (M5c).
 package reputation

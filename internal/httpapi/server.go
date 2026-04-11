@@ -284,7 +284,7 @@ type DHTHit struct {
 
 // LocalResult mirrors indexer.SearchResponse in JSON-friendly form.
 type LocalResult struct {
-	Total int     `json:"total"`
+	Total int        `json:"total"`
 	Hits  []LocalHit `json:"hits"`
 }
 
@@ -307,11 +307,11 @@ type LocalHit struct {
 
 // SwarmResult is the merged swarmsearch.QueryResponse in JSON form.
 type SwarmResult struct {
-	Asked     int         `json:"asked"`
-	Responded int         `json:"responded"`
-	Rejected  int         `json:"rejected"`
-	Hits      []SwarmHit  `json:"hits"`
-	Error     string      `json:"error,omitempty"`
+	Asked     int        `json:"asked"`
+	Responded int        `json:"responded"`
+	Rejected  int        `json:"rejected"`
+	Hits      []SwarmHit `json:"hits"`
+	Error     string     `json:"error,omitempty"`
 }
 
 type SwarmHit struct {
@@ -442,11 +442,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 // summarises the running daemon's local index, swarm peer set,
 // DHT publisher state, and the M5 spam-resistance helpers.
 type StatusResponse struct {
-	Local      LocalStatus      `json:"local"`
-	Swarm      SwarmStatus      `json:"swarm"`
-	Publisher  PublisherStatus  `json:"publisher"`
-	Bloom      *BloomStatus     `json:"bloom,omitempty"`
-	Reputation *ReputationStat  `json:"reputation,omitempty"`
+	Local      LocalStatus     `json:"local"`
+	Swarm      SwarmStatus     `json:"swarm"`
+	Publisher  PublisherStatus `json:"publisher"`
+	Bloom      *BloomStatus    `json:"bloom,omitempty"`
+	Reputation *ReputationStat `json:"reputation,omitempty"`
 }
 
 // BloomStatus is the M5 known-good Bloom filter view.
@@ -473,7 +473,7 @@ type ReputationIndexerSummary struct {
 }
 
 type LocalStatus struct {
-	Indexed bool   `json:"indexed"`
+	Indexed  bool   `json:"indexed"`
 	DocCount uint64 `json:"doc_count"`
 }
 

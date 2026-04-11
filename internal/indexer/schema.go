@@ -2,8 +2,8 @@ package indexer
 
 import (
 	"github.com/blevesearch/bleve/v2"
-	"github.com/blevesearch/bleve/v2/analysis/analyzer/standard"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/standard"
 	"github.com/blevesearch/bleve/v2/mapping"
 )
 
@@ -12,7 +12,7 @@ import (
 //
 //   - "torrent" — one per torrent, holds name, file list, trackers. M2.0.
 //   - "content" — one per extracted-text chunk of a file inside a torrent.
-//                 M2.2a. Linked back to its torrent via the infohash field.
+//     M2.2a. Linked back to its torrent via the infohash field.
 //
 // Keeping both in one index means `swartznet search foo` naturally returns
 // both torrent-level matches and content-level matches in a single result
@@ -25,11 +25,11 @@ const (
 // Field names. Kept as constants so tests and callers don't drift from
 // whatever the schema says.
 const (
-	fieldType      = "type"      // document discriminator
-	fieldInfoHash  = "infohash"  // 40-char hex, keyword analyzer
-	fieldName      = "name"      // torrent name, standard analyzer
-	fieldFilePaths = "files"     // concatenated file paths, standard analyzer
-	fieldTrackers  = "trackers"  // tracker URLs, keyword analyzer
+	fieldType      = "type"     // document discriminator
+	fieldInfoHash  = "infohash" // 40-char hex, keyword analyzer
+	fieldName      = "name"     // torrent name, standard analyzer
+	fieldFilePaths = "files"    // concatenated file paths, standard analyzer
+	fieldTrackers  = "trackers" // tracker URLs, keyword analyzer
 	fieldSizeBytes = "size_bytes"
 	fieldAddedAt   = "added_at"
 	fieldFileCount = "file_count"

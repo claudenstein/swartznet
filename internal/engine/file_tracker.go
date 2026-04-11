@@ -34,11 +34,11 @@ type FileCompleteEvent struct {
 // Close is safe to call multiple times and unblocks the main loop even if
 // it is still waiting on GotInfo.
 type fileTracker struct {
-	log      *slog.Logger
-	t        *torrent.Torrent
-	ihHex    string
-	events   chan FileCompleteEvent
-	closeCh  chan struct{}
+	log       *slog.Logger
+	t         *torrent.Torrent
+	ihHex     string
+	events    chan FileCompleteEvent
+	closeCh   chan struct{}
 	closeOnce sync.Once
 }
 

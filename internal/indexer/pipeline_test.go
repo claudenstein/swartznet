@@ -38,10 +38,10 @@ func TestPipelineRoundTrip(t *testing.T) {
 
 	body := "quantum mechanics is the study of subatomic particles and their interactions"
 	ok := p.Submit(indexer.FileInput{
-		InfoHash:  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-		FileIndex: 0,
-		Path:      "physics_notes.txt",
-		Size:      int64(len(body)),
+		InfoHash:   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		FileIndex:  0,
+		Path:       "physics_notes.txt",
+		Size:       int64(len(body)),
 		OpenReader: mockOpenReader(body),
 	})
 	if !ok {
@@ -107,10 +107,10 @@ func TestPipelineSkipsBinary(t *testing.T) {
 	before, _ := idx.DocCount()
 
 	p.Submit(indexer.FileInput{
-		InfoHash:  "ffffffffffffffffffffffffffffffffffffffff",
-		FileIndex: 0,
-		Path:      "movie.mkv",
-		Size:      2 * 1024 * 1024 * 1024, // 2 GiB
+		InfoHash:   "ffffffffffffffffffffffffffffffffffffffff",
+		FileIndex:  0,
+		Path:       "movie.mkv",
+		Size:       2 * 1024 * 1024 * 1024, // 2 GiB
 		OpenReader: mockOpenReader("whatever"),
 	})
 
@@ -136,30 +136,30 @@ func TestIndexContentAndDelete(t *testing.T) {
 
 	docs := []indexer.ContentDoc{
 		{
-			InfoHash: "1111111111111111111111111111111111111111",
+			InfoHash:  "1111111111111111111111111111111111111111",
 			FileIndex: 0,
-			FilePath: "book.txt",
-			FileSize: 1000,
-			Mime:     "text/plain",
-			Text:     "chapter one was about regression",
+			FilePath:  "book.txt",
+			FileSize:  1000,
+			Mime:      "text/plain",
+			Text:      "chapter one was about regression",
 			Extractor: "plaintext",
 		},
 		{
-			InfoHash: "1111111111111111111111111111111111111111",
+			InfoHash:  "1111111111111111111111111111111111111111",
 			FileIndex: 1,
-			FilePath: "appendix.txt",
-			FileSize: 500,
-			Mime:     "text/plain",
-			Text:     "appendix discusses eigenvectors",
+			FilePath:  "appendix.txt",
+			FileSize:  500,
+			Mime:      "text/plain",
+			Text:      "appendix discusses eigenvectors",
 			Extractor: "plaintext",
 		},
 		{
-			InfoHash: "2222222222222222222222222222222222222222",
+			InfoHash:  "2222222222222222222222222222222222222222",
 			FileIndex: 0,
-			FilePath: "other.txt",
-			FileSize: 200,
-			Mime:     "text/plain",
-			Text:     "unrelated content about regression",
+			FilePath:  "other.txt",
+			FileSize:  200,
+			Mime:      "text/plain",
+			Text:      "unrelated content about regression",
 			Extractor: "plaintext",
 		},
 	}
