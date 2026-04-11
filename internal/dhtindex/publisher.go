@@ -31,6 +31,16 @@ type PublisherOptions struct {
 	PutTimeout time.Duration
 	// QueueSize is the buffered task channel capacity. Default: 64.
 	QueueSize int
+	// MinPutInterval is the hard per-keyword publish budget: if
+	// the same keyword was published less than this long ago,
+	// publishOne skips the put with a debug log rather than
+	// hitting the DHT. This is the M13b v1 blocker-2 mitigation
+	// recommended by the desk research — anacrolix/dht/v2 has no
+	// default rate cap on concurrent mutable-item puts, so
+	// SwartzNet must enforce its own. Default: 55 minutes (just
+	// under RefreshInterval, leaving a small skew budget before
+	// the BEP-44 TTL so refreshes keep items alive).
+	MinPutInterval time.Duration
 }
 
 // DefaultPublisherOptions returns the production defaults.
@@ -39,6 +49,7 @@ func DefaultPublisherOptions() PublisherOptions {
 		RefreshInterval: 1 * time.Hour,
 		PutTimeout:      30 * time.Second,
 		QueueSize:       64,
+		MinPutInterval:  55 * time.Minute,
 	}
 }
 
@@ -71,6 +82,9 @@ func NewPublisher(put Putter, manifest *Manifest, opts PublisherOptions, log *sl
 	}
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = 64
+	}
+	if opts.MinPutInterval < 0 {
+		opts.MinPutInterval = 0
 	}
 	return &Publisher{
 		log:      log,
@@ -169,10 +183,29 @@ func (p *Publisher) handleTask(task PublishTask) {
 // publishOne re-publishes the manifest entry for the given keyword.
 // Errors are recorded on the manifest entry and logged but never
 // returned — one bad keyword must not stop the worker.
+//
+// Rate limit (M13b): if the keyword was published less than
+// opts.MinPutInterval ago, skip the put entirely. This is the
+// hard per-keyword budget that prevents SwartzNet from self-DoS'ing
+// the mainline DHT when a client submits the same torrent multiple
+// times in quick succession, or when refreshAll() and a fresh
+// Submit() race for the same keyword.
 func (p *Publisher) publishOne(keyword string) {
 	snap := p.manifest.Snapshot()
 	entry, ok := snap[keyword]
 	if !ok {
+		return
+	}
+	// Hard per-keyword budget. Skip if we put within the last
+	// MinPutInterval. Zero disables the cap (tests).
+	if p.opts.MinPutInterval > 0 &&
+		!entry.LastPublished.IsZero() &&
+		time.Since(entry.LastPublished) < p.opts.MinPutInterval {
+		p.log.Debug("dhtindex.publisher.put_throttled",
+			"keyword", keyword,
+			"since_last", time.Since(entry.LastPublished).String(),
+			"min_interval", p.opts.MinPutInterval.String(),
+		)
 		return
 	}
 	salt, err := SaltForKeyword(keyword)

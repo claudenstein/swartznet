@@ -1,0 +1,151 @@
+SwartzNet incorporates third-party code under the licenses listed
+below. SwartzNet itself is distributed under the Apache License,
+Version 2.0; see the LICENSE file in the repository root. The
+licenses here cover libraries linked into the swartznet binary.
+
+This file is curated manually and focuses on dependencies that
+are either (a) non-trivially embedded in the binary or (b) carry
+terms the user of a redistributed binary should be aware of.
+It is NOT a full transitive go.sum audit — that is the
+responsibility of automated SBOM tooling. It IS a complete list
+of the "heavy" native libraries SwartzNet ships against.
+
+================================================================
+Go standard library
+================================================================
+
+Copyright (c) The Go Authors
+License: BSD-3-Clause (https://go.dev/LICENSE)
+
+Used throughout SwartzNet for networking, filesystem, crypto,
+encoding/xml (DOCX, ODT extractors), archive/zip (DOCX, ODT,
+EPUB), compress/gzip (companion index), and the standard
+search / sort / http / net / time packages.
+
+================================================================
+github.com/anacrolix/torrent
+================================================================
+
+Copyright (c) Matt Joiner and contributors
+License: MPL-2.0 (https://github.com/anacrolix/torrent/blob/master/LICENSE)
+
+The BitTorrent engine SwartzNet embeds. Used directly by the
+engine, dhtindex, and companion packages.
+
+================================================================
+github.com/anacrolix/dht/v2
+================================================================
+
+Copyright (c) Matt Joiner and contributors
+License: MPL-2.0 (https://github.com/anacrolix/dht/blob/master/LICENSE)
+
+Mainline DHT client used for BEP-44 mutable-item publish/lookup
+(dhtindex.AnacrolixPutter / AnacrolixGetter) and the BEP-46
+infohash-pointer path that powers the companion content index.
+
+================================================================
+github.com/blevesearch/bleve/v2
+================================================================
+
+Copyright (c) 2014 The Bleve Authors
+License: Apache-2.0 (https://github.com/blevesearch/bleve/blob/master/LICENSE)
+
+The pure-Go full-text index used by internal/indexer for local
+search. Transitively pulls in the scorch index backend, the zap
+segment format, and the standard analyzer chain — all under
+Apache-2.0.
+
+================================================================
+github.com/ledongthuc/pdf
+================================================================
+
+Copyright (c) 2009 The Go Authors. All rights reserved.
+License: BSD-3-Clause
+
+Pure-Go PDF parser used by internal/indexer/extractors/pdf.go
+for text extraction from PDF file contents. Upstream is a
+maintained fork of Russ Cox's rsc/pdf. Contrary to earlier
+documentation, the upstream LICENSE file is BSD-3-Clause
+(not MIT) — this file is the authoritative attribution.
+
+----
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================
+golang.org/x/net
+================================================================
+
+Copyright 2009 The Go Authors. All rights reserved.
+License: BSD-3-Clause
+
+The Go project's supplemental net package. The html sub-package
+is used by internal/indexer/extractors/htmltext.go to strip
+markup from EPUB chapters and (transitively) HTML files.
+
+----
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================
+Other Apache-2.0 / MIT / BSD dependencies
+================================================================
+
+The transitive Go module graph includes many other packages
+under Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, or ISC. Run
+`go mod graph` + any SBOM tool of choice (e.g. go-licenses,
+cyclonedx-gomod) for a complete machine-readable enumeration.
+As of v0.3.0 the extractor hot path — PDF, EPUB, DOCX, ODT,
+plaintext, subtitle, and chunker — is entirely covered by the
+entries above plus the Go standard library.
+
+No GPL, LGPL, AGPL, SSPL, BUSL, CDDL, or EPL code is linked
+into the swartznet binary on the extractor hot path.

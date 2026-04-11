@@ -99,6 +99,47 @@ draft to Final).
   getter. Six new tests covering happy path, pointer/fetcher
   failures, partial-ingest failure, the worker lifecycle, and
   IngestReader. All pass under `-race`.
+### M13 — v1.0.0 blocker research follow-through
+
+The research pass over the six v1-blocking open questions in
+`docs/05-integration-design.md` §13 produced a report
+(`docs/09-v1-blocker-research.md`) plus a set of concrete action
+items. Nothing turned out to require a protocol redesign; the
+below commits are the straightforward follow-through.
+
+- **M13a — `THIRD_PARTY_LICENSES` + PDF attribution fix**: Audit
+  of the extractor dependency tree confirmed the v1 hot path is
+  license-clean (BSD-3-Clause for `ledongthuc/pdf` and
+  `golang.org/x/net`, stdlib for everything else). The only
+  finding was a mis-attribution — the project docs called
+  `ledongthuc/pdf` MIT-licensed; the upstream `LICENSE` file is
+  actually BSD-3-Clause (© The Go Authors, inherited from
+  `rsc/pdf`). New `THIRD_PARTY_LICENSES` file lists every heavy
+  dependency with its full notice text; `README.md` and
+  `internal/indexer/extractors/pdf.go` updated to call it
+  BSD-3-Clause.
+- **M13b — publisher `MinPutInterval` hard cap**: v1 blocker 2
+  research noted `anacrolix/dht/v2` has no default rate cap on
+  concurrent mutable-item puts, so the client must enforce its
+  own per-keyword budget to avoid self-DoS'ing the publisher.
+  `dhtindex.PublisherOptions` gains a `MinPutInterval` field
+  (default 55 minutes), and `publishOne` now short-circuits if
+  the keyword was published less than `MinPutInterval` ago,
+  regardless of whether the trigger was a `Submit()` or a
+  refresh tick. `TestPublisherMinPutIntervalThrottles` covers
+  the new path.
+- **M13e — chunker shrink (10 KiB → 2 KiB)**: v1 blocker 1
+  research converges on 0.5–4 KiB for content-chunk targets
+  (Elastic's docs default to ~250 words ≈ 1.25 KiB; production
+  RAG/BM25 stacks sit at 1–2 KiB). SwartzNet was using 10 KiB,
+  an order of magnitude above the sweet spot. Shrinking
+  `DefaultChunkTargetBytes` improves BM25 relevance per-hit and
+  tightens highlight fragments at a small index-size cost.
+
+Still pending from M13: seed reputation list + decay + heavy-tail
+rule (blocker 4), SOCKS5 for the BEP-44 put path + threat-model
+docs (blocker 6).
+
 ### M12 — v1.0.0 preparation
 
 Everything below is work toward answering the six "open questions

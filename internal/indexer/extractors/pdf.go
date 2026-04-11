@@ -8,8 +8,9 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
-// PDFExtractor uses github.com/ledongthuc/pdf (a pure-Go MIT-licensed
-// fork of Russ Cox's rsc/pdf) to pull the plain-text stream out of PDF
+// PDFExtractor uses github.com/ledongthuc/pdf (a pure-Go BSD-3-Clause
+// fork of Russ Cox's rsc/pdf, (c) The Go Authors) to pull the plain-text
+// stream out of PDF
 // documents. It gives us full-text search over ebooks, scanned-and-OCRed
 // PDFs (if someone else already ran OCR), academic papers, scanned
 // receipts, and the miscellaneous PDFs that end up in book torrent packs.

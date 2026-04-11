@@ -3,11 +3,18 @@ package extractors
 import "strings"
 
 // DefaultChunkTargetBytes is the nominal size we try to hit for each
-// content chunk. 10 KiB is small enough that snippet highlighting can
-// return a tight window around a match, and large enough that the
-// per-chunk overhead (Bleve document metadata, JSON encoding at the
-// network layer) stays a small fraction of the payload.
-const DefaultChunkTargetBytes = 10 * 1024
+// content chunk. Tuned to 2 KiB as of M13e based on the v1.0.0
+// blocker-1 research: Elastic's chunking docs default to ~250 words
+// (≈1.25 KiB), production RAG/BM25 stacks converge on 0.5–4 KiB, and
+// shorter chunks give better BM25 relevance per-hit plus tighter
+// snippet fragments. The old 10 KiB target was an order of magnitude
+// larger than the sweet spot; smaller chunks also produce smaller
+// highlight fragments without losing recall because Bleve scores
+// each chunk independently.
+//
+// Raising this value costs index size and relevance; lowering it
+// below ~512 bytes costs Bleve document-metadata overhead.
+const DefaultChunkTargetBytes = 2 * 1024
 
 // chunkMaxOverrunRatio bounds how much bigger a chunk is allowed to be
 // than DefaultChunkTargetBytes before we force a split even in the

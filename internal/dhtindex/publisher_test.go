@@ -159,6 +159,52 @@ func TestPublisherFailedPutsAreRecorded(t *testing.T) {
 	}
 }
 
+// TestPublisherMinPutIntervalThrottles exercises the M13b hard
+// per-keyword publish budget. After the first put succeeds, the
+// next Submit() for the same keyword within MinPutInterval must
+// update the manifest but not hit the network.
+func TestPublisherMinPutIntervalThrottles(t *testing.T) {
+	t.Parallel()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	mem := dhtindex.NewMemoryPutterGetter(priv)
+	rec := &recordingPutter{inner: mem}
+
+	mf, _ := dhtindex.LoadOrCreateManifest("")
+	p := dhtindex.NewPublisher(rec, mf, dhtindex.PublisherOptions{
+		PutTimeout:     1 * time.Second,
+		QueueSize:      16,
+		MinPutInterval: 10 * time.Minute, // any future-tense value
+	}, silentLogger())
+	p.Start()
+	defer p.Stop()
+
+	ih := bytes.Repeat([]byte{0xcc}, 20)
+	p.Submit(dhtindex.PublishTask{InfoHash: ih, Name: "ubuntu"})
+	// Wait for the first put.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(rec.snapshot()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	first := len(rec.snapshot())
+	if first == 0 {
+		t.Fatal("first put never happened")
+	}
+
+	// Second submission for the same keyword must NOT trigger
+	// another put (throttle active) even though it should still
+	// update the manifest's hit data.
+	p.Submit(dhtindex.PublishTask{InfoHash: ih, Name: "ubuntu", Seeders: 42})
+	time.Sleep(200 * time.Millisecond)
+
+	after := len(rec.snapshot())
+	if after != first {
+		t.Errorf("put count = %d after re-submit, want %d (throttled)", after, first)
+	}
+}
+
 func TestPublisherSecondAddUpdatesExistingHit(t *testing.T) {
 	t.Parallel()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)

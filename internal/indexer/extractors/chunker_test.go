@@ -7,9 +7,10 @@ import (
 
 func TestChunkTextSmallStaysWhole(t *testing.T) {
 	t.Parallel()
-	// A 5 KiB input with target 10 KiB should come back as a single
-	// chunk — the smallFileFactor optimisation avoids splitting.
-	text := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 100)
+	// A small-enough input should come back as a single chunk —
+	// the smallFileFactor optimisation avoids splitting. Sized to
+	// fit the M13e post-shrink target (2 KiB) with room to spare.
+	text := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20)
 	if len(text) >= DefaultChunkTargetBytes {
 		t.Fatalf("fixture too big: %d bytes", len(text))
 	}
