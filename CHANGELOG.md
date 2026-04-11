@@ -135,10 +135,28 @@ below commits are the straightforward follow-through.
   an order of magnitude above the sweet spot. Shrinking
   `DefaultChunkTargetBytes` improves BM25 relevance per-hit and
   tightens highlight fragments at a small index-size cost.
+- **M13c — seed reputation list + decaying bonus**: v1 blocker 4
+  research recommended a signed/versioned seed list of ~20
+  curated pubkeys with an exponentially-decaying score boost
+  (90-day half-life) so organic reputation dominates after one
+  quarter. `reputation.Counters` gains `SeededAt` + `SeedLabel`;
+  `scoreOf` adds `SeedBonus × 2^(-age/SeedHalfLife)` on top of
+  the organic Bayesian score. New `MarkSeeded`, `IsSeeded`,
+  `AnySeeded`, and `LoadSeedList` methods; new `SeedList` JSON
+  schema with `version` gate. A fresh seed scores ~0.95, well
+  above any reasonable `MinIndexerScore` cutoff, so the existing
+  `Threshold` pre-filter in `dhtindex.Lookup` gets heavy-tail
+  semantics for free (a bootstrap node with zero traffic still
+  passes the cutoff if it's in the seed list). New
+  `config.SeedListPath` (default `~/.local/share/swartznet/seeds.json`)
+  is loaded by `engine.New` after `LoadOrCreateTracker`. Three
+  new tests cover the bypass, the 90-day decay via backdated
+  `SeededAt`, and the JSON loader (including malformed
+  entries). The actual shipping seed list file is not bundled —
+  distribution is a post-v1 operational decision.
 
-Still pending from M13: seed reputation list + decay + heavy-tail
-rule (blocker 4), SOCKS5 for the BEP-44 put path + threat-model
-docs (blocker 6).
+Still pending from M13: SOCKS5 for the BEP-44 put path +
+threat-model docs (blocker 6).
 
 ### M12 — v1.0.0 preparation
 

@@ -63,6 +63,16 @@ type Config struct {
 	// ~/.local/share/swartznet/reputation.json.
 	ReputationPath string
 
+	// SeedListPath is the on-disk path to the curated indexer
+	// seed list (M13c). The file is a JSON document of the form
+	// {"version":1,"seeds":[{"pubkey":"<hex>","label":"<name>"}]}.
+	// Every entry is imported via reputation.Tracker.MarkSeeded on
+	// startup, which applies a decaying +0.45 score bonus with a
+	// 90-day half-life. Missing file is not an error (the node
+	// runs with a cold-start reputation network in that case).
+	// Default: ~/.local/share/swartznet/seeds.json.
+	SeedListPath string
+
 	// BloomPath is the on-disk path to the known-good infohash
 	// Bloom filter. Default:
 	// ~/.local/share/swartznet/known-good.bloom.
@@ -107,6 +117,7 @@ func Default() Config {
 		IdentityPath:      defaultIdentityPath(),
 		PublisherManifest: defaultPublisherManifest(),
 		ReputationPath:      defaultReputationPath(),
+		SeedListPath:        defaultSeedListPath(),
 		BloomPath:           defaultBloomPath(),
 		MinIndexerScore:     0,
 		CompanionDir:        defaultCompanionDir(),
@@ -167,6 +178,12 @@ func defaultPublisherManifest() string {
 // path for the per-pubkey reputation tracker.
 func defaultReputationPath() string {
 	return filepath.Join(swartznetShareRoot(), "reputation.json")
+}
+
+// defaultSeedListPath returns the platform-appropriate default
+// path for the M13c curated indexer seed list.
+func defaultSeedListPath() string {
+	return filepath.Join(swartznetShareRoot(), "seeds.json")
 }
 
 // defaultBloomPath returns the platform-appropriate default path

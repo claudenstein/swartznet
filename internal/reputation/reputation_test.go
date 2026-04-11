@@ -1,8 +1,10 @@
 package reputation_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/swartznet/swartznet/internal/reputation"
 )
@@ -169,4 +171,120 @@ func repeat(pk reputation.PubKeyHex, n int) []reputation.PubKeyHex {
 		out[i] = pk
 	}
 	return out
+}
+
+// TestTrackerSeededBypassesThreshold covers the M13c cold-start
+// heavy-tail rule: a freshly-seeded pubkey with zero traffic
+// should pass a MinIndexerScore threshold that a neutral unknown
+// pubkey would fail.
+func TestTrackerSeededBypassesThreshold(t *testing.T) {
+	t.Parallel()
+	tr := reputation.NewTracker()
+
+	unknown := pk(0x70)
+	seeded := pk(0x71)
+	tr.MarkSeeded(seeded, "test-seed")
+
+	// Unknown pubkey sits at the neutral prior (~0.5).
+	if score := tr.Score(unknown); score < 0.4 || score > 0.6 {
+		t.Errorf("unknown score = %.3f, want ~0.5", score)
+	}
+	// Fresh seed jumps to ~0.5 + SeedBonus = ~0.95.
+	seededScore := tr.Score(seeded)
+	if seededScore < 0.9 {
+		t.Errorf("fresh seed score = %.3f, want ≥0.9", seededScore)
+	}
+
+	// With a 0.7 threshold cutoff, the seed must pass and the
+	// unknown must fail.
+	if tr.Threshold(unknown, 0.7) {
+		t.Errorf("unknown incorrectly passed 0.7 threshold (score=%.3f)", tr.Score(unknown))
+	}
+	if !tr.Threshold(seeded, 0.7) {
+		t.Errorf("seed failed 0.7 threshold (score=%.3f)", seededScore)
+	}
+
+	// IsSeeded and AnySeeded helpers.
+	if !tr.IsSeeded(seeded) {
+		t.Error("IsSeeded(seeded) returned false")
+	}
+	if tr.IsSeeded(unknown) {
+		t.Error("IsSeeded(unknown) returned true")
+	}
+	if !tr.AnySeeded([]reputation.PubKeyHex{unknown, seeded}) {
+		t.Error("AnySeeded with one seed returned false")
+	}
+	if tr.AnySeeded([]reputation.PubKeyHex{unknown}) {
+		t.Error("AnySeeded with no seeds returned true")
+	}
+}
+
+// TestTrackerSeedBonusDecays covers the 90-day exponential
+// half-life: a seed imported long enough ago should converge
+// toward its organic score rather than staying pinned at ~0.95.
+// We can't sleep 90 days in a test, so we reach under the hood
+// via a direct Records mutation to backdate SeededAt.
+func TestTrackerSeedBonusDecays(t *testing.T) {
+	t.Parallel()
+	tr := reputation.NewTracker()
+	seeded := pk(0x72)
+	tr.MarkSeeded(seeded, "old-seed")
+
+	// Fresh seed: score ≥ 0.9.
+	if fresh := tr.Score(seeded); fresh < 0.9 {
+		t.Errorf("fresh seed score = %.3f, want ≥0.9", fresh)
+	}
+
+	// Backdate SeededAt to 180 days ago (two half-lives).
+	r := tr.Records[seeded]
+	r.SeededAt = time.Now().Add(-2 * reputation.SeedHalfLife)
+
+	// After two half-lives the bonus is 0.25× of SeedBonus ≈
+	// 0.11, so organic (~0.5) + bonus (~0.11) = ~0.61.
+	decayed := tr.Score(seeded)
+	if decayed > 0.75 {
+		t.Errorf("decayed seed score = %.3f, want ≤0.75 after 2 half-lives", decayed)
+	}
+	if decayed < 0.5 {
+		t.Errorf("decayed seed score = %.3f, want still ≥0.5 (neutral floor)", decayed)
+	}
+}
+
+// TestTrackerLoadSeedList exercises the JSON seed-list loader.
+func TestTrackerLoadSeedList(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seeds.json")
+
+	body := []byte(`{
+		"version": 1,
+		"seeds": [
+			{"pubkey": "0101010101010101010101010101010101010101010101010101010101010101", "label": "alice"},
+			{"pubkey": "0202020202020202020202020202020202020202020202020202020202020202", "label": "bob"},
+			{"pubkey": "not-hex", "label": "junk"},
+			{"pubkey": "03030303", "label": "too-short"}
+		]
+	}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := reputation.NewTracker()
+	n, errs := tr.LoadSeedList(path)
+	if n != 2 {
+		t.Errorf("imported = %d, want 2", n)
+	}
+	if len(errs) != 2 {
+		t.Errorf("errs = %d, want 2 (bad hex + too-short)", len(errs))
+	}
+
+	if !tr.IsSeeded(reputation.PubKeyHex("0101010101010101010101010101010101010101010101010101010101010101")) {
+		t.Error("alice not seeded after load")
+	}
+
+	// Missing file is not an error.
+	n2, errs2 := tr.LoadSeedList(filepath.Join(dir, "does-not-exist.json"))
+	if n2 != 0 || len(errs2) != 0 {
+		t.Errorf("missing file: imported=%d errs=%v, want 0/nil", n2, errs2)
+	}
 }

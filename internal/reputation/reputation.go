@@ -43,6 +43,17 @@ type Counters struct {
 	// LastUpdated is the most recent counter mutation. Used by
 	// the M5d auto-decay logic (M5+).
 	LastUpdated time.Time `json:"last_updated"`
+	// SeededAt is the time at which this pubkey was imported from
+	// a curated seed list (see MarkSeeded). Zero value means "not
+	// a seed". The seed bonus added to the derived score decays
+	// exponentially from this point with SeedHalfLife, so an
+	// organically-earned score dominates after a few half-lives.
+	// M13c addition for the v1.0.0 reputation cold-start story.
+	SeededAt time.Time `json:"seeded_at,omitempty"`
+	// SeedLabel is a human-readable tag for a seed entry, usually
+	// "maintainer-alice" or similar. Populated by MarkSeeded and
+	// shown in `swartznet status`.
+	SeedLabel string `json:"seed_label,omitempty"`
 }
 
 // Score is the derived 0-1 reputation value used for ranking. The
@@ -63,6 +74,20 @@ type Counters struct {
 const (
 	defaultUnknownScore  = 0.5
 	smoothingPriorWeight = 5.0 // pretend every indexer has 5 prior neutral hits
+
+	// SeedBonus is the initial score bump a freshly-imported seed
+	// pubkey gets on top of its organic (smoothed) score. A brand-
+	// new seed with zero traffic therefore starts at
+	// defaultUnknownScore + SeedBonus ≈ 0.95, well above any
+	// reasonable MinIndexerScore cutoff.
+	SeedBonus = 0.45
+
+	// SeedHalfLife is how fast the seed bonus decays. The v1 value
+	// is 90 days — after one half-life a seed's bonus is 0.225, and
+	// after ~6 months it has effectively converged to its organic
+	// score. This matches the research recommendation in v1 blocker
+	// 4: bootstrap aggressively, then let organic signals dominate.
+	SeedHalfLife = 90 * 24 * time.Hour
 )
 
 // Tracker is a persistent per-pubkey reputation table. Safe for
@@ -201,33 +226,50 @@ func (t *Tracker) Score(pk PubKeyHex) float64 {
 }
 
 // scoreOf computes the smoothed score for a Counters record. Pure
-// function; called by Score and the lookup path.
+// function; called by Score and the lookup path. Seeded pubkeys
+// (SeededAt non-zero) get an exponentially decaying bonus on top
+// of the organic Bayesian score, so a fresh seed starts near 1.0
+// and converges to its organic score over ~6 months.
 func scoreOf(r *Counters) float64 {
+	var organic float64
 	if r.HitsReturned == 0 && r.HitsConfirmed == 0 && r.HitsFlagged == 0 {
-		return defaultUnknownScore
+		organic = defaultUnknownScore
+	} else {
+		// "Effective" returned count: at least 1 to avoid div-by-zero.
+		returned := float64(r.HitsReturned)
+		if returned < 1 {
+			returned = 1
+		}
+		good := float64(r.HitsConfirmed) - float64(r.HitsFlagged)
+		if good < 0 {
+			good = 0
+		}
+		rawScore := good / returned
+		// Bayesian smoothing toward the neutral prior. The fewer
+		// returned hits, the more weight the prior gets.
+		organic = (rawScore*returned + defaultUnknownScore*smoothingPriorWeight) /
+			(returned + smoothingPriorWeight)
 	}
-	// "Effective" returned count: at least 1 to avoid div-by-zero.
-	returned := float64(r.HitsReturned)
-	if returned < 1 {
-		returned = 1
-	}
-	good := float64(r.HitsConfirmed) - float64(r.HitsFlagged)
-	if good < 0 {
-		good = 0
-	}
-	rawScore := good / returned
 
-	// Bayesian smoothing toward the neutral prior. The fewer
-	// returned hits, the more weight the prior gets.
-	smoothed := (rawScore*returned + defaultUnknownScore*smoothingPriorWeight) /
-		(returned + smoothingPriorWeight)
-	if smoothed < 0 {
-		smoothed = 0
+	// Seed bonus: add SeedBonus * 2^(-age / SeedHalfLife) when the
+	// pubkey was imported from a seed list. The bonus starts at
+	// SeedBonus and halves every SeedHalfLife.
+	if !r.SeededAt.IsZero() {
+		age := time.Since(r.SeededAt)
+		if age < 0 {
+			age = 0
+		}
+		decay := math.Pow(0.5, float64(age)/float64(SeedHalfLife))
+		organic += SeedBonus * decay
 	}
-	if smoothed > 1 {
-		smoothed = 1
+
+	if organic < 0 {
+		organic = 0
 	}
-	return smoothed
+	if organic > 1 {
+		organic = 1
+	}
+	return organic
 }
 
 // Snapshot returns a copy of every record, suitable for status
@@ -267,4 +309,103 @@ func (t *Tracker) Threshold(pk PubKeyHex, cutoff float64) bool {
 		return true
 	}
 	return t.Score(pk) >= cutoff
+}
+
+// MarkSeeded imports a pubkey from a curated seed list. The
+// record is created if missing and its SeededAt / SeedLabel
+// fields are set. Seed membership persists across restarts via
+// Save; re-importing an already-seeded pubkey refreshes SeededAt
+// to "now" (useful if the maintainers re-bless the list).
+func (t *Tracker) MarkSeeded(pk PubKeyHex, label string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.touch(pk)
+	r.SeededAt = time.Now()
+	r.SeedLabel = label
+}
+
+// IsSeeded reports whether the given pubkey is in the seed list
+// (i.e. was imported via MarkSeeded at some point). The heavy-
+// tail rule in dhtindex.Lookup floats a result as soon as any of
+// its sources is seeded, regardless of the aggregate score.
+func (t *Tracker) IsSeeded(pk PubKeyHex) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	r, ok := t.Records[pk]
+	if !ok {
+		return false
+	}
+	return !r.SeededAt.IsZero()
+}
+
+// AnySeeded reports whether any pubkey in the given slice is
+// seeded. Convenience wrapper around IsSeeded for the lookup
+// path's heavy-tail rule.
+func (t *Tracker) AnySeeded(pks []PubKeyHex) bool {
+	for _, pk := range pks {
+		if t.IsSeeded(pk) {
+			return true
+		}
+	}
+	return false
+}
+
+// SeedListEntry is one row of the JSON seed-list file format.
+// The version field gates format evolution; v1 is the initial
+// schema shipped with M13c.
+type SeedListEntry struct {
+	PubKey string `json:"pubkey"`
+	Label  string `json:"label,omitempty"`
+}
+
+// SeedList is the top-level JSON structure loaded by
+// LoadSeedList. Lives in its own type so future versions can add
+// fields (signature, issuer, expiry, ...) without breaking the
+// current loader.
+type SeedList struct {
+	Version int             `json:"version"`
+	Seeds   []SeedListEntry `json:"seeds"`
+}
+
+// LoadSeedList reads a seed-list JSON file from path and imports
+// every entry via MarkSeeded. Missing file is not an error — a
+// fresh install is allowed to run without a seed list, at the
+// cost of a cold-start reputation network. Malformed entries are
+// skipped with a warning on the returned error list.
+//
+// Returns (imported, errors) — imported is the count that were
+// successfully added; errors is a per-entry list of failures so
+// the caller can log them without aborting.
+func (t *Tracker) LoadSeedList(path string) (int, []error) {
+	if path == "" {
+		return 0, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, []error{fmt.Errorf("reputation: read seed list: %w", err)}
+	}
+	var list SeedList
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return 0, []error{fmt.Errorf("reputation: parse seed list: %w", err)}
+	}
+	if list.Version != 1 {
+		return 0, []error{fmt.Errorf("reputation: unsupported seed list version %d (want 1)", list.Version)}
+	}
+	var (
+		imported int
+		errs     []error
+	)
+	for i, e := range list.Seeds {
+		raw, err := hex.DecodeString(e.PubKey)
+		if err != nil || len(raw) != 32 {
+			errs = append(errs, fmt.Errorf("reputation: seed entry %d: bad pubkey %q", i, e.PubKey))
+			continue
+		}
+		t.MarkSeeded(PubKeyHex(e.PubKey), e.Label)
+		imported++
+	}
+	return imported, errs
 }

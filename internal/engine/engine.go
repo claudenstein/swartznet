@@ -365,6 +365,25 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		} else {
 			eng.tracker = tr
 			log.Info("engine.reputation_loaded", "path", cfg.ReputationPath)
+			// M13c: import the curated seed list on top of the
+			// loaded reputation state. The seed list is the
+			// bootstrap for the cold-start reputation network —
+			// every fresh install inherits ~20 maintainer pubkeys
+			// with a decaying +0.45 score bonus, letting the
+			// network function on day one. Missing file is fine;
+			// parse errors are logged but do not abort.
+			if cfg.SeedListPath != "" {
+				n, errs := tr.LoadSeedList(cfg.SeedListPath)
+				if n > 0 {
+					log.Info("engine.seed_list_loaded",
+						"path", cfg.SeedListPath,
+						"imported", n,
+					)
+				}
+				for _, e := range errs {
+					log.Warn("engine.seed_list_err", "err", e)
+				}
+			}
 		}
 	}
 	// SourceTracker (M9) has no on-disk persistence by design —
