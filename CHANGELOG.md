@@ -130,6 +130,16 @@ ship without research.
   concurrent BEP-44 publishes can anacrolix/dht/v2 sustain"). Fails
   the exit status only when every put fails — a partial failure is
   the interesting measurement.
+- **M12f — per-peer sn_search rate limiter**: Design doc §5.4
+  asks for rate limiting on inbound `sn_search` queries. A noisy
+  peer used to be able to DoS the Bleve query path; this commit
+  adds a token-bucket per peer (default 5 q/s steady, burst 10)
+  that gets a `RejectRateLimited` reply when over quota. Runtime
+  configurable via `Protocol.SetRateLimit`. Per-peer buckets are
+  evicted in `OnPeerClosed` so long-running daemons don't leak.
+  Six unit tests on the bucket math plus one end-to-end
+  `TestHandleInboundRateLimit` through the full `HandleMessage`
+  path (including peer isolation). All pass under `-race`.
 - **M12e — search result snippet highlighting**: `SearchRequest`
   gains a `Highlight` bool; when true, Bleve's HTML highlighter
   runs on the `name` / `files` / `text` fields and returns

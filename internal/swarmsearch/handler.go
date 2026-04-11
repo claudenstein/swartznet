@@ -128,6 +128,15 @@ func (p *Protocol) handleQuery(peerAddr string, payload []byte, reply ReplyFunc)
 		return
 	}
 
+	// M12f: rate limit before we do any real work. A
+	// misbehaving peer cannot get us to run a Bleve search
+	// more than Burst times per token-bucket window. A nil
+	// limiter (test harness) skips this entirely.
+	if p.limiter != nil && !p.limiter.Allow(peerAddr) {
+		p.sendReject(reply, peerAddr, q.TxID, RejectRateLimited, "rate_limited")
+		return
+	}
+
 	p.mu.RLock()
 	searcher := p.searcher
 	caps := p.caps

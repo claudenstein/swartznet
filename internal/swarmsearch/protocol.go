@@ -85,6 +85,11 @@ type Protocol struct {
 	searcher LocalSearcher         // attached in M3b; nil means "reject all inbound queries"
 	sender   Sender                // attached by engine; nil means "decode only, don't reply"
 
+	// limiter is the M12f per-peer inbound query rate limiter.
+	// Constructed in New() with DefaultRateLimit(). Nil-safe —
+	// handler.go tolerates a nil limiter for the test harness.
+	limiter *rateLimiter
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -96,16 +101,30 @@ type Protocol struct {
 	pending   map[uint32]*pendingQuery
 }
 
-// New constructs a Protocol with default capabilities.
+// New constructs a Protocol with default capabilities and the
+// production rate limiter (DefaultRateLimit).
 func New(log *slog.Logger) *Protocol {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Protocol{
-		log:   log,
-		caps:  DefaultCapabilities(),
-		peers: make(map[string]*PeerState),
+		log:     log,
+		caps:    DefaultCapabilities(),
+		peers:   make(map[string]*PeerState),
+		limiter: newRateLimiter(DefaultRateLimit()),
 	}
+}
+
+// SetRateLimit replaces the per-peer inbound query rate-limit
+// configuration at runtime. Pass a zero RateLimit to disable
+// limiting entirely. Existing per-peer buckets are left intact
+// and will fill at the new rate on their next query.
+func (p *Protocol) SetRateLimit(cfg RateLimit) {
+	if p.limiter == nil {
+		p.limiter = newRateLimiter(cfg)
+		return
+	}
+	p.limiter.setConfig(cfg)
 }
 
 // Capabilities returns a copy of the current capability set.
@@ -224,10 +243,14 @@ func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessag
 }
 
 // OnPeerClosed removes the peer from our tracking map so stale
-// entries don't accumulate on long-running processes.
+// entries don't accumulate on long-running processes. Also
+// drops the per-peer rate-limit bucket, if any.
 func (p *Protocol) OnPeerClosed(addr string) {
 	p.mu.Lock()
 	delete(p.peers, addr)
 	p.mu.Unlock()
+	if p.limiter != nil {
+		p.limiter.forget(addr)
+	}
 	p.log.Debug("swarmsearch.peer_closed", "peer", addr)
 }

@@ -60,6 +60,71 @@ func newSilentProtocol() *swarmsearch.Protocol {
 	return swarmsearch.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
+// TestHandleInboundRateLimit exercises the M12f rate limiter
+// end-to-end through the Protocol's HandleMessage entry point:
+// a burst of queries from one peer must eventually hit a
+// RejectRateLimited reply, while a different peer is unaffected.
+func TestHandleInboundRateLimit(t *testing.T) {
+	t.Parallel()
+	p := newSilentProtocol()
+	// Tight limit: burst 3, slow refill so the test doesn't
+	// need to wait for a top-up.
+	p.SetRateLimit(swarmsearch.RateLimit{
+		QueriesPerSecond: 0.01,
+		Burst:            3,
+	})
+	p.SetSearcher(&fakeSearcher{total: 0, hits: nil})
+
+	reply := &captureReply{}
+	const peer = "10.9.9.9:6881"
+	for i := 0; i < 3; i++ {
+		payload, err := swarmsearch.EncodeQuery(swarmsearch.Query{TxID: uint32(i + 1), Q: "foo"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.HandleMessage(peer, payload, reply.fn())
+	}
+
+	// 4th query must return a RejectRateLimited.
+	payload, err := swarmsearch.EncodeQuery(swarmsearch.Query{TxID: 4, Q: "foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.HandleMessage(peer, payload, reply.fn())
+	msg, ok := reply.last()
+	if !ok {
+		t.Fatal("no reply captured for over-quota query")
+	}
+	rej, err := swarmsearch.DecodeReject(msg)
+	if err != nil {
+		t.Fatalf("reply not a Reject: %v (msg=%x)", err, msg)
+	}
+	if rej.Code != swarmsearch.RejectRateLimited {
+		t.Errorf("reject code = %d, want RejectRateLimited (%d)", rej.Code, swarmsearch.RejectRateLimited)
+	}
+	if rej.TxID != 4 {
+		t.Errorf("reject txid = %d, want 4", rej.TxID)
+	}
+
+	// A different peer's first query must still succeed.
+	otherReply := &captureReply{}
+	payload2, err := swarmsearch.EncodeQuery(swarmsearch.Query{TxID: 100, Q: "foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.HandleMessage("10.9.9.8:6881", payload2, otherReply.fn())
+	msg2, ok := otherReply.last()
+	if !ok {
+		t.Fatal("isolated peer got no reply")
+	}
+	// It should be a Result (total=0), not a Reject. We don't
+	// need to decode it — confirming it isn't the reject tag is
+	// enough since we already tested happy-path decode above.
+	if _, err := swarmsearch.DecodeReject(msg2); err == nil {
+		t.Errorf("isolated peer got a Reject instead of a Result")
+	}
+}
+
 func TestHandleInboundQueryAnsweredFromLocalIndex(t *testing.T) {
 	t.Parallel()
 	p := newSilentProtocol()
