@@ -399,6 +399,34 @@ POST /torrents/{infohash}/files/{index}/priority
 GET  /torrents/{infohash}/files
 ```
 
+### Bandwidth rate limiting
+
+SwartzNet defaults to unlimited upload and download throughput.
+If you want to cap either (polite-mode seeding, sharing an
+internet connection with others, metered mobile hotspot):
+
+1. Open the **Settings** tab.
+2. Enter a value in KiB/s for Upload and/or Download. Zero
+   means unlimited.
+3. Click **Apply**.
+
+The limits take effect immediately across every peer
+connection, no daemon restart required. A limit of 500 KiB/s
+roughly equals 4 Mbit/s, the typical cap mentioned in
+BitTorrent community etiquette ("share-ratio-friendly").
+
+HTTP equivalents (once a future release exposes them):
+
+```
+POST /config/rate-limit
+  {"upload_bps": 512000, "download_bps": 0}
+GET  /config/rate-limit
+```
+
+Current state can be read via
+`Engine.UploadLimitBytesPerSec()` /
+`DownloadLimitBytesPerSec()` — zero means unlimited.
+
 ### Per-torrent indexing control
 
 By default every torrent added to SwartzNet is indexed: its

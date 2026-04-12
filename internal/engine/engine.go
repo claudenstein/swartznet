@@ -14,6 +14,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	pp "github.com/anacrolix/torrent/peer_protocol"
+	"golang.org/x/time/rate"
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/dhtindex"
@@ -53,6 +54,9 @@ type Engine struct {
 	bloom         *reputation.BloomFilter   // M5 known-good infohash filter; nil if disabled
 	tracker       *reputation.Tracker       // M5 per-pubkey reputation tracker; nil if disabled
 	sources       *reputation.SourceTracker // M9 per-hit source tracker; always non-nil after New
+
+	ulLimiter *rate.Limiter // upload rate limiter; rate.Inf when unlimited
+	dlLimiter *rate.Limiter // download rate limiter; rate.Inf when unlimited
 
 	mu       sync.Mutex
 	closed   bool
@@ -270,6 +274,16 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		tc.HTTPUserAgent = cfg.HTTPUserAgent
 	}
 
+	// Install mutable rate limiters so Engine.SetUploadLimit /
+	// SetDownloadLimit can tune bandwidth at runtime without
+	// restarting the Client. Default: unlimited. We keep a
+	// reference on the Engine so the mutator methods can
+	// SetLimit/SetBurst at runtime.
+	ulLimiter := rate.NewLimiter(rate.Inf, 0)
+	dlLimiter := rate.NewLimiter(rate.Inf, 0)
+	tc.UploadRateLimiter = ulLimiter
+	tc.DownloadRateLimiter = dlLimiter
+
 	// Construct the swarm-search protocol before wiring callbacks — it
 	// owns the per-peer state the callbacks will populate.
 	swarm := swarmsearch.New(log)
@@ -402,12 +416,14 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	}
 
 	eng := &Engine{
-		cfg:     cfg,
-		client:  cl,
-		log:     log,
-		swarm:   swarm,
-		handles: make(map[metainfo.Hash]*Handle),
-		peers:   peers,
+		cfg:       cfg,
+		client:    cl,
+		log:       log,
+		swarm:     swarm,
+		handles:   make(map[metainfo.Hash]*Handle),
+		peers:     peers,
+		ulLimiter: ulLimiter,
+		dlLimiter: dlLimiter,
 	}
 	// Hand the peer tracker to the swarmSender so Query fan-out can
 	// find specific peers by address. The callbacks above and this

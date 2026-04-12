@@ -2,6 +2,8 @@ package gui
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -19,6 +21,9 @@ type settingsTab struct {
 	shareRadio  *widget.RadioGroup
 	fileHitsChk *widget.Check
 	contentChk  *widget.Check
+
+	uploadEntry   *widget.Entry
+	downloadEntry *widget.Entry
 }
 
 var shareLevels = []string{
@@ -51,6 +56,25 @@ func newSettingsTab(d *daemon.Daemon) *settingsTab {
 		saveBtn,
 	))
 
+	// Rate limiting card.
+	st.uploadEntry = widget.NewEntry()
+	st.uploadEntry.SetPlaceHolder("0 (unlimited)")
+	st.downloadEntry = widget.NewEntry()
+	st.downloadEntry.SetPlaceHolder("0 (unlimited)")
+	st.loadRateLimits()
+
+	applyLimitsBtn := widget.NewButton("Apply", func() {
+		st.applyRateLimits()
+	})
+
+	rateCard := widget.NewCard("Bandwidth Limits", "Zero means unlimited. Applies immediately.", container.NewVBox(
+		widget.NewForm(
+			widget.NewFormItem("Download (KiB/s)", st.downloadEntry),
+			widget.NewFormItem("Upload (KiB/s)", st.uploadEntry),
+		),
+		applyLimitsBtn,
+	))
+
 	// Info card.
 	cfgInfo := widget.NewCard("Configuration", "", container.NewVBox(
 		labelRow("Data directory:", widget.NewLabel(d.Cfg.DataDir)),
@@ -59,9 +83,65 @@ func newSettingsTab(d *daemon.Daemon) *settingsTab {
 		labelRow("DHT:", widget.NewLabel(boolStr(!d.Cfg.DisableDHT))),
 	))
 
-	st.content = container.NewVBox(sharingCard, cfgInfo)
+	st.content = container.NewVBox(sharingCard, rateCard, cfgInfo)
 
 	return st
+}
+
+func (st *settingsTab) loadRateLimits() {
+	ul := st.d.Eng.UploadLimitBytesPerSec()
+	dl := st.d.Eng.DownloadLimitBytesPerSec()
+	st.uploadEntry.SetText(kibStr(ul))
+	st.downloadEntry.SetText(kibStr(dl))
+}
+
+func (st *settingsTab) applyRateLimits() {
+	ulKiB, err := parseKiB(st.uploadEntry.Text)
+	if err != nil {
+		dialog.ShowError(fmt.Errorf("upload: %w", err), st.win())
+		return
+	}
+	dlKiB, err := parseKiB(st.downloadEntry.Text)
+	if err != nil {
+		dialog.ShowError(fmt.Errorf("download: %w", err), st.win())
+		return
+	}
+	st.d.Eng.SetUploadLimitBytesPerSec(ulKiB * 1024)
+	st.d.Eng.SetDownloadLimitBytesPerSec(dlKiB * 1024)
+	dialog.ShowInformation("Saved",
+		fmt.Sprintf("Upload: %s KiB/s\nDownload: %s KiB/s",
+			limitDisplay(ulKiB), limitDisplay(dlKiB)), st.win())
+}
+
+// parseKiB accepts an empty string (= 0) or a non-negative integer
+// count of KiB/s. Returns the parsed value in KiB/s.
+func parseKiB(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("must be a whole number")
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("must be ≥ 0")
+	}
+	return v, nil
+}
+
+func kibStr(bytesPerSec int64) string {
+	if bytesPerSec <= 0 {
+		return "0"
+	}
+	return strconv.FormatInt(bytesPerSec/1024, 10)
+}
+
+func limitDisplay(kib int64) string {
+	if kib == 0 {
+		return "unlimited"
+	}
+	return strconv.FormatInt(kib, 10)
 }
 
 func (st *settingsTab) loadCurrent() {

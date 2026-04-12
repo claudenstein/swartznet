@@ -40,16 +40,34 @@ engagement from actual users of the v0.x prereleases.
   `TestTorrentFilesAndSetPriority`,
   `TestTorrentFilesUnknownInfohash`.
 
+### Bandwidth rate limits
+
+- The Engine now installs mutable `*rate.Limiter` instances
+  (from `golang.org/x/time/rate`) on the anacrolix client's
+  `UploadRateLimiter` / `DownloadRateLimiter` fields. Defaults
+  to `rate.Inf` (unlimited). Users can tune limits at runtime
+  without restarting the client.
+- New `Engine.SetUploadLimitBytesPerSec(bps)`,
+  `SetDownloadLimitBytesPerSec(bps)`,
+  `UploadLimitBytesPerSec() int64`,
+  `DownloadLimitBytesPerSec() int64`. Zero or negative bps
+  disables the cap.
+- GUI Settings tab gains a new "Bandwidth Limits" card with
+  two numeric entries (KiB/s) and an Apply button. Current
+  limits are read on tab open; Apply updates the limiter in
+  place so every active peer connection sees the new rate.
+- Two new engine tests: `TestRateLimitDefaultsUnlimited`,
+  `TestRateLimitSetAndGet`.
+
 Likely next milestones (still):
 
-- **Rate limiting** (upload/download byte caps via
-  `anacrolix/torrent.Client.SetDefaultTokenBucket`).
 - **CLI commands** for the new v0.3.0 features (`swartznet
   create <path> -o file.torrent`, `swartznet index <ih> off`,
   `swartznet files <ih>`).
 - **Cross-platform GUI release** (darwin + windows GUI
   binaries via `fyne-cross` once Docker is available on the
   build machine).
+- **Queue management** (max active downloads, priority queue).
 
 ## v0.3.0 — 2026-04-12
 
