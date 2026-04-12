@@ -11,10 +11,60 @@ format follows [Keep a Changelog][kac]; the project follows
 
 Targeting **v1.0.0** — first GA release. v0.2.0 adds the local
 web UI and validates the BEP-44 publish path against the live
-mainline DHT. v1.0.0 still wants real-world data for the
-reputation prior weight and at least one second client
-implementing `sn_search` (the BEP-1 requirement to take a
-draft to Final).
+mainline DHT. v0.3.0 adds a native Fyne GUI as a third frontend
+alongside the CLI and web UI. v1.0.0 still wants real-world data
+for the reputation prior weight and at least one second client
+implementing `sn_search` (the BEP-1 requirement to take a draft
+to Final).
+
+### G0–G7 — Native Fyne GUI (v0.3.0)
+
+- **G0**: Extracted engine+indexer+companion+httpapi wiring from
+  `cmd/swartznet/cmd_add.go` into a new `internal/daemon/`
+  package. `Daemon` struct with `New(ctx, opts)` / `Close()` is
+  now shared by both CLI and GUI. `controllerAdapter` and
+  `companionAdapter` moved from `cmd/swartznet/` to
+  `internal/daemon/adapters.go`. Three new tests
+  (`TestDaemonStartStop`, `TestDaemonNoIndex`, `TestDaemonWithAPI`)
+  all pass under `-race`. CLI behavior unchanged.
+- **G1**: New `cmd/swartznet-gui` entry point and
+  `internal/gui/` package. Fyne v2.7.3 (BSD 3-Clause) chosen over
+  Wails/Gio because it is pure Go for the UI layer. Window with
+  AppTabs layout. Downloads tab: `widget.Table` polling
+  `engine.TorrentSnapshots` every 2 s via `fyne.Do()`. Add
+  magnet dialog; file picker for `.torrent`. Pause/resume/remove
+  buttons.
+- **G2**: Search tab with Local / Swarm / DHT checkboxes, all
+  three layers fanned out in parallel via goroutines. Results as
+  cards with Confirm / Flag buttons using the same source
+  attribution logic as the HTTP API handler.
+- **G3**: Status tab — adaptive grid of Card widgets
+  (local index, swarm peers, DHT publisher, Bloom filter) plus a
+  reputation list. 4-second refresh, matches web UI cadence.
+- **G4**: Companion tab — publisher status card with Refresh
+  Now button, plus a follow-list List widget and a pubkey +
+  label form.
+- **G5**: Settings tab — sharing-level RadioGroup (L0 / L1 / L2),
+  file/content hit Checks, save button calls
+  `swarmsearch.Protocol.SetCapabilities`.
+- **G6**: System tray via `desktop.App` assertion. Tray menu:
+  Show, Add Magnet, About, Quit. Close intercept minimises to
+  tray when available, otherwise quits. Download-complete OS
+  notifications via `app.SendNotification`. About dialog shows
+  version, identity pubkey, listen port, HTTP API address.
+  `//go:embed` PNG icon.
+- **G7**: `scripts/build-gui.sh` for native builds with CGo +
+  trimpath + stripped symbols (~46 MB). Docs in
+  `docs/08-operations.md#native-gui-v030` covering
+  dependencies and the `fyne-cross` Docker path for release
+  builds on all 5 platforms (linux-amd64/arm64,
+  darwin-amd64/arm64, windows-amd64).
+
+**Trade-off accepted:** Fyne needs a CGo toolchain, so the GUI
+binary is not statically linked and can't be cross-compiled from
+a vanilla Go toolchain. The CLI continues to build with
+`CGO_ENABLED=0` and stays ~40 MB with the existing
+`build-release.sh` pipeline.
 
 ### M9 — Per-hit source tracking + targeted flag
 

@@ -300,6 +300,78 @@ loaded, the `reputation` block tells you which indexer
 pubkeys are known, and the `publisher.keywords` table tells
 you what has been published successfully.
 
+## Native GUI (v0.3.0+)
+
+Alongside the CLI (`cmd/swartznet`) and the localhost web UI,
+v0.3.0 ships a native cross-platform GUI built with Fyne v2
+(BSD 3-Clause). All GUI code is Go — no HTML/CSS/JS.
+
+The GUI binary is `cmd/swartznet-gui`. It starts its own daemon
+(same engine + indexer + companion wiring as the CLI) and presents
+five tabs:
+
+  - **Downloads** — live torrent table with progress, pause, resume,
+    remove. Add magnet URIs via toolbar dialog, or pick a `.torrent`
+    file with a native file picker.
+  - **Search** — query input plus Local / Swarm / DHT checkboxes,
+    results rendered as cards with Confirm / Flag buttons.
+  - **Status** — dashboard cards for local-index stats, swarm peer
+    counts, DHT publisher keyword table, Bloom filter load, and a
+    per-indexer reputation list.
+  - **Companion** — F3 companion publisher status, plus follow /
+    unfollow management for subscribed publishers.
+  - **Settings** — sharing-level radio (L0 / L1 / L2), per-type
+    hit toggles (file paths, content snippets), and read-only
+    display of the current daemon configuration.
+
+A system tray icon (on Linux, macOS, Windows) keeps the daemon
+running in the background when the window is closed. Completed
+downloads fire desktop notifications.
+
+### Building the GUI
+
+The GUI requires CGo (for Fyne's OpenGL bindings). Native build
+deps per platform:
+
+  - **Linux (Ubuntu/Debian):** `sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev`
+  - **macOS:** `xcode-select --install`
+  - **Windows:** MSYS2 with `mingw-w64-x86_64-toolchain`
+
+Then run:
+
+```
+scripts/build-gui.sh v0.3.0
+```
+
+This produces `dist/swartznet-gui-v0.3.0-<OS>-<ARCH>` for the
+native host. For cross-platform release builds, install and use
+[fyne-cross](https://github.com/fyne-io/fyne-cross) (Docker-based):
+
+```
+go install github.com/fyne-io/fyne-cross@latest
+fyne-cross linux   -app-id net.swartznet.gui ./cmd/swartznet-gui
+fyne-cross windows -app-id net.swartznet.gui ./cmd/swartznet-gui
+fyne-cross darwin  -app-id net.swartznet.gui ./cmd/swartznet-gui
+```
+
+### GUI vs CLI vs web UI
+
+All three frontends talk to the same internal packages; they differ
+only in presentation:
+
+  - **CLI** (`swartznet add|search|status|flag|confirm`) — scriptable,
+    Unix-pipe friendly, no CGo, smallest binary (~40 MB).
+  - **Web UI** (`http://localhost:7654/` while `swartznet add` is
+    running) — zero-install access from any browser, works over SSH
+    port-forward.
+  - **Native GUI** (`swartznet-gui`) — desktop-native window, system
+    tray, desktop notifications, no browser required. Requires CGo.
+
+The three can all run simultaneously: the GUI starts its own daemon
+and by default also binds the HTTP API on `localhost:7654`, so you
+can run `swartznet search --swarm "ubuntu"` in another terminal
+against the same instance.
+
 ## Where to file issues
 
 For now, the project lives at
