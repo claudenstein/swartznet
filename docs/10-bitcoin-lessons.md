@@ -745,6 +745,184 @@ Ordered by priority for v1.0.0 + immediate v1.1:
 
 ---
 
+## Revisions from independent research (2026-04-11)
+
+A parallel research pass over the same nine areas produced an
+independent report. Most of its conclusions matched this doc,
+but it caught five things worth folding in. The body sections
+above have been left as originally written; the corrections and
+additions live in this section so the diff is visible.
+
+### Correction — BIP 324 is WEAK, not STRONG (§8)
+
+My original §8 framed BIP 324's lesson as "STRONG TRANSLATE,
+add encryption to Layer D". That's wrong: BIP 324 specifically
+protects the peer-wire connection, and **BitTorrent's MSE/PE
+(BEP 8) already covers that path** for SwartzNet because
+sn_search messages ride inside the existing encrypted peer
+wire. The v1 threat is elsewhere — the DHT traffic itself is
+plaintext KRPC over UDP.
+
+Revised verdict for §8: **WEAK** for the peer-wire layer (MSE
+already handles it). The v1 concern about DHT plaintext
+traffic is a separate problem that BIP 324 doesn't help with;
+the honest fix is SOCKS/Tor for the put path, not a new BEP.
+
+### Correction — BIP 152 maps to sn_search result dedup, not companion deltas (§6)
+
+My §6 speculated that BIP 152's "assume the receiver already
+has most of the data" insight translated to **delta companion
+indexes**. That's one possible application but not the highest-
+leverage one. The better target is **sn_search result set
+encoding**:
+
+- Layer-S responses are highly redundant across publishers.
+  Many publishers index the same popular torrents under the
+  same keywords, so a requester aggregating from 10 peers gets
+  the same infohash 10 times with tiny variations in name /
+  size / seeders metadata.
+- A BIP-152-style encoding would have each responder send
+  **per-message-salted SipHash short IDs** of the result
+  tuples plus a fetch-list for unfamiliar ones. The requester
+  maintains a small LRU of recently-seen hits keyed by the
+  same short ID.
+- Savings are most meaningful for popular keywords where 80%+
+  of per-peer responses overlap.
+
+The salted-SipHash trick specifically is critical: raw
+truncated SHA-256 would be grindable, so an adversary could
+pre-compute colliding short IDs to attribute bad hits to good
+publishers. SipHash with a per-message nonce (the BIP-152
+scheme) defeats that.
+
+Revised priority: **medium** (was low). Schedule for v1.1
+alongside the AddrMan-style peer book — both reduce Layer-S
+traffic and bandwidth.
+
+### Reframe — BIP 155 addrv2 is about wire-format insurance, not SOCKS deployment (§7)
+
+My §7 framed BIP 155 as "add a SOCKS proxy config flag for the
+DHT put path". The framing was confused — SOCKS is a runtime
+deployment concern, while BIP 155's actual contribution is a
+**tagged address format** where each peer address carries a
+network-id byte before the opaque address bytes. That lets
+Bitcoin add Tor v3, I2P, and CJDNS as network IDs 4/5/6
+without touching any of the message-parsing code.
+
+The cheap insurance for SwartzNet: **when we eventually add
+`sn_addr` gossip** between peers (for Layer-S discovery beyond
+the current swarm), design the address format with a
+network-id byte from day one, even if only IPv4 and IPv6 are
+initially supported. Future Tor v3 / I2P / CJDNS support
+becomes a one-byte constant change instead of a wire-format
+migration.
+
+The SOCKS proxy plumbing is still a separate, valid concern
+(M13d flagged it, and the docs threat-model section already
+covers the trade-off) — it's just a different action item
+from BIP 155.
+
+Revised priority for §7: **high** for the wire-format
+insurance (near-zero cost), **medium** for actual SOCKS
+deployment (v1.1).
+
+### New adoption item — Service bits bitfield for sn_search (§5)
+
+My §5 rejected BIP 9/8 as "not applicable" because SwartzNet
+has no consensus rules to gate. That rejection still stands —
+but I missed BIP 9/8's **second half**: Bitcoin peers advertise
+a 64-bit `services` bitfield in their handshake, and each bit
+names an optional sub-feature. New features claim a new bit as
+they ship. Old peers ignore unknown bits.
+
+SwartzNet's sn_search handshake today has a fixed
+`Capabilities` struct (`ShareLocal int`, `FileHits int`,
+`ContentHits int`, `Publisher int`). Adding a 5th capability
+means a schema bump and cross-version handshake handling.
+
+A 64-bit service bitfield with well-known bit assignments
+(e.g. `BitShareLocal = 0`, `BitFileHits = 1`, `BitContentHits = 2`,
+`BitPublisher = 3`, `BitSnippetHighlights = 4`, `BitFacets = 5`,
+`BitSignedResults = 6`, `BitDeltaCompanion = 7`, ...) would
+let the protocol evolve additively forever. **Unknown bits
+must be ignored**, never rejected — that's the invariant that
+makes this additive.
+
+Concrete adoption (priority: **medium-high**, schedule with
+the next sn_search spec revision):
+
+- **Swap `Capabilities` struct for a `uint64` bitfield** in
+  `internal/swarmsearch/protocol.go`.
+- **Document the bit assignments** in
+  `docs/06-bep-sn_search-draft.md` as a numbered table that
+  never shrinks.
+- **Mandate unknown-bit tolerance** in the spec — any future
+  handshake parser must ignore bits it doesn't know.
+- **Gossip the bits**: when a peer receives a handshake,
+  store the full 64-bit field in its PeerState so the query
+  fan-out can filter targets by needed capability without a
+  round trip.
+
+This is a genuinely new idea I missed on the first pass — the
+independent research called it out correctly.
+
+### Minor — reuse Bitcoin's `asmap.dat` format directly (§2)
+
+My §2 recommended ASN-based bucket diversity for the Layer-S
+peer book. The implementation should **reuse Bitcoin's
+`asmap.dat` file format directly** rather than invent a new
+one. Bitcoin's format is documented, has a single maintained
+reference file (fetched from the GitHub bitcoin-asmap repo
+periodically), and is cheap to parse. There's no reason for
+SwartzNet to have its own.
+
+This is a zero-cost addition — the action item in §2 stands
+as-is, just with "asmap.dat compatible" written into it.
+
+### Meta-lesson worth keeping
+
+The independent report ended on a meta-observation that I
+should capture here because it's the right framing for this
+whole document:
+
+> Most of Bitcoin Core's hard-won robustness lives in the
+> *peer layer*, not the consensus layer, and the peer layer's
+> design principles — local decisions, forgetful state,
+> additive feature bits, diversity-by-cost rather than
+> diversity-by-trust — are exactly the principles a
+> permissionless distributed search network needs. Take
+> those. Leave the chain.
+
+That's the single best paragraph to show any future
+contributor who asks "should SwartzNet copy X from Bitcoin?".
+
+---
+
+## Updated adoption list (post-revision)
+
+| # | Item | Section | Priority | Delta |
+|---|---|---|---|---|
+| 1 | Regtest mode | §4 | HIGH | unchanged |
+| 2 | DNS-seed pattern (docs only) | §1 | HIGH | unchanged |
+| 3 | Scenario-per-file testlab pattern | §9 | HIGH | unchanged |
+| 4 | **Service bits bitfield for sn_search** | §5 | **HIGH (new)** | **ADDED** |
+| 5 | **addrv2-style network-id byte in sn_addr** | §7 | **HIGH (new)** | **ADDED** (wire-format insurance) |
+| 6 | AddrMan-style peer book (asmap.dat format) | §2 | MEDIUM | +asmap.dat detail |
+| 7 | Misbehavior score + banlist | §3 | MEDIUM | unchanged |
+| 8 | MiniPeer pure-Go fake | §9 | MEDIUM | unchanged |
+| 9 | **BIP-152 short-ID result dedup for Layer S** | §6 | **MEDIUM** | **RETARGETED** (from companion deltas) |
+| 10 | SOCKS proxy for BEP-44 put path | §7 | MEDIUM | unchanged |
+| 11 | Delta companion indexes | §6 | LOW | unchanged |
+| 12 | ~~BIP-324 encryption for BEP-44~~ | §8 | ~~LOW~~ | **WALKED BACK** — MSE already covers it |
+
+Five HIGH-priority items now, up from three. Two of those
+(items 4 and 5) are genuinely new ideas that only surfaced in
+the independent cross-check. Item 9 (BIP-152 retargeted at
+sn_search result dedup) is a better landing spot than delta
+companion indexes, so the old item 11 is demoted to LOW.
+
+---
+
 ## Summary in one paragraph
 
 Bitcoin Core's most transferable patterns to SwartzNet are its
