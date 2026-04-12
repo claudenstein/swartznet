@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"encoding/hex"
@@ -10,8 +10,59 @@ import (
 	"time"
 
 	"github.com/swartznet/swartznet/internal/companion"
+	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
 )
+
+// controllerAdapter satisfies httpapi.TorrentController by
+// delegating to the engine. The engine returns its own
+// engine.TorrentSnapshot type; we translate it into the
+// httpapi.TorrentSnapshot shape one field at a time so the two
+// packages can stay independent (httpapi must not import
+// internal/engine).
+type controllerAdapter struct {
+	eng *engine.Engine
+}
+
+func (c *controllerAdapter) AddMagnetURI(uri string) (string, error) {
+	return c.eng.AddMagnetURI(uri)
+}
+
+func (c *controllerAdapter) PauseTorrent(infoHashHex string) error {
+	return c.eng.PauseTorrent(infoHashHex)
+}
+
+func (c *controllerAdapter) ResumeTorrent(infoHashHex string) error {
+	return c.eng.ResumeTorrent(infoHashHex)
+}
+
+func (c *controllerAdapter) RemoveTorrent(infoHashHex string) error {
+	return c.eng.RemoveTorrent(infoHashHex)
+}
+
+func (c *controllerAdapter) TorrentSnapshots() []httpapi.TorrentSnapshot {
+	src := c.eng.TorrentSnapshots()
+	out := make([]httpapi.TorrentSnapshot, 0, len(src))
+	for _, s := range src {
+		out = append(out, httpapi.TorrentSnapshot{
+			InfoHash:       s.InfoHash,
+			Name:           s.Name,
+			Size:           s.Size,
+			BytesCompleted: s.BytesCompleted,
+			BytesMissing:   s.BytesMissing,
+			Progress:       s.Progress,
+			Files:          s.Files,
+			ActivePeers:    s.ActivePeers,
+			HalfOpenPeers:  s.HalfOpenPeers,
+			PendingPeers:   s.PendingPeers,
+			TotalPeers:     s.TotalPeers,
+			Seeders:        s.Seeders,
+			Paused:         s.Paused,
+			Status:         s.Status,
+		})
+	}
+	return out
+}
 
 // companionAdapter satisfies httpapi.CompanionController by
 // delegating to a running publisher and subscriber worker.
@@ -81,11 +132,6 @@ func (a *companionAdapter) SubscriberStatus() []httpapi.CompanionFollowStatus {
 		if res.PointerInfoHash != zero {
 			row.PointerInfoHash = hex.EncodeToString(res.PointerInfoHash[:])
 		}
-		// LastSyncAt: there is no separate timestamp on
-		// SyncResult, so we use GeneratedAt as a stand-in for
-		// "the snapshot we synced is from this time" — the
-		// actual wall-clock at sync time can be added later if
-		// the GUI asks for it.
 		if res.GeneratedAt > 0 {
 			row.LastSyncAt = time.Unix(res.GeneratedAt, 0).UTC()
 		}

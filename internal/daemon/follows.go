@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"encoding/hex"
@@ -13,22 +13,22 @@ import (
 
 // followEntry is one row of the on-disk follow list. The file is
 // a single JSON array of these. Lives here rather than inside
-// internal/companion because the format is a CLI-side detail —
+// internal/companion because the format is a daemon-side detail —
 // the subscriber worker accepts (pubkey, label) calls from any
-// caller, and the GUI is the source of truth for what gets
+// caller, and the CLI/GUI is the source of truth for what gets
 // followed.
 type followEntry struct {
 	PubKey string `json:"pubkey"`
 	Label  string `json:"label,omitempty"`
 }
 
-// loadFollowFile reads the follow list at path and registers
+// LoadFollowFile reads the follow list at path and registers
 // every entry with the given subscriber worker. Returns the
 // number of publishers successfully registered. Missing files
 // are not an error (a fresh install starts with an empty list).
 // Malformed entries are logged to stderr but do not abort the
 // load.
-func loadFollowFile(w *companion.SubscriberWorker, path string, stderr io.Writer) int {
+func LoadFollowFile(w *companion.SubscriberWorker, path string, stderr io.Writer) int {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

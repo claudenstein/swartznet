@@ -8,11 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/internal/daemon"
 	"github.com/swartznet/swartznet/internal/engine"
-	"github.com/swartznet/swartznet/internal/httpapi"
-	"github.com/swartznet/swartznet/internal/indexer"
 )
 
 // cmdAdd implements `swartznet add <magnet-uri | path.torrent>`.
@@ -72,125 +70,30 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := signalContext(context.Background())
 	defer cancel()
 
-	eng, err := engine.New(ctx, cfg, log)
+	d, err := daemon.New(ctx, daemon.Options{
+		Cfg:     cfg,
+		Log:     log,
+		NoIndex: noIndex,
+		APIAddr: apiAddr,
+		Version: Version,
+		Stderr:  stderr,
+	})
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
-	defer func() { _ = eng.Close() }()
+	defer d.Close()
 
-	var idx *indexer.Index
-	if !noIndex {
-		var err error
-		idx, err = indexer.Open(cfg.IndexDir)
-		if err != nil {
-			return reportRunErr(fmt.Errorf("open index: %w", err), stderr)
-		}
-		defer idx.Close()
-		eng.SetIndex(idx)
+	if d.CompPub != nil {
+		fmt.Fprintf(stdout, "Companion publisher started, dir=%s\n", cfg.CompanionDir)
+	}
+	if d.CompSub != nil {
+		fmt.Fprintln(stdout, "Companion subscriber started")
+	}
+	if d.API != nil {
+		fmt.Fprintf(stdout, "HTTP API listening on %s\n", d.API.Addr())
 	}
 
-	// Start the F3 companion-index publisher (M11c) once we have
-	// an index AND a DHT putter. Without either, the publisher
-	// has nothing to publish or no way to advertise it; the rest
-	// of the daemon still works.
-	var compPub *companion.Publisher
-	if idx != nil && eng.PointerPutter() != nil && eng.Identity() != nil && cfg.CompanionDir != "" {
-		opts := companion.DefaultPublisherOptions()
-		if cfg.Regtest {
-			// M15a: regtest mode accelerates the companion
-			// publish cadence alongside the dhtindex publisher
-			// so scenario tests don't wait an hour to see the
-			// first companion torrent.
-			opts = companion.RegtestPublisherOptions()
-		}
-		// M15a bug fix: the companion JSON payload MUST land in
-		// the same directory anacrolix's file-storage layer
-		// reads from, or the publisher's torrent will have no
-		// verifiable bytes and subscribers will stall on the
-		// download. anacrolix reads from cfg.DataDir + info.Name,
-		// so the companion publisher writes its JSON.gz and
-		// .torrent wrapper to cfg.DataDir as well. The old
-		// cfg.CompanionDir field is now redundant (kept for
-		// back-compat; see docs/08-operations.md).
-		opts.Dir = cfg.DataDir
-		opts.PublisherKey = eng.Identity().PublicKeyBytes()
-		var err error
-		compPub, err = companion.NewPublisher(idx, eng.PointerPutter(), eng, opts, log)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: companion publisher start failed: %v\n", err)
-		} else {
-			compPub.Start()
-			defer compPub.Stop()
-			fmt.Fprintf(stdout, "Companion publisher started, dir=%s\n", cfg.CompanionDir)
-		}
-	}
-
-	// Start the F3 companion-index subscriber worker (M11d) once
-	// we have an index AND a DHT getter. The follow list is
-	// loaded from cfg.CompanionFollowFile (or empty if missing).
-	// The worker runs as long as the daemon does and re-syncs
-	// every followed publisher every hour.
-	var compSub *companion.SubscriberWorker
-	if idx != nil && eng.PointerGetter() != nil && cfg.CompanionDir != "" {
-		sub, err := companion.NewSubscriber(
-			eng.PointerGetter(), eng, idx,
-			companion.DefaultSubscriberOptions(),
-			log,
-		)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: companion subscriber init failed: %v\n", err)
-		} else {
-			compSub, err = companion.NewSubscriberWorker(sub)
-			if err != nil {
-				fmt.Fprintf(stderr, "warning: companion subscriber worker init failed: %v\n", err)
-			} else {
-				if cfg.CompanionFollowFile != "" {
-					if n := loadFollowFile(compSub, cfg.CompanionFollowFile, stderr); n > 0 {
-						fmt.Fprintf(stdout, "Companion subscriber following %d publishers\n", n)
-					}
-				}
-				compSub.Start()
-				defer compSub.Stop()
-				fmt.Fprintln(stdout, "Companion subscriber started")
-			}
-		}
-	}
-
-	// Start the local HTTP API so `swartznet search --swarm` in
-	// another terminal can talk to this running daemon. Empty
-	// --api-addr disables it entirely. The API now also exposes
-	// the M4 publisher and DHT lookup so search --dht and the
-	// status command both work end-to-end. Browse to
-	// http://localhost:7654/ for the bundled web UI.
-	if apiAddr != "" {
-		// Hand the running version to /healthz so the web UI
-		// badge can show it.
-		httpapi.HealthzVersion = Version
-		api := httpapi.NewWithOptions(apiAddr, log, httpapi.Options{
-			Index:     idx,
-			Swarm:     eng.SwarmSearch(),
-			Publisher: eng.Publisher(),
-			Lookup:    eng.Lookup(),
-			Bloom:     eng.KnownGoodBloom(),
-			Tracker:   eng.ReputationTracker(),
-			Sources:   eng.SourceTracker(),
-			Adder:     eng,
-			Control:   &controllerAdapter{eng: eng},
-			Companion: newCompanionAdapter(compPub, compSub, cfg.CompanionFollowFile),
-		})
-		if err := api.Start(); err != nil {
-			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
-		} else {
-			defer func() {
-				shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				_ = api.Stop(shutdown)
-			}()
-			fmt.Fprintf(stdout, "HTTP API listening on %s\n", api.Addr())
-		}
-	}
-
-	h, err := addTorrent(eng, target)
+	h, err := addTorrent(d.Eng, target)
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
