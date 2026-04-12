@@ -90,6 +90,13 @@ type Protocol struct {
 	// handler.go tolerates a nil limiter for the test harness.
 	limiter *rateLimiter
 
+	// misbehavior is the M15c per-peer misbehavior-score tracker
+	// (defence in depth on top of the rate limiter). Always
+	// non-nil after New. Peers that accumulate score >=
+	// BanThreshold are added to a local banlist and rejected on
+	// future handshakes. Local-only — never gossiped.
+	misbehavior *misbehaviorTracker
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -101,18 +108,39 @@ type Protocol struct {
 	pending   map[uint32]*pendingQuery
 }
 
-// New constructs a Protocol with default capabilities and the
-// production rate limiter (DefaultRateLimit).
+// New constructs a Protocol with default capabilities, the
+// production rate limiter (DefaultRateLimit), and the
+// misbehavior score tracker.
 func New(log *slog.Logger) *Protocol {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Protocol{
-		log:     log,
-		caps:    DefaultCapabilities(),
-		peers:   make(map[string]*PeerState),
-		limiter: newRateLimiter(DefaultRateLimit()),
+		log:         log,
+		caps:        DefaultCapabilities(),
+		peers:       make(map[string]*PeerState),
+		limiter:     newRateLimiter(DefaultRateLimit()),
+		misbehavior: newMisbehaviorTracker(),
 	}
+}
+
+// MisbehaviorScore returns the current misbehavior score for
+// the peer at addr, or 0 if no record exists. Primarily used
+// by tests and /status output.
+func (p *Protocol) MisbehaviorScore(addr string) int {
+	if p.misbehavior == nil {
+		return 0
+	}
+	return p.misbehavior.Score(addr)
+}
+
+// IsBanned reports whether the peer at addr is in the local
+// banlist. Expired bans auto-clear.
+func (p *Protocol) IsBanned(addr string) bool {
+	if p.misbehavior == nil {
+		return false
+	}
+	return p.misbehavior.IsBanned(addr)
 }
 
 // SetRateLimit replaces the per-peer inbound query rate-limit
@@ -207,7 +235,20 @@ func (p *Protocol) AdvertiseOn(m LtepAdvertiser) {
 // extension id and mark the peer as supported. A peer that does NOT
 // advertise sn_search is still tracked (we know they exist) but
 // marked as unsupported so outbound queries skip them.
+//
+// M15c: peers in the local banlist are rejected here — they're
+// never marked as sn_search-capable regardless of what they
+// advertise, so outbound queries skip them and inbound handler
+// paths (handleQuery et al) early-return via the ban check.
 func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessage) {
+	if p.misbehavior != nil && p.misbehavior.IsBanned(addr) {
+		p.log.Info("swarmsearch.peer_ban_rejected",
+			"peer", addr,
+			"reason", "misbehavior score crossed threshold",
+		)
+		return
+	}
+
 	var (
 		supported bool
 		remoteID  pp.ExtensionNumber
@@ -244,13 +285,18 @@ func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessag
 
 // OnPeerClosed removes the peer from our tracking map so stale
 // entries don't accumulate on long-running processes. Also
-// drops the per-peer rate-limit bucket, if any.
+// drops the per-peer rate-limit bucket, if any, and releases
+// the misbehavior entry IF the peer is not currently banned
+// (ban entries are retained so a reconnect hits the block).
 func (p *Protocol) OnPeerClosed(addr string) {
 	p.mu.Lock()
 	delete(p.peers, addr)
 	p.mu.Unlock()
 	if p.limiter != nil {
 		p.limiter.forget(addr)
+	}
+	if p.misbehavior != nil {
+		p.misbehavior.Forget(addr)
 	}
 	p.log.Debug("swarmsearch.peer_closed", "peer", addr)
 }

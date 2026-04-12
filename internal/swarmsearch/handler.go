@@ -83,9 +83,19 @@ func (p *Protocol) SetSender(s Sender) {
 //   - msg_type 2 (reject) → logged, same story.
 //   - msg_type 3 (peer_announce) → logged only; M4 adds real handling.
 func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFunc) {
+	// M15c: banned peers don't get any handler attention at all.
+	// The ban check is cheap — one map lookup — so it's fine to
+	// run on every inbound message.
+	if p.misbehavior != nil && p.misbehavior.IsBanned(peerAddr) {
+		p.log.Debug("swarmsearch.ban_drop", "peer", peerAddr)
+		return
+	}
+
 	hdr, err := peekHeader(payload)
 	if err != nil {
 		p.log.Debug("swarmsearch.handle.bad_header", "peer", peerAddr, "err", err)
+		// Malformed bencode is a serious misbehavior signal.
+		p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_header")
 		return
 	}
 
@@ -97,6 +107,7 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 		if err != nil {
 			p.log.Debug("swarmsearch.rx_result.decode_err",
 				"peer", peerAddr, "err", err)
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_result")
 			return
 		}
 		p.routeResult(peerAddr, res)
@@ -105,6 +116,7 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 		if err != nil {
 			p.log.Debug("swarmsearch.rx_reject.decode_err",
 				"peer", peerAddr, "err", err)
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_reject")
 			return
 		}
 		p.routeReject(peerAddr, rj)
@@ -113,6 +125,24 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 	default:
 		p.log.Debug("swarmsearch.unknown_msg_type",
 			"peer", peerAddr, "msg_type", hdr.MsgType)
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "unknown_msg_type")
+	}
+}
+
+// chargeMisbehavior adds `points` to the peer's misbehavior
+// score and logs a Warn if this push crossed the ban threshold.
+// Nil-safe — the test harness may construct a Protocol without
+// a misbehavior tracker.
+func (p *Protocol) chargeMisbehavior(peerAddr string, points int, reason string) {
+	if p.misbehavior == nil {
+		return
+	}
+	if p.misbehavior.Add(peerAddr, points) {
+		p.log.Warn("swarmsearch.peer_banned",
+			"peer", peerAddr,
+			"reason", reason,
+			"duration", BanDuration.String(),
+		)
 	}
 }
 
@@ -133,6 +163,8 @@ func (p *Protocol) handleQuery(peerAddr string, payload []byte, reply ReplyFunc)
 	// more than Burst times per token-bucket window. A nil
 	// limiter (test harness) skips this entirely.
 	if p.limiter != nil && !p.limiter.Allow(peerAddr) {
+		// M15c: rate-limit hits are low-severity but add up.
+		p.chargeMisbehavior(peerAddr, ScoreRateLimited, "rate_limited")
 		p.sendReject(reply, peerAddr, q.TxID, RejectRateLimited, "rate_limited")
 		return
 	}
@@ -151,6 +183,7 @@ func (p *Protocol) handleQuery(peerAddr string, payload []byte, reply ReplyFunc)
 	// Very short queries are almost always abuse or typos; reject
 	// early rather than run a full-index search.
 	if len(strings.TrimSpace(q.Q)) < 2 {
+		p.chargeMisbehavior(peerAddr, ScoreQueryTooBroad, "query_too_short")
 		p.sendReject(reply, peerAddr, q.TxID, RejectQueryTooBroad, "query_too_short")
 		return
 	}
