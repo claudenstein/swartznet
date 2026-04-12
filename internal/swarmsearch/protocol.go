@@ -97,6 +97,12 @@ type Protocol struct {
 	// future handshakes. Local-only — never gossiped.
 	misbehavior *misbehaviorTracker
 
+	// book is the M15d AddrMan-style peer book. Peers start in
+	// the "new" table when they first handshake sn_search, and
+	// are promoted to "tried" after they respond correctly to a
+	// query. Query fan-out preferentially targets tried peers.
+	book *PeerBook
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -121,8 +127,14 @@ func New(log *slog.Logger) *Protocol {
 		peers:       make(map[string]*PeerState),
 		limiter:     newRateLimiter(DefaultRateLimit()),
 		misbehavior: newMisbehaviorTracker(),
+		book:        NewPeerBook(DefaultMaxTried, DefaultMaxNew),
 	}
 }
+
+// PeerBook returns the Protocol's tried/new peer book.
+// Callers can use it to inspect the tried/new split for
+// /status output or test assertions.
+func (p *Protocol) PeerBook() *PeerBook { return p.book }
 
 // MisbehaviorScore returns the current misbehavior score for
 // the peer at addr, or 0 if no record exists. Primarily used
@@ -270,6 +282,12 @@ func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessag
 	p.mu.Unlock()
 
 	if supported {
+		// M15d: add to the "new" table of the peer book.
+		// Promotion to "tried" happens later when the peer
+		// responds correctly to a real query.
+		if p.book != nil {
+			p.book.AddNew(addr)
+		}
 		p.log.Info("swarmsearch.peer_capable",
 			"peer", addr,
 			"remote_ext_id", remoteID,
@@ -297,6 +315,9 @@ func (p *Protocol) OnPeerClosed(addr string) {
 	}
 	if p.misbehavior != nil {
 		p.misbehavior.Forget(addr)
+	}
+	if p.book != nil {
+		p.book.Remove(addr)
 	}
 	p.log.Debug("swarmsearch.peer_closed", "peer", addr)
 }

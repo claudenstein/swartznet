@@ -223,6 +223,26 @@ collect:
 		}
 	}
 
+	// M15d: promote responding peers in the peer book. A peer
+	// that sent a valid Result (not a Reject, not a timeout) has
+	// demonstrated correct sn_search protocol behavior. This is
+	// the promotion signal that moves them from new → tried.
+	// Rejects and timeouts are recorded as failures.
+	if p.book != nil {
+		responders := make(map[string]bool)
+		for _, ir := range responses {
+			responders[ir.peer] = true
+			p.book.Promote(ir.peer)
+		}
+		// Any target we asked that neither responded nor
+		// rejected is a timeout — record as failure.
+		for _, t := range targets {
+			if !responders[t.Addr] {
+				p.book.RecordFailure(t.Addr)
+			}
+		}
+	}
+
 	merged := mergeResponses(responses)
 	return &QueryResponse{
 		TxID:      txid,
