@@ -204,6 +204,20 @@ func (f *fakeController) SetTorrentIndexing(ih string, enabled bool) error {
 	return nil
 }
 
+func (f *fakeController) TorrentFiles(ih string) ([]httpapi.TorrentFile, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, action{"files", ih})
+	return nil, nil
+}
+
+func (f *fakeController) SetFilePriority(ih string, idx int, priority string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, action{"file_prio:" + priority, ih})
+	return nil
+}
+
 func (f *fakeController) lastAction() action {
 	f.mu.Lock()
 	defer f.mu.Unlock()

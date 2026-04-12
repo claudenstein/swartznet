@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -44,6 +45,24 @@ type TorrentController interface {
 	// SetTorrentIndexing flips the per-torrent indexing toggle.
 	// Idempotent.
 	SetTorrentIndexing(infoHashHex string, enabled bool) error
+	// TorrentFiles returns a per-file snapshot of the torrent.
+	// Empty slice if the torrent has no metadata yet.
+	TorrentFiles(infoHashHex string) ([]TorrentFile, error)
+	// SetFilePriority flips a single file's download priority.
+	// priority must be "none", "normal", or "high".
+	SetFilePriority(infoHashHex string, fileIndex int, priority string) error
+}
+
+// TorrentFile mirrors engine.FileSnapshot so the httpapi layer
+// stays free of an import on internal/engine.
+type TorrentFile struct {
+	Index          int     `json:"index"`
+	Path           string  `json:"path"`
+	DisplayPath    string  `json:"display_path"`
+	Length         int64   `json:"length"`
+	BytesCompleted int64   `json:"bytes_completed"`
+	Progress       float64 `json:"progress"`
+	Priority       string  `json:"priority"`
 }
 
 // TorrentSnapshot mirrors engine.TorrentSnapshot. Re-declared
@@ -190,6 +209,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /torrents/{infohash}/resume", s.handleResumeTorrent)
 	mux.HandleFunc("DELETE /torrents/{infohash}", s.handleDeleteTorrent)
 	mux.HandleFunc("POST /torrents/{infohash}/indexing", s.handleSetTorrentIndexing)
+	mux.HandleFunc("GET /torrents/{infohash}/files", s.handleListTorrentFiles)
+	mux.HandleFunc("POST /torrents/{infohash}/files/{index}/priority", s.handleSetFilePriority)
 	mux.HandleFunc("GET /companion", s.handleCompanionStatus)
 	mux.HandleFunc("POST /companion/refresh", s.handleCompanionRefresh)
 	mux.HandleFunc("POST /companion/follow", s.handleCompanionFollow)
@@ -821,6 +842,74 @@ func (s *Server) handleSetTorrentIndexing(w http.ResponseWriter, r *http.Request
 		"ok":       true,
 		"infohash": ihHex,
 		"enabled":  body.Enabled,
+	})
+}
+
+// FilesListResponse is the body of GET /torrents/{infohash}/files.
+type FilesListResponse struct {
+	InfoHash string        `json:"infohash"`
+	Files    []TorrentFile `json:"files"`
+}
+
+func (s *Server) handleListTorrentFiles(w http.ResponseWriter, r *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ihHex := r.PathValue("infohash")
+	if _, err := hex.DecodeString(ihHex); err != nil || len(ihHex) != 40 {
+		http.Error(w, "infohash must be 40 hex characters", http.StatusBadRequest)
+		return
+	}
+	files, err := s.control.TorrentFiles(ihHex)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(FilesListResponse{
+		InfoHash: ihHex,
+		Files:    files,
+	})
+}
+
+// FilePriorityRequest is the body of POST
+// /torrents/{infohash}/files/{index}/priority.
+type FilePriorityRequest struct {
+	Priority string `json:"priority"`
+}
+
+func (s *Server) handleSetFilePriority(w http.ResponseWriter, r *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ihHex := r.PathValue("infohash")
+	if _, err := hex.DecodeString(ihHex); err != nil || len(ihHex) != 40 {
+		http.Error(w, "infohash must be 40 hex characters", http.StatusBadRequest)
+		return
+	}
+	idxStr := r.PathValue("index")
+	var idx int
+	if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil || idx < 0 {
+		http.Error(w, "file index must be a non-negative integer", http.StatusBadRequest)
+		return
+	}
+	var body FilePriorityRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.control.SetFilePriority(ihHex, idx, body.Priority); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":       true,
+		"infohash": ihHex,
+		"index":    idx,
+		"priority": body.Priority,
 	})
 }
 

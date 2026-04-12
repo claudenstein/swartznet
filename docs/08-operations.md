@@ -363,6 +363,42 @@ The underlying engine method is `Engine.CreateTorrent(opts)` /
 `Engine.CreateTorrentFile(opts, outPath)`, both wrapping
 `metainfo.Info.BuildFromFilePath` from anacrolix/torrent.
 
+### Selecting specific files in a multi-file torrent
+
+When you add a multi-file torrent (TV season, photo archive,
+software distribution), SwartzNet defaults to downloading every
+file. To opt individual files out — save bandwidth, save disk
+space, or just avoid downloading content you don't want:
+
+1. Select the torrent row in the **Downloads** tab.
+2. Click **Files...** in the toolbar.
+3. A modal opens with one row per file showing: path, size,
+   live progress bar, and a priority dropdown with three
+   options:
+   - **none** — anacrolix skips this file entirely. Pieces
+     that only contain this file are never requested from
+     peers.
+   - **normal** — default. File downloads at normal priority.
+   - **high** — anacrolix prioritises this file's pieces over
+     normal-priority ones.
+4. The dropdown change takes effect immediately, even while
+   the torrent is already downloading. No restart needed.
+5. **Select All** / **Deselect All** bulk actions at the top
+   of the dialog flip every file at once.
+
+The progress bars in the Files dialog update every 2 seconds
+while the dialog is open, so you can watch individual file
+progress without leaving the modal.
+
+Under the hood this wraps `anacrolix/torrent.File.SetPriority`.
+The same control is available via HTTP:
+
+```
+POST /torrents/{infohash}/files/{index}/priority
+  {"priority": "none"}
+GET  /torrents/{infohash}/files
+```
+
 ### Per-torrent indexing control
 
 By default every torrent added to SwartzNet is indexed: its

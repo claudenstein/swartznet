@@ -136,6 +136,9 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	toggleIndexBtn := widget.NewButtonWithIcon("Toggle Index", theme.SearchIcon(), func() {
 		dl.toggleIndexSelected()
 	})
+	filesBtn := widget.NewButtonWithIcon("Files...", theme.StorageIcon(), func() {
+		dl.showFilesForSelected()
+	})
 
 	toolbar := container.NewHBox(
 		addMagnetBtn,
@@ -146,6 +149,7 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 		resumeBtn,
 		removeBtn,
 		widget.NewSeparator(),
+		filesBtn,
 		toggleIndexBtn,
 	)
 
@@ -244,6 +248,26 @@ func (dl *downloadsTab) showAddFileDialog() {
 	}, dl.win())
 	fd.SetFilter(&torrentFilter{})
 	fd.Show()
+}
+
+func (dl *downloadsTab) showFilesForSelected() {
+	ih := dl.selectedInfoHash()
+	if ih == "" {
+		return
+	}
+	var name string
+	dl.mu.RLock()
+	for _, s := range dl.snaps {
+		if s.InfoHash == ih {
+			name = s.Name
+			if name == "" {
+				name = s.InfoHash[:16] + "..."
+			}
+			break
+		}
+	}
+	dl.mu.RUnlock()
+	showFilesDialog(dl.d, dl.win(), ih, name)
 }
 
 func (dl *downloadsTab) toggleIndexSelected() {

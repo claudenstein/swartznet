@@ -15,15 +15,38 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
-Likely next milestones:
+### File selection for multi-file torrents
 
-- **File selection** for multi-file torrents via
-  `anacrolix/torrent.File.SetPriority` (users shouldn't have
-  to download all of a 50 GiB TV season to get one episode).
+- New `Engine.TorrentFiles(infoHashHex) ([]FileSnapshot, error)`
+  returns a per-file view (path, size, bytes completed, progress,
+  priority).
+- New `Engine.SetFilePriority(ih, fileIndex, priority)` flips a
+  single file between "none", "normal", and "high". Takes effect
+  immediately even on an already-downloading torrent.
+- New `Engine.autoDownload` goroutine: after metadata arrives,
+  every file is set to Normal priority so the GUI flow matches
+  CLI behaviour. The CLI's existing `DownloadAll()` call stays
+  as a harmless duplicate.
+- New HTTP endpoints:
+  - `GET /torrents/{infohash}/files` — per-file snapshot list.
+  - `POST /torrents/{infohash}/files/{index}/priority` —
+    `{"priority": "none"|"normal"|"high"}`.
+- GUI Downloads toolbar gains a "Files..." button that opens a
+  modal with a live-updating list of every file in the selected
+  torrent: path, size, progress bar, and a per-file priority
+  dropdown. "Select All" / "Deselect All" bulk actions at the
+  top. Polls every 2 s while open.
+- Two new engine tests:
+  `TestTorrentFilesAndSetPriority`,
+  `TestTorrentFilesUnknownInfohash`.
+
+Likely next milestones (still):
+
 - **Rate limiting** (upload/download byte caps via
   `anacrolix/torrent.Client.SetDefaultTokenBucket`).
 - **CLI commands** for the new v0.3.0 features (`swartznet
-  create <path> -o file.torrent`, `swartznet index <ih> off`).
+  create <path> -o file.torrent`, `swartznet index <ih> off`,
+  `swartznet files <ih>`).
 - **Cross-platform GUI release** (darwin + windows GUI
   binaries via `fyne-cross` once Docker is available on the
   build machine).

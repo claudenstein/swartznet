@@ -44,6 +44,30 @@ func (c *controllerAdapter) SetTorrentIndexing(infoHashHex string, enabled bool)
 	return c.eng.SetTorrentIndexing(infoHashHex, enabled)
 }
 
+func (c *controllerAdapter) TorrentFiles(infoHashHex string) ([]httpapi.TorrentFile, error) {
+	src, err := c.eng.TorrentFiles(infoHashHex)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]httpapi.TorrentFile, 0, len(src))
+	for _, s := range src {
+		out = append(out, httpapi.TorrentFile{
+			Index:          s.Index,
+			Path:           s.Path,
+			DisplayPath:    s.DisplayPath,
+			Length:         s.Length,
+			BytesCompleted: s.BytesCompleted,
+			Progress:       s.Progress,
+			Priority:       s.Priority,
+		})
+	}
+	return out, nil
+}
+
+func (c *controllerAdapter) SetFilePriority(infoHashHex string, fileIndex int, priority string) error {
+	return c.eng.SetFilePriority(infoHashHex, fileIndex, engine.FilePriority(priority))
+}
+
 func (c *controllerAdapter) TorrentSnapshots() []httpapi.TorrentSnapshot {
 	src := c.eng.TorrentSnapshots()
 	out := make([]httpapi.TorrentSnapshot, 0, len(src))

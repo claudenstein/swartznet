@@ -782,10 +782,46 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 		indexing: true,
 	}
 	e.handles[ih] = h
+	go e.autoDownload(h)
 	go e.autoIndex(h)
 	go e.ingestFileEvents(h)
 	go e.autoConfirmOnComplete(h)
 	return h
+}
+
+// autoDownload waits for a torrent's metadata to arrive and then
+// sets every file's priority to Normal, matching the default
+// behaviour of every mainstream BitTorrent client.
+//
+// We set priority per-file rather than calling Torrent.DownloadAll
+// because anacrolix maintains two parallel priority surfaces:
+// per-piece priorities (what the request strategy actually uses)
+// and per-file priorities (exposed via File.Priority for display).
+// DownloadAll flips only the former, leaving File.Priority stuck
+// at "none" in the snapshot the GUI polls. Setting priority per
+// file flips both, so the Files dialog shows "normal" and users
+// who want to opt specific files out can flip individual entries
+// back to "none" via Engine.SetFilePriority.
+//
+// The CLI used to call DownloadAll manually after printing file
+// info; that path now relies on this goroutine instead. Calling
+// DownloadAll additionally is idempotent, so the CLI's explicit
+// call remains harmless.
+func (e *Engine) autoDownload(h *Handle) {
+	select {
+	case <-h.T.GotInfo():
+	case <-time.After(5 * time.Minute):
+		return
+	}
+	e.mu.Lock()
+	closed := e.closed
+	e.mu.Unlock()
+	if closed {
+		return
+	}
+	for _, f := range h.T.Files() {
+		f.SetPriority(torrent.PiecePriorityNormal)
+	}
 }
 
 // autoConfirmOnComplete waits for a torrent to finish downloading
