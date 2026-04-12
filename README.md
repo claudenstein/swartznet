@@ -1,216 +1,203 @@
 # SwartzNet
 
-A BitTorrent client with **built-in distributed text search** — search not just
-torrent names, but the files inside your torrents and, over time, torrents
-published by other peers on the network — while remaining fully backwards
-compatible with vanilla BitTorrent (BEP-3/5/9/10/44 on the mainline DHT).
+**A BitTorrent client that lets you search inside the files you share — and find torrents that other peers publish — all on the same mainline DHT every other client already uses.**
 
-This repository is in early development. See [docs/](docs/) for the full
-research and design documents that motivate the architecture.
+[![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/claudenstein/swartznet?include_prereleases)](https://github.com/claudenstein/swartznet/releases)
 
-## Status
+SwartzNet behaves like any other BitTorrent client on the wire — a vanilla peer sees a normal BEP-3/5/9/10/44 connection — but it adds full-text search across the content you've downloaded, optional keyword search across every SwartzNet peer you're connected to, and a DHT-backed discovery layer that lets you find torrents by topic rather than just by infohash.
 
-| Milestone | Status | What works |
+---
+
+## Features
+
+- **Search inside your torrents, not just their names.** PDFs, EPUB / DOCX / ODT office docs, subtitles (SRT/VTT), plaintext and source code are text-extracted on completion and indexed with [Bleve](https://github.com/blevesearch/bleve). Bleve's query syntax (`+required`, `-excluded`, `"phrases"`, `field:value`) all work.
+- **Three frontends, one daemon.** CLI for scripting, browser-based web UI at `http://localhost:7654/`, and a native cross-platform desktop GUI — all running against the same engine, index, and config.
+- **Distributed keyword search, no new network.** Two peers that speak the `sn_search` BEP-10 extension can query each other's indexes over the same TCP connection they're already using for BitTorrent. Keyword → infohash pointers published on the existing mainline DHT via BEP-44 mutable items.
+- **Spam resistance built in.** A persistent Bloom filter of known-good infohashes (auto-populated by successful downloads), a Bayesian-smoothed per-publisher reputation tracker, and a targeted "flag this is spam" gesture that demotes only the indexers responsible for the flagged hit.
+- **Full torrent-client features.** Create new `.torrent` files, select which files in a multi-file torrent to actually download, cap upload/download bandwidth, cap concurrent active downloads, per-torrent indexing opt-out, system-tray operation on Linux / macOS / Windows.
+- **Fully backwards compatible.** No new reserved bit, no new DHT verb, no new UDP port. A vanilla client sees a regular peer speaking BEP-3/5/9/10/44.
+
+---
+
+## Install
+
+### Download a pre-built binary
+
+Head to the [latest release](https://github.com/claudenstein/swartznet/releases/latest) and download:
+
+| Platform | CLI | GUI |
 |---|---|---|
-| **Research & design** | ✅ Complete | Five reports in `docs/` totalling ~4,400 lines. |
-| **M1 — Go scaffold + engine smoke test** | ✅ Complete | Minimal CLI wraps `anacrolix/torrent`, adds a magnet link, downloads and seeds. Engine wrapper exposes the extension hooks M2/M3 depend on. |
-| **M2.0 — Torrent-level metadata index (Layer L start)** | ✅ Complete | Bleve full-text index auto-populated on torrent add; `swartznet search <query>` works over torrent names, file paths, and trackers. |
-| **M2.1 — Piece-to-file completion tracker** | ✅ Complete | `FileCompleteEvent` stream synthesised from the piece-state subscription; handles resume (seeds pending counts from current piece state). Unit-tested on single-file, multi-file, and zero-length-file layouts. |
-| **M2.2a — Extractor framework + plaintext extractor + ingestion pipeline** | ✅ Complete | Bleve schema gains a `content` document type; `Pipeline` worker consumes `FileCompleteEvent`, dispatches to the extractor registry, and writes content docs. Plaintext extractor handles .txt/.md/.html/.json/source code. `swartznet search` now returns both torrent-level and content-level hits, clearly labelled. |
-| **M2.2b — Subtitle-aware extractor** | ✅ Complete | SRT/VTT parser strips timestamps, cue numbers, HTML/ASS markup, and WebVTT headers/NOTE blocks; only dialog text is indexed. Dialog is often the single most valuable text inside a movie/TV torrent. |
-| **M2.2c — Chunker for large files** | ✅ Complete | Plaintext extractions larger than ~12 KiB are split into ~10 KiB chunks at paragraph boundaries (falling back to line boundaries, then arbitrary positions for minified inputs). Each chunk carries its source-byte offset for future snippet-highlight UI. |
-| **M2.3 — PDF extractor** | ✅ Complete | Pure-Go PDF text extraction via `ledongthuc/pdf` (BSD-3-Clause fork of rsc/pdf, © The Go Authors). Buffered decode with a 256 MiB ceiling; panic-recovery around the parser; empty-text PDFs (scanned image-only) produce no ContentDocs rather than empty noise. |
-| **M3a — sn_search LTEP registration + capability discovery** | ✅ Complete | New `internal/swarmsearch` package owns a `Protocol` that registers `sn_search` in every outbound LTEP handshake and observes remote handshakes to detect which peers speak the extension. Per-peer state tracked with their chosen extension id. No message handling yet. |
-| **M3b — sn_search wire format + inbound query handler** | ✅ Complete | Bencoded query/result/reject messages (`internal/swarmsearch/wire.go`), plus a handler that answers inbound queries from the local Bleve index via an `indexerSearcher` adapter. Torrent-level and content-level hits are merged per infohash on the wire. |
-| **M3c — Outbound Query fan-out + result aggregation** | ✅ Complete | `Protocol.Query()` generates a monotonic txid, fans the query out to every known search-capable peer via the `swarmSender`, collects responses on a per-query channel, and merges by infohash with per-peer source attribution. Honors context cancellation + per-query timeout. |
-| **M3d — CLI `--swarm` flag + local HTTP API** | ✅ Complete | `swartznet add` starts a loopback-only HTTP API on `localhost:7654`; `swartznet search --swarm` POSTs to it to run combined local + swarm search against the running daemon. JSON and text output modes both supported. |
-| **M4 — BEP-44 keyword publisher (Layer D)** | ✅ Complete | Persistent ed25519 publisher identity, keyword tokenizer, BEP-44 mutable-item put/get wrapper, publisher worker with on-disk shard manifest, parallel lookup fan-out across known indexer pubkeys, `swartznet search --dht`, and `swartznet status`. |
-| **M5 — Spam resistance** | ✅ Complete | Persistent Bloom filter of known-good infohashes (1M items @ 1% FP, ~1.2 MB), Bayesian-smoothed per-pubkey reputation tracker, lookup auto-skips low-reputation indexers, Bloom-hit results boost to the top, auto-confirm on download completion, `swartznet flag/confirm` CLI commands. |
-| **M6 — EPUB / DOCX / ODT extractors** | ✅ Complete | Three new binary-format text extractors. EPUB iterates XHTML chapters and strips HTML via golang.org/x/net/html. DOCX walks word/document.xml's `<w:t>` elements via stdlib encoding/xml. ODT does the same for content.xml's `<text:p>` elements while skipping `<office:automatic-styles>` noise. All zero-cgo, all use the existing chunker. |
-| **M7 — Documentation polish for v1** | ✅ Complete | Two draft BEP specs (`docs/06-bep-sn_search-draft.md` and `docs/07-bep-dht-keyword-index-draft.md`), an operations guide (`docs/08-operations.md`), and a [CHANGELOG](CHANGELOG.md) covering every milestone. v1.0.0 release pending real-world swarm testing. |
-| **M8 — Local web UI** | ✅ Complete | Static HTML/CSS/JS embedded into the binary via `go:embed` and served by the existing httpapi daemon. Browse to `http://localhost:7654/` to get a four-tab UI: Search (across all three layers), Add torrent, Status, and Sharing (with the per-instance `sn_search` capability toggles wired through new `GET`/`POST /capabilities` endpoints). Localhost-only by design — the GUI controls the daemon and is fundamentally separate from the per-peer search-result interfaces (`sn_search`, BEP-44). |
-| **M9 — Per-hit source tracking + targeted flag** | ✅ Complete | LRU-bounded `reputation.SourceTracker` records which indexer pubkey returned which infohash during a Layer-D query; `POST /flag` uses that attribution to demote only the indexers actually responsible for a flagged hit instead of everyone returned in the last query. |
-| **M10 — GUI download controls** | ✅ Complete | New `engine.TorrentSnapshots` + pause/resume/remove APIs, four new HTTP endpoints (`GET /torrents`, `POST /torrents/{ih}/{pause,resume}`, `DELETE /torrents/{ih}`), and a Downloads tab in the web UI with live progress bars, status pills, and per-torrent controls polling every 2 s. |
-| **M11 — F3 companion content-index torrents** | ✅ Complete | SwartzNet's distributed content-search story. The daemon periodically serialises its local Bleve index to a gzipped JSON document, wraps it in a v1 `.torrent` metainfo, seeds it, and publishes a BEP-46-style mutable pointer at salt `_sn_content_index` (`companion.Publisher`). Subscribers follow publishers by their ed25519 pubkey; the `companion.SubscriberWorker` resolves each pointer, downloads the torrent, decodes the payload, and merges the records into the local index. New Companion tab in the web UI exposes the whole pipeline — publisher status, manual refresh, and an on-disk follow list managed through `/companion/{follow,unfollow,refresh}`. Closes the "distributed search" promise of the project's tagline without any new network protocol beyond the existing BitTorrent + BEP-44 stack. |
-| **v0.3.0 G0-G7 — Native Fyne GUI** | ✅ Complete | Cross-platform native desktop app as a third frontend alongside the CLI and web UI. All code is Go — no HTML/CSS/JS. Five tabs (Downloads / Search / Status / Companion / Settings), system tray with minimise-to-tray and download-complete notifications, dark theme matching the web UI. Shared `internal/daemon/` package extracted from `cmd_add.go` so both CLI and GUI use the same startup wiring. Requires CGo (Fyne's OpenGL bindings); CLI remains static. |
-| **v0.3.0 G8 — Per-torrent indexing control** | ✅ Complete | `Engine.SetTorrentIndexing(ih, enabled)` flips a per-torrent flag gated in `autoIndex` and `ingestFileEvents`. GUI exposes it as an "Index this torrent's files" checkbox in the Add Magnet dialog, an "Indexed" column in the Downloads table, and a "Toggle Index" toolbar button. HTTP surface: `POST /torrents/{infohash}/indexing {"enabled": bool}`. |
-| **v0.3.0 G9 — Create Torrent** | ✅ Complete | `Engine.CreateTorrent(opts)` / `CreateTorrentFile(opts, outPath)` wrap `metainfo.Info.BuildFromFilePath` with sensible defaults. GUI adds a "Create Torrent" toolbar button that walks users through root path, name, piece length (Auto / 64 KiB – 16 MiB), trackers, webseeds, comment, private flag, output path, and "start seeding immediately". Hashing runs in a background goroutine with a `ProgressBarInfinite` modal. |
+| Linux x86_64 | `swartznet-vX.Y.Z-linux-amd64` | `swartznet-gui-vX.Y.Z-linux-amd64` |
+| Linux ARM64 | `swartznet-vX.Y.Z-linux-arm64` | (build from source) |
+| macOS Intel | `swartznet-vX.Y.Z-darwin-amd64` | (build from source) |
+| macOS Apple Silicon | `swartznet-vX.Y.Z-darwin-arm64` | (build from source) |
+| Windows x86_64 | `swartznet-vX.Y.Z-windows-amd64.exe` | (build from source) |
 
-The full roadmap and per-milestone rationale is in
-[`docs/05-integration-design.md`](docs/05-integration-design.md) §12.
-See [CHANGELOG.md](CHANGELOG.md) for the per-commit release notes.
+Verify the download with the `SHA256SUMS` file attached to the release:
 
-## Design in one paragraph
+```bash
+sha256sum -c SHA256SUMS
+```
 
-SwartzNet embeds [`anacrolix/torrent`](https://github.com/anacrolix/torrent)
-(Go, MPL-2.0) as its BitTorrent engine. We hook its piece-completion callback
-to feed downloaded file contents into a local [Bleve](https://github.com/blevesearch/bleve)
-full-text index (**Layer L**). We register a custom `sn_search` extension via
-the BEP-10 Extension Protocol so that two SwartzNet peers already talking
-BitTorrent can ask each other keyword queries on the same TCP connection
-(**Layer S**). We publish keyword → infohash mappings on the existing mainline
-DHT using BEP-44 mutable items, keyed by per-publisher ed25519 pubkey with the
-keyword as salt (**Layer D**). Nothing we add requires a new reserved bit, a
-new DHT verb, or a second UDP port — vanilla clients see a normal peer speaking
-BEP-3/5/9/10/44.
+Then `chmod +x swartznet-*` on Unix-likes and move it somewhere on your `$PATH`.
 
-## Three frontends
+The CLI binary is fully static (no CGo, no glibc dependency). The GUI binary requires a working OpenGL stack — on Linux that means `libgl1` and a running X11 or Wayland session.
 
-| Frontend | When to use | Binary |
+### Build from source
+
+Requires Go 1.22 or later (1.24+ recommended).
+
+```bash
+# CLI only — pure Go, cross-compiles to every platform.
+go build -o swartznet ./cmd/swartznet
+
+# Native GUI — requires CGo and platform build deps.
+# Linux:   sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+# macOS:   xcode-select --install
+# Windows: MSYS2 with mingw-w64-x86_64-toolchain
+./scripts/build-gui.sh v0.3.0-dev
+```
+
+For cross-platform GUI release builds use [fyne-cross](https://github.com/fyne-io/fyne-cross) (Docker-based). Details in [docs/08-operations.md](docs/08-operations.md#native-gui-v030).
+
+---
+
+## Quick start
+
+### Add and index a torrent
+
+```bash
+# Downloads + seeds, auto-indexes metadata and file contents.
+# Also starts the HTTP API on localhost:7654 so you can open the
+# web UI in a browser or use --swarm / --dht in another terminal.
+swartznet add "magnet:?xt=urn:btih:..."
+```
+
+### Search
+
+```bash
+# Local index only — works without a running daemon.
+swartznet search ubuntu
+swartznet search --limit 50 "ubuntu 24.04"
+swartznet search +linux -windows name:iso
+
+# Include search-capable peers you're connected to.
+swartznet search --swarm ubuntu
+
+# Also query the BEP-44 DHT keyword index.
+swartznet search --swarm --dht ubuntu
+```
+
+### Create a new torrent
+
+```bash
+# Build a .torrent from a local folder, with trackers.
+swartznet create -o myfiles.torrent \
+  --tracker https://tracker.example.com/announce \
+  --comment "My collection" \
+  /path/to/my-content
+
+# Same, but also start seeding it from the current host.
+swartznet create -o myfiles.torrent --seed \
+  --data-dir ~/share \
+  /path/to/my-content
+```
+
+### Open the GUI
+
+```bash
+swartznet-gui
+```
+
+The window presents five tabs — Downloads, Search, Status, Companion, Settings — and the app runs in your system tray so closing the window doesn't stop the daemon. See [docs/08-operations.md](docs/08-operations.md#native-gui-v030) for a tour of each tab.
+
+### Or use the browser
+
+Any running `swartznet add` daemon serves a single-page web UI at `http://localhost:7654/`. Same features as the native GUI, accessible over SSH port-forward without any extra install.
+
+---
+
+## Three frontends, one daemon
+
+| Frontend | When it's the right choice | Binary |
 |---|---|---|
-| **CLI** (`swartznet add|search|status|flag|confirm`) | Scripting, SSH sessions, headless servers | ~40 MB, no CGo, fully static |
-| **Web UI** (`http://localhost:7654/` while daemon runs) | Remote access via port-forward, no install | Embedded in the CLI binary via `go:embed` |
-| **Native GUI** (`swartznet-gui`) | Desktop use — system tray, notifications, native dialogs, create-torrent wizard | ~46 MB, CGo (Fyne v2.7 + OpenGL) |
+| **CLI** (`swartznet`) | Scripts, SSH sessions, CI, headless servers | Static, ~40 MB, no CGo |
+| **Web UI** (`http://localhost:7654/`) | Remote access via port-forward, no extra install | Embedded in the CLI binary via `go:embed` |
+| **Native GUI** (`swartznet-gui`) | Desktop use with system tray, native file dialogs, create-torrent wizard, context menu | Fyne v2.7, ~46 MB, CGo (OpenGL) |
 
-All three call into the same `internal/daemon` package and can run concurrently against the same index/data dir. Build the GUI with `scripts/build-gui.sh`; see [docs/08-operations.md](docs/08-operations.md#native-gui-v030) for platform-specific build deps and `fyne-cross` instructions for cross-platform releases.
+All three call into the same `internal/daemon` package and can run concurrently against the same data directory.
+
+---
+
+## How it works
+
+SwartzNet embeds [`anacrolix/torrent`](https://github.com/anacrolix/torrent) (Go, MPL 2.0) as its BitTorrent engine and layers three search features on top:
+
+- **Layer L (local):** piece-completion callback feeds downloaded file contents through a text-extractor registry (PDF, EPUB, DOCX, ODT, plaintext, subtitles) into a local Bleve full-text index.
+- **Layer S (peer-wire):** a BEP-10 extension called `sn_search` that lets two SwartzNet peers exchange keyword queries over the same TCP connection they're using for BitTorrent. Strictly opt-in — vanilla peers never see a search message.
+- **Layer D (DHT):** keyword → infohash mappings published as BEP-44 mutable items on the existing mainline DHT, keyed by per-publisher ed25519 pubkey with the keyword as salt.
+
+Read [`docs/05-integration-design.md`](docs/05-integration-design.md) for the architecture diagram, the `sn_search` wire format, the ingestion pipeline, and the threat model.
+
+---
 
 ## Documentation
 
-### Research (completed)
+The [`docs/` directory](docs/) is organized by audience. Start with [`docs/README.md`](docs/README.md) for a guide, or jump straight to:
 
-- [`docs/01-torrent-clients-comparison.md`](docs/01-torrent-clients-comparison.md) —
-  libtorrent, Transmission, anacrolix/torrent, rqbit, WebTorrent compared on
-  extension API, piece-verify hooks, DHT extensibility, and license. Winner:
-  anacrolix/torrent.
-- [`docs/02-tribler-deep-dive.md`](docs/02-tribler-deep-dive.md) — Tribler is
-  the closest prior art (BitTorrent + keyword search since 2006). Its search
-  architecture, limitations, and what we reuse vs. replace.
-- [`docs/03-p2p-search-protocols.md`](docs/03-p2p-search-protocols.md) — survey
-  of aMule/Kad, GNUnet, Gnutella, RetroShare, YaCy, Freenet. Identifies
-  aMule's keyword-hash DHT as the most directly applicable pattern.
-- [`docs/04-bep-extension-points.md`](docs/04-bep-extension-points.md) — every
-  BEP relevant to our design, with byte-level walkthroughs of the LTEP
-  handshake and BEP-44 mutable-item publish/get flow.
-- [`docs/05-integration-design.md`](docs/05-integration-design.md) — the
-  synthesis: three-layer architecture, the `sn_search` wire format spec,
-  ingestion pipeline, threat model, backwards-compatibility test matrix,
-  ordered roadmap.
+- **Using SwartzNet:** [`docs/08-operations.md`](docs/08-operations.md)
+- **Porting `sn_search` to another client:** [`docs/06-bep-sn_search-draft.md`](docs/06-bep-sn_search-draft.md) and [`docs/07-bep-dht-keyword-index-draft.md`](docs/07-bep-dht-keyword-index-draft.md)
+- **Architecture:** [`docs/05-integration-design.md`](docs/05-integration-design.md)
+- **Research background:** [`docs/01-04`](docs/) plus [`docs/09`](docs/09-v1-blocker-research.md) and [`docs/10`](docs/10-bitcoin-lessons.md)
+- **History:** [`CHANGELOG.md`](CHANGELOG.md) (releases) and [`docs/MILESTONES.md`](docs/MILESTONES.md) (milestone-by-milestone engineering log)
 
-### Specs and operations (M7)
+---
 
-- [`docs/06-bep-sn_search-draft.md`](docs/06-bep-sn_search-draft.md) —
-  draft BEP-style specification for the `sn_search` peer-wire extension.
-  Anyone reimplementing the extension in another client should be able
-  to read this document end-to-end and produce a wire-compatible peer.
-- [`docs/07-bep-dht-keyword-index-draft.md`](docs/07-bep-dht-keyword-index-draft.md) —
-  matching draft spec for the Layer-D BEP-44 mutable-item keyword index.
-- [`docs/08-operations.md`](docs/08-operations.md) — file layout, what
-  to back up, useful commands, and a troubleshooting guide.
-- [`CHANGELOG.md`](CHANGELOG.md) — milestone-by-milestone change log
-  for every commit on `main`.
+## Compatibility and non-goals
 
-## Building
+**Backwards compatibility.** A vanilla BitTorrent client connecting to SwartzNet sees a standard BEP-3 handshake with the LTEP bit set and a standard LTEP `m` dictionary; if it doesn't advertise `sn_search`, we never send it a search message. Items we store on the DHT are standard BEP-44 mutable items, served by vanilla nodes under the same rules as any other BEP-44 data. See [`docs/05-integration-design.md`](docs/05-integration-design.md) §8 for the explicit test matrix.
 
-Requires Go 1.22 or later. Go 1.24+ is recommended.
+**Non-goals.** SwartzNet is not Tor. Users who need network-level anonymity should layer a VPN or Tor transport themselves. SwartzNet also does not enforce copyright or jurisdictional content restrictions — users are responsible for what they search and download, as with every existing BitTorrent client. See [`docs/05-integration-design.md`](docs/05-integration-design.md) §9 for the full threat model.
 
-```bash
-go build ./cmd/swartznet
-./swartznet --help
-```
+---
 
-## Running
+## Configuration
+
+Default paths (Linux/macOS):
+
+- Downloaded data: `~/.local/share/swartznet/data`
+- Search index: `~/.local/share/swartznet/index`
+- Persistent identity (ed25519 keypair): `~/.local/share/swartznet/identity.key`
+- Known-good Bloom filter: `~/.local/share/swartznet/known-good.bloom`
+- Reputation tracker: `~/.local/share/swartznet/reputation.json`
+
+All honour `$XDG_DATA_HOME`. All overridable with `--data-dir` / `--index-dir` and siblings. See `swartznet help` for the full flag list.
+
+The HTTP API binds to `localhost:7654` by default (loopback only). Override with `--api-addr`; set to empty string to disable.
+
+---
+
+## Development
+
+Main branch is where active work happens. Pre-releases land on `v0.x.y` tags; the first GA will be `v1.0.0`.
 
 ```bash
-# Add and download a torrent from a magnet link, seed on completion.
-# The torrent's metadata (name, files, trackers) is automatically written
-# to the local Bleve index as soon as it arrives from the swarm, and
-# text content from completed files (PDFs, subtitles, source code, etc.)
-# is extracted and indexed as each file finishes.
-#
-# While this daemon is running it also exposes an HTTP API on
-# localhost:7654 that the `search --swarm` subcommand uses to issue
-# distributed swarm-wide queries over sn_search. Open the same URL
-# in any browser to use the bundled web UI:
-#
-#   http://localhost:7654/
-./swartznet add "magnet:?xt=urn:btih:..."
+# Run the test suite under -race.
+go test -race ./...
 
-# Search the local index only (works without a running daemon).
-# Supports Bleve's query-string syntax:
-#     ubuntu              -- bag-of-words match
-#     "ubuntu 24.04"      -- phrase match
-#     name:debian         -- fielded query
-#     ubuntu -server      -- boolean exclusion
-./swartznet search ubuntu
-./swartznet search --json --limit 50 "ubuntu 24.04"
-
-# Combined local + swarm search. Requires a running `swartznet add`
-# daemon with peers connected; asks every peer that advertises the
-# sn_search BEP-10 extension and merges the results.
-./swartznet search --swarm ubuntu
-
-# Combined local + swarm + DHT search. Adds a parallel BEP-44 mutable-item
-# lookup against every known indexer pubkey alongside the swarm path.
-./swartznet search --swarm --dht ubuntu
-
-# Or use the browser-based web UI for everything above:
-#   http://localhost:7654/
-# (the same daemon serves both the JSON API and the embedded UI)
-
-# Snapshot of the running daemon's index, peer set, DHT publisher,
-# Bloom filter population, and per-pubkey reputation table.
-./swartznet status
-
-# Mark an infohash as known-good. Boosts it in future DHT lookups.
-# (Auto-confirm runs on every successful download — usually you do
-# not need to call this manually.)
-./swartznet confirm <40-char-hex-infohash>
-
-# Mark an infohash as spam. Lowers the reputation of every indexer
-# pubkey that has been associated with it.
-./swartznet flag <40-char-hex-infohash>
-
-# Print the version.
-./swartznet version
+# Build both binaries.
+go build -o dist/swartznet ./cmd/swartznet
+./scripts/build-gui.sh dev
 ```
 
-Defaults:
-- Downloaded data:  `~/.local/share/swartznet/data`
-- Local search index: `~/.local/share/swartznet/index`
-- Both honour `$XDG_DATA_HOME`; both can be overridden with `--data-dir` / `--index-dir`.
+See [`docs/05-integration-design.md`](docs/05-integration-design.md) §12 for the roadmap.
 
-More commands will be added as milestones land.
+**Contributing.** APIs are still in motion, so please open an issue before sending large patches so we can align on the approach.
 
-## Backwards compatibility
-
-A vanilla BitTorrent client connecting to SwartzNet sees a standard BEP-3
-handshake with the LTEP bit set, a standard LTEP handshake advertising
-`ut_metadata`, `ut_pex`, and (for SwartzNet peers only) `sn_search`, and
-standard BEP-5 DHT traffic. The `sn_search` extension is strictly opt-in: if
-the other side doesn't advertise it in their LTEP `m` dictionary, we never
-send them a search message. Everything we store in the DHT is a standard
-BEP-44 mutable item — vanilla nodes serve it under the same rules they serve
-any other BEP-44 item.
-
-See [`docs/05-integration-design.md`](docs/05-integration-design.md) §8 for the
-explicit backwards-compatibility test matrix.
-
-## Explicit non-goals
-
-- **Anonymity / traffic analysis resistance.** SwartzNet is not Tor. Users who
-  need network-level anonymity should layer a VPN or Tor transport under their
-  BitTorrent traffic.
-- **Legal content filtering.** SwartzNet does not enforce copyright or
-  jurisdictional content restrictions. Users are responsible for what they
-  search and download, exactly as with every existing BitTorrent client.
-- **Global content-level distributed index.** The local-first content index
-  (Layer L) makes files you already have searchable on your machine. Sharing
-  content-level indexes across the network is an explicit v2 feature, not v1.
-
-See [`docs/05-integration-design.md`](docs/05-integration-design.md) §9 for the
-full threat model.
-
-## Contributing
-
-SwartzNet is in early development and the internal APIs are changing rapidly.
-Please open an issue before sending large patches so we can align on the
-approach. The roadmap in `docs/05-integration-design.md` §12 is authoritative
-for what's in scope for each milestone.
+---
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).
 
-The upstream dependency `anacrolix/torrent` is licensed MPL 2.0; any
-modifications we make inside that library are published under MPL 2.0. Our own
-code in this repository is Apache 2.0.
+The BitTorrent engine is `anacrolix/torrent` under MPL 2.0; the rest of this repository is Apache 2.0.
