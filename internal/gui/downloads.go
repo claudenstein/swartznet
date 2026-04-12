@@ -153,12 +153,70 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 		toggleIndexBtn,
 	)
 
-	dl.content = container.NewBorder(toolbar, nil, nil, nil, dl.table)
+	// Wrap the table in a right-click capture so secondary taps
+	// surface a context menu operating on the selected row.
+	tableWithMenu := newRightClickCapture(dl.table, dl.buildContextMenu)
+
+	dl.content = container.NewBorder(toolbar, nil, nil, nil, tableWithMenu)
 
 	// Background polling goroutine.
 	go dl.pollLoop(ctx)
 
 	return dl
+}
+
+// buildContextMenu builds the right-click menu for the currently-
+// selected torrent. Returns nil when no row is selected.
+func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
+	ih := dl.selectedInfoHash()
+	if ih == "" {
+		return nil
+	}
+
+	var snap engine.TorrentSnapshot
+	dl.mu.RLock()
+	for _, s := range dl.snaps {
+		if s.InfoHash == ih {
+			snap = s
+			break
+		}
+	}
+	dl.mu.RUnlock()
+
+	pauseLabel := "Pause"
+	pauseAction := func() { dl.pauseSelected() }
+	if snap.Paused {
+		pauseLabel = "Resume"
+		pauseAction = func() { dl.resumeSelected() }
+	}
+
+	indexLabel := "Stop indexing"
+	if !snap.Indexing {
+		indexLabel = "Start indexing"
+	}
+
+	copyMagnet := fyne.NewMenuItem("Copy magnet link", func() {
+		magnet := "magnet:?xt=urn:btih:" + ih
+		if snap.Name != "" {
+			magnet += "&dn=" + snap.Name
+		}
+		fyne.CurrentApp().Clipboard().SetContent(magnet)
+	})
+	copyHash := fyne.NewMenuItem("Copy infohash", func() {
+		fyne.CurrentApp().Clipboard().SetContent(ih)
+	})
+
+	return fyne.NewMenu("Torrent actions",
+		fyne.NewMenuItem("Files...", func() { dl.showFilesForSelected() }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem(pauseLabel, pauseAction),
+		fyne.NewMenuItem("Remove", func() { dl.removeSelected() }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem(indexLabel, func() { dl.toggleIndexSelected() }),
+		fyne.NewMenuItemSeparator(),
+		copyMagnet,
+		copyHash,
+	)
 }
 
 func (dl *downloadsTab) pollLoop(ctx context.Context) {
