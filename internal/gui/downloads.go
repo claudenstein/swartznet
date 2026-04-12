@@ -206,17 +206,35 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 		fyne.CurrentApp().Clipboard().SetContent(ih)
 	})
 
-	return fyne.NewMenu("Torrent actions",
+	items := []*fyne.MenuItem{
 		fyne.NewMenuItem("Files...", func() { dl.showFilesForSelected() }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem(pauseLabel, pauseAction),
 		fyne.NewMenuItem("Remove", func() { dl.removeSelected() }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem(indexLabel, func() { dl.toggleIndexSelected() }),
+	}
+
+	// Queue reorder actions — only surface them when this
+	// torrent is currently queued (nothing to reorder otherwise).
+	if snap.Queued {
+		items = append(items,
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Move to top of queue", func() {
+				go dl.d.Eng.QueueMoveToFront(ih)
+			}),
+			fyne.NewMenuItem("Move to bottom of queue", func() {
+				go dl.d.Eng.QueueMoveToBack(ih)
+			}),
+		)
+	}
+
+	items = append(items,
 		fyne.NewMenuItemSeparator(),
 		copyMagnet,
 		copyHash,
 	)
+	return fyne.NewMenu("Torrent actions", items...)
 }
 
 func (dl *downloadsTab) pollLoop(ctx context.Context) {

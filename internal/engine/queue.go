@@ -1,9 +1,6 @@
 package engine
 
-import (
-	"github.com/anacrolix/torrent"
-	"github.com/anacrolix/torrent/metainfo"
-)
+import "github.com/anacrolix/torrent"
 
 // Queue management.
 //
@@ -12,6 +9,16 @@ import (
 // immediately. SwartzNet layers a simple FIFO queue on top so
 // users can cap concurrency (matching qBittorrent's "queue
 // system" knob).
+//
+// Ordering:
+//
+//   Every handle gets a monotonic queueOrder at registration
+//   time. Promotion iterates queued handles sorted ascending by
+//   queueOrder — oldest goes first — so the behaviour is FIFO by
+//   add time. Users can call QueueMoveToFront / QueueMoveToBack
+//   to override the natural order: move-to-front sets
+//   queueOrder to the minimum of all existing orders minus 1,
+//   move-to-back sets it to the maximum plus 1.
 //
 // Rules:
 //
@@ -149,12 +156,10 @@ func (e *Engine) promoteQueuedLocked() {
 	}
 
 	active := e.countActiveDownloads()
-	// Iterate over handles by add order — map iteration is
-	// random but we reorder by InfoHash for stable behaviour.
-	// (InfoHash is not strictly add-order but it's
-	// deterministic; this is a simple-queue-not-a-scheduler
-	// feature, precise ordering is future work.)
-	sortHandlesByAddOrder(handles)
+	// Sort queued handles by queueOrder ascending (oldest first)
+	// so promotion is FIFO by add time unless the user has
+	// called QueueMoveToFront/Back.
+	sortHandlesByQueueOrder(handles)
 	for _, h := range handles {
 		if active >= cap {
 			break
@@ -166,29 +171,88 @@ func (e *Engine) promoteQueuedLocked() {
 	}
 }
 
-// sortHandlesByAddOrder sorts handles in a stable way. We don't
-// yet track add timestamps, so fall back to infohash bytes.
-func sortHandlesByAddOrder(handles []*Handle) {
-	// Bubble sort is fine for the tiny slices we expect (rarely
-	// more than 20 torrents at a time) and avoids pulling in
-	// sort.Slice for a tiny helper.
+// QueueMoveToFront reassigns the given handle's queueOrder so it
+// will promote before any other currently-tracked handle. Only
+// affects ordering: the handle still respects the download cap
+// and must be Queued for the move to have any visible effect.
+// Idempotent.
+func (e *Engine) QueueMoveToFront(infoHashHex string) error {
+	h, err := e.handleByHex(infoHashHex)
+	if err != nil {
+		return err
+	}
+
+	e.mu.Lock()
+	// Find the smallest queueOrder in the map.
+	var minOrder int64
+	first := true
+	for _, other := range e.handles {
+		other.queueMu.Lock()
+		o := other.queueOrder
+		other.queueMu.Unlock()
+		if first || o < minOrder {
+			minOrder = o
+			first = false
+		}
+	}
+	e.mu.Unlock()
+
+	h.queueMu.Lock()
+	h.queueOrder = minOrder - 1
+	h.queueMu.Unlock()
+
+	e.log.Info("engine.queue_move_to_front", "info_hash", infoHashHex)
+	// Promotion may want to start this one now.
+	go e.promoteQueuedLocked()
+	return nil
+}
+
+// QueueMoveToBack is the mirror of QueueMoveToFront: the handle
+// will promote last among all tracked handles.
+func (e *Engine) QueueMoveToBack(infoHashHex string) error {
+	h, err := e.handleByHex(infoHashHex)
+	if err != nil {
+		return err
+	}
+
+	e.mu.Lock()
+	var maxOrder int64
+	first := true
+	for _, other := range e.handles {
+		other.queueMu.Lock()
+		o := other.queueOrder
+		other.queueMu.Unlock()
+		if first || o > maxOrder {
+			maxOrder = o
+			first = false
+		}
+	}
+	e.mu.Unlock()
+
+	h.queueMu.Lock()
+	h.queueOrder = maxOrder + 1
+	h.queueMu.Unlock()
+
+	e.log.Info("engine.queue_move_to_back", "info_hash", infoHashHex)
+	return nil
+}
+
+// sortHandlesByQueueOrder sorts handles ascending by their
+// queueOrder field. Stable w.r.t. equal orders (simple bubble
+// sort; the slice rarely exceeds a handful of handles).
+func sortHandlesByQueueOrder(handles []*Handle) {
 	for i := 0; i < len(handles); i++ {
 		for j := i + 1; j < len(handles); j++ {
-			if compareInfoHash(handles[i].T.InfoHash(), handles[j].T.InfoHash()) > 0 {
+			handles[i].queueMu.Lock()
+			a := handles[i].queueOrder
+			handles[i].queueMu.Unlock()
+			handles[j].queueMu.Lock()
+			b := handles[j].queueOrder
+			handles[j].queueMu.Unlock()
+			if a > b {
 				handles[i], handles[j] = handles[j], handles[i]
 			}
 		}
 	}
 }
 
-func compareInfoHash(a, b metainfo.Hash) int {
-	for i := 0; i < 20; i++ {
-		if a[i] != b[i] {
-			if a[i] < b[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
-}

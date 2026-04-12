@@ -58,7 +58,8 @@ type Engine struct {
 	ulLimiter *rate.Limiter // upload rate limiter; rate.Inf when unlimited
 	dlLimiter *rate.Limiter // download rate limiter; rate.Inf when unlimited
 
-	maxActiveDownloads int // 0 = unlimited (default). See queue.go.
+	maxActiveDownloads int   // 0 = unlimited (default). See queue.go.
+	nextQueueOrder     int64 // monotonic counter assigned to each new Handle
 
 	mu       sync.Mutex
 	closed   bool
@@ -216,13 +217,15 @@ type Handle struct {
 	indexMu  sync.Mutex
 	indexing bool
 
-	// queueMu guards queued. A handle is "queued" when the
-	// engine's MaxActiveDownloads cap would be exceeded if this
-	// torrent started downloading. Queued torrents keep metadata
-	// fetch + indexing but do NOT flip their files to Normal
-	// priority until a slot opens up. See queue.go.
-	queueMu sync.Mutex
-	queued  bool
+	// queueMu guards queued and queueOrder. A handle is "queued"
+	// when the engine's MaxActiveDownloads cap would be exceeded
+	// if this torrent started downloading. Queued torrents keep
+	// metadata fetch + indexing but do NOT flip their files to
+	// Normal priority until a slot opens up. queueOrder controls
+	// promotion order — lower values promote first. See queue.go.
+	queueMu    sync.Mutex
+	queued     bool
+	queueOrder int64
 }
 
 // IsQueued reports whether this handle is currently waiting for a
@@ -815,11 +818,13 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 		// mirror of that.
 		return h
 	}
+	e.nextQueueOrder++
 	h := &Handle{
-		T:        t,
-		pieceSub: startPieceSubscription(t, e.log),
-		fileSub:  startFileTracker(t, e.log),
-		indexing: true,
+		T:          t,
+		pieceSub:   startPieceSubscription(t, e.log),
+		fileSub:    startFileTracker(t, e.log),
+		indexing:   true,
+		queueOrder: e.nextQueueOrder,
 	}
 	e.handles[ih] = h
 	go e.autoDownload(h)
