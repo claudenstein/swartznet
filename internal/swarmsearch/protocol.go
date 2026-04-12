@@ -108,6 +108,14 @@ type Protocol struct {
 	// query. Query fan-out preferentially targets tried peers.
 	book *PeerBook
 
+	// hitCache is the M16c BIP-152-style LRU cache of recently
+	// seen MergedHits. During the merge phase of Query,
+	// infohashes that are already in the cache reuse cached
+	// metadata instead of rebuilding it from scratch. This is
+	// the local-side speedup; the v1.1 compact wire format
+	// will build on this cache for the short-ID dedup path.
+	hitCache *HitCache
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -133,8 +141,13 @@ func New(log *slog.Logger) *Protocol {
 		limiter:     newRateLimiter(DefaultRateLimit()),
 		misbehavior: newMisbehaviorTracker(),
 		book:        NewPeerBook(DefaultMaxTried, DefaultMaxNew),
+		hitCache:    NewHitCache(DefaultHitCacheSize),
 	}
 }
+
+// HitCache returns the Protocol's LRU hit cache. Callers can
+// inspect cache size for /status output.
+func (p *Protocol) HitCache() *HitCache { return p.hitCache }
 
 // PeerBook returns the Protocol's tried/new peer book.
 // Callers can use it to inspect the tried/new split for

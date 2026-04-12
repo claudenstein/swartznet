@@ -239,6 +239,18 @@ collect:
 	}
 
 	merged := mergeResponses(responses)
+
+	// M16c: populate the hit cache with freshly merged hits so
+	// subsequent queries that return the same infohashes can
+	// skip the full merge for the cached portion. This is the
+	// BIP-152 "assume the receiver already has most of the data"
+	// local-side speedup.
+	if p.hitCache != nil {
+		for _, h := range merged {
+			p.hitCache.Store(h)
+		}
+	}
+
 	return &QueryResponse{
 		TxID:      txid,
 		Hits:      merged,
