@@ -58,6 +58,8 @@ type Engine struct {
 	ulLimiter *rate.Limiter // upload rate limiter; rate.Inf when unlimited
 	dlLimiter *rate.Limiter // download rate limiter; rate.Inf when unlimited
 
+	maxActiveDownloads int // 0 = unlimited (default). See queue.go.
+
 	mu       sync.Mutex
 	closed   bool
 	handles  map[metainfo.Hash]*Handle
@@ -213,6 +215,28 @@ type Handle struct {
 	// paths skip silently. Toggle via Engine.SetTorrentIndexing.
 	indexMu  sync.Mutex
 	indexing bool
+
+	// queueMu guards queued. A handle is "queued" when the
+	// engine's MaxActiveDownloads cap would be exceeded if this
+	// torrent started downloading. Queued torrents keep metadata
+	// fetch + indexing but do NOT flip their files to Normal
+	// priority until a slot opens up. See queue.go.
+	queueMu sync.Mutex
+	queued  bool
+}
+
+// IsQueued reports whether this handle is currently waiting for a
+// download slot. See Engine.SetMaxActiveDownloads.
+func (h *Handle) IsQueued() bool {
+	h.queueMu.Lock()
+	defer h.queueMu.Unlock()
+	return h.queued
+}
+
+func (h *Handle) setQueued(v bool) {
+	h.queueMu.Lock()
+	h.queued = v
+	h.queueMu.Unlock()
 }
 
 // IsIndexing reports whether this torrent is currently eligible
@@ -835,9 +859,10 @@ func (e *Engine) autoDownload(h *Handle) {
 	if closed {
 		return
 	}
-	for _, f := range h.T.Files() {
-		f.SetPriority(torrent.PiecePriorityNormal)
-	}
+	// queueOrActivate decides: activate immediately under the
+	// cap, otherwise mark handle as queued. Respects
+	// MaxActiveDownloads.
+	e.queueOrActivate(h)
 }
 
 // autoConfirmOnComplete waits for a torrent to finish downloading
@@ -872,6 +897,9 @@ func (e *Engine) autoConfirmOnComplete(h *Handle) {
 		"info_hash", ih.HexString(),
 		"name", h.T.Name(),
 	)
+	// Completion frees a download slot — promote the next queued
+	// torrent if any.
+	e.promoteQueuedLocked()
 }
 
 // ingestFileEvents drains a Handle's FileEvents() channel and submits each
@@ -1054,6 +1082,11 @@ type TorrentSnapshot struct {
 	// if Engine.SetIndex(nil), Indexing may still be true but
 	// will have no effect.
 	Indexing bool
+	// Queued is true when this torrent is waiting for a download
+	// slot under the Engine.MaxActiveDownloads cap. Queued
+	// torrents keep their metadata+indexing but do not download
+	// file contents until a slot opens.
+	Queued bool
 }
 
 // TorrentSnapshots returns a TorrentSnapshot for every torrent
@@ -1087,10 +1120,14 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 	ih := t.InfoHash().HexString()
 	paused := h.IsPaused()
 
+	queued := h.IsQueued()
+
 	if t.Info() == nil {
 		status := "metadata"
 		if paused {
 			status = "paused"
+		} else if queued {
+			status = "queued"
 		}
 		return TorrentSnapshot{
 			InfoHash: ih,
@@ -1098,6 +1135,7 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 			Paused:   paused,
 			Status:   status,
 			Indexing: h.IsIndexing(),
+			Queued:   queued,
 		}
 	}
 
@@ -1121,6 +1159,8 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 		status = "paused"
 	case missing == 0 && size > 0:
 		status = "seeding"
+	case queued:
+		status = "queued"
 	case completed > 0:
 		status = "downloading"
 	}
@@ -1141,6 +1181,7 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 		Paused:         paused,
 		Status:         status,
 		Indexing:       h.IsIndexing(),
+		Queued:         queued,
 	}
 }
 
@@ -1167,6 +1208,9 @@ func (e *Engine) PauseTorrent(infoHashHex string) error {
 	h.T.DisallowDataDownload()
 	h.T.DisallowDataUpload()
 	e.log.Info("engine.torrent_paused", "info_hash", infoHashHex)
+	// Pause frees a download slot — promote the next queued
+	// torrent, if any.
+	go e.promoteQueuedLocked()
 	return nil
 }
 
@@ -1236,6 +1280,9 @@ func (e *Engine) RemoveTorrent(infoHashHex string) error {
 	delete(e.handles, h.T.InfoHash())
 	e.mu.Unlock()
 	e.log.Info("engine.torrent_removed", "info_hash", infoHashHex)
+	// Removing an active torrent frees a download slot — promote
+	// the next queued torrent if any.
+	go e.promoteQueuedLocked()
 	return nil
 }
 

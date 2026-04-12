@@ -24,6 +24,8 @@ type settingsTab struct {
 
 	uploadEntry   *widget.Entry
 	downloadEntry *widget.Entry
+
+	maxActiveEntry *widget.Entry
 }
 
 var shareLevels = []string{
@@ -75,6 +77,20 @@ func newSettingsTab(d *daemon.Daemon) *settingsTab {
 		applyLimitsBtn,
 	))
 
+	// Queue management card.
+	st.maxActiveEntry = widget.NewEntry()
+	st.maxActiveEntry.SetPlaceHolder("0 (unlimited)")
+	st.loadQueueSettings()
+	applyQueueBtn := widget.NewButton("Apply", func() {
+		st.applyQueueSettings()
+	})
+	queueCard := widget.NewCard("Queue Management", "Cap concurrent active downloads. Zero means unlimited. Paused/complete torrents don't count.", container.NewVBox(
+		widget.NewForm(
+			widget.NewFormItem("Max active downloads", st.maxActiveEntry),
+		),
+		applyQueueBtn,
+	))
+
 	// Info card.
 	cfgInfo := widget.NewCard("Configuration", "", container.NewVBox(
 		labelRow("Data directory:", widget.NewLabel(d.Cfg.DataDir)),
@@ -83,9 +99,33 @@ func newSettingsTab(d *daemon.Daemon) *settingsTab {
 		labelRow("DHT:", widget.NewLabel(boolStr(!d.Cfg.DisableDHT))),
 	))
 
-	st.content = container.NewVBox(sharingCard, rateCard, cfgInfo)
+	st.content = container.NewVBox(sharingCard, rateCard, queueCard, cfgInfo)
 
 	return st
+}
+
+func (st *settingsTab) loadQueueSettings() {
+	n := st.d.Eng.MaxActiveDownloads()
+	st.maxActiveEntry.SetText(strconv.Itoa(n))
+}
+
+func (st *settingsTab) applyQueueSettings() {
+	s := strings.TrimSpace(st.maxActiveEntry.Text)
+	if s == "" {
+		s = "0"
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		dialog.ShowError(fmt.Errorf("must be a non-negative integer"), st.win())
+		return
+	}
+	st.d.Eng.SetMaxActiveDownloads(n)
+	label := strconv.Itoa(n)
+	if n == 0 {
+		label = "unlimited"
+	}
+	dialog.ShowInformation("Saved",
+		fmt.Sprintf("Max active downloads: %s", label), st.win())
 }
 
 func (st *settingsTab) loadRateLimits() {

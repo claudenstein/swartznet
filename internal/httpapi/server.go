@@ -84,6 +84,7 @@ type TorrentSnapshot struct {
 	Paused         bool    `json:"paused"`
 	Status         string  `json:"status"`
 	Indexing       bool    `json:"indexing"`
+	Queued         bool    `json:"queued"`
 }
 
 // TorrentAdder is the narrow interface the HTTP API needs from

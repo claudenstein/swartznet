@@ -59,15 +59,73 @@ engagement from actual users of the v0.x prereleases.
 - Two new engine tests: `TestRateLimitDefaultsUnlimited`,
   `TestRateLimitSetAndGet`.
 
-Likely next milestones (still):
+### CLI parity for v0.3.0 features
 
-- **CLI commands** for the new v0.3.0 features (`swartznet
-  create <path> -o file.torrent`, `swartznet index <ih> off`,
-  `swartznet files <ih>`).
+Three new `swartznet` subcommands so scripting against the
+daemon doesn't need the GUI:
+
+- `swartznet create <path> -o out.torrent [flags]` — build a
+  new `.torrent` from local content. Spins up a headless
+  engine (no DHT, no upload unless `--seed`) just long enough
+  to hash pieces and write the file. Flags: `--tracker URL`
+  (repeat), `--webseed URL` (repeat), `--piece-kib N`,
+  `--private`, `--comment STR`, `--name STR`, `--seed`,
+  `--data-dir PATH`.
+- `swartznet index <infohash> on|off [--api-addr]` — flips
+  the per-torrent indexing toggle on a running daemon via
+  `POST /torrents/{ih}/indexing`.
+- `swartznet files <infohash> [--json] [--api-addr]` and
+  `swartznet files <infohash> <index> <priority>` — lists
+  every file in a torrent with priority + progress (table or
+  JSON), or flips a single file's priority to none/normal/high.
+
+### Right-click context menu in Downloads
+
+GUI right-click on any row in the Downloads table opens a
+context menu operating on the selected row:
+
+  - Files…
+  - Pause / Resume (contextual, based on current state)
+  - Remove
+  - Stop / Start indexing (contextual)
+  - Copy magnet link (to system clipboard)
+  - Copy infohash
+
+The menu is implemented via a small `SecondaryTappable` wrapper
+around the table (Fyne doesn't expose per-cell secondary-tap
+events directly).
+
+### Queue management
+
+anacrolix/torrent has no built-in "max N active downloads"
+concept. SwartzNet now layers a simple FIFO queue on top so
+users can cap concurrency (matching qBittorrent's behaviour):
+
+- `Engine.MaxActiveDownloads() int` / `SetMaxActiveDownloads(n)`.
+  Zero = unlimited (the default and previous behaviour).
+- New `Handle.IsQueued()` and `TorrentSnapshot.Queued bool`
+  surface the "waiting for a slot" state.
+- Queued torrents still fetch metadata and run the indexing
+  pipeline; only the file-priority flip (to PiecePriorityNormal)
+  is deferred.
+- Pause / remove / completion hooks call `promoteQueuedLocked`
+  to fill the freed slot with the oldest queued torrent.
+- Raising the cap at runtime immediately promotes everything
+  that was waiting.
+- GUI Settings tab gains a new "Queue Management" card with a
+  single numeric entry + Apply button. Current cap is read on
+  tab open.
+- Four new engine tests:
+  `TestMaxActiveDownloadsDefaultsUnlimited`,
+  `TestMaxActiveDownloadsClampsNegative`,
+  `TestQueueOrderThirdTorrentQueuedUnderCap2`,
+  `TestQueueRaisingCapPromotesQueued`.
+
+Still pending:
+
 - **Cross-platform GUI release** (darwin + windows GUI
   binaries via `fyne-cross` once Docker is available on the
   build machine).
-- **Queue management** (max active downloads, priority queue).
 
 ## v0.3.0 — 2026-04-12
 
