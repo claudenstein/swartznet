@@ -9,13 +9,33 @@ format follows [Keep a Changelog][kac]; the project follows
 
 ## Unreleased
 
-Targeting **v1.0.0** — first GA release. v0.2.0 adds the local
-web UI and validates the BEP-44 publish path against the live
-mainline DHT. v0.3.0 adds a native Fyne GUI as a third frontend
-alongside the CLI and web UI. v1.0.0 still wants real-world data
-for the reputation prior weight and at least one second client
-implementing `sn_search` (the BEP-1 requirement to take a draft
-to Final).
+Targeting **v1.0.0** — first GA release. v1.0.0 still wants
+real-world data for the reputation prior weight and at least
+one second client implementing `sn_search` (the BEP-1
+requirement to take a draft to Final). Both require
+engagement from actual users of the v0.x prereleases.
+
+Likely next milestones:
+
+- **File selection** for multi-file torrents via
+  `anacrolix/torrent.File.SetPriority` (users shouldn't have
+  to download all of a 50 GiB TV season to get one episode).
+- **Rate limiting** (upload/download byte caps via
+  `anacrolix/torrent.Client.SetDefaultTokenBucket`).
+- **CLI commands** for the new v0.3.0 features (`swartznet
+  create <path> -o file.torrent`, `swartznet index <ih> off`).
+- **Cross-platform GUI release** (darwin + windows GUI
+  binaries via `fyne-cross` once Docker is available on the
+  build machine).
+
+## v0.3.0 — 2026-04-12
+
+**Highlight:** SwartzNet now ships a **native Fyne GUI** as a
+third frontend alongside the CLI and the web UI. All GUI code
+is Go — no HTML/CSS/JS. The same daemon (engine, indexer,
+companion, HTTP API) powers all three. Two other big features
+land in this release: **per-torrent indexing control** and
+**torrent creation from local content**.
 
 ### G0–G7 — Native Fyne GUI (v0.3.0)
 
