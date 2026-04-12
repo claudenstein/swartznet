@@ -1,0 +1,198 @@
+name: Release
+
+# Triggered when a tag like v0.3.0 / v1.0.0 is pushed. Builds all
+# five CLI binaries in a single pure-Go job and builds the GUI
+# natively on each target OS runner (Fyne requires CGo, so cross-
+# compilation needs a platform-specific C toolchain — easiest is
+# to run on the matching OS directly).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # needed to create the GitHub Release + upload assets
+
+jobs:
+  build-cli:
+    name: CLI binaries (5 platforms, pure Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build release binaries
+        run: ./scripts/build-release.sh ${{ github.ref_name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-binaries
+          path: |
+            dist/swartznet-${{ github.ref_name }}-*
+            dist/SHA256SUMS
+          retention-days: 7
+
+  build-gui-linux:
+    name: GUI (linux-amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install Fyne build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+
+      - name: Build GUI
+        run: |
+          CGO_ENABLED=1 go build -trimpath \
+            -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
+            -o dist/swartznet-gui-${{ github.ref_name }}-linux-amd64 \
+            ./cmd/swartznet-gui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-amd64
+          path: dist/swartznet-gui-${{ github.ref_name }}-linux-amd64
+          retention-days: 7
+
+  build-gui-darwin-amd64:
+    name: GUI (darwin-amd64, Intel)
+    runs-on: macos-13    # Intel runners
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build GUI
+        run: |
+          CGO_ENABLED=1 go build -trimpath \
+            -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
+            -o dist/swartznet-gui-${{ github.ref_name }}-darwin-amd64 \
+            ./cmd/swartznet-gui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-darwin-amd64
+          path: dist/swartznet-gui-${{ github.ref_name }}-darwin-amd64
+          retention-days: 7
+
+  build-gui-darwin-arm64:
+    name: GUI (darwin-arm64, Apple Silicon)
+    runs-on: macos-latest   # arm64 since 2024
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build GUI
+        run: |
+          CGO_ENABLED=1 go build -trimpath \
+            -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
+            -o dist/swartznet-gui-${{ github.ref_name }}-darwin-arm64 \
+            ./cmd/swartznet-gui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-darwin-arm64
+          path: dist/swartznet-gui-${{ github.ref_name }}-darwin-arm64
+          retention-days: 7
+
+  build-gui-windows:
+    name: GUI (windows-amd64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build GUI
+        shell: bash
+        run: |
+          CGO_ENABLED=1 go build -trimpath \
+            -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
+            -o dist/swartznet-gui-${{ github.ref_name }}-windows-amd64.exe \
+            ./cmd/swartznet-gui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows-amd64
+          path: dist/swartznet-gui-${{ github.ref_name }}-windows-amd64.exe
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - build-cli
+      - build-gui-linux
+      - build-gui-darwin-amd64
+      - build-gui-darwin-arm64
+      - build-gui-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Gather all binaries + regenerate SHA256SUMS
+        run: |
+          mkdir -p release
+          find artifacts -type f -name 'swartznet*' -exec cp -v {} release/ \;
+          cd release
+          # Overwrite the CLI-only SHA256SUMS from build-cli with a
+          # full one covering CLI + every GUI binary.
+          sha256sum swartznet-${{ github.ref_name }}-* \
+                    swartznet-gui-${{ github.ref_name }}-* > SHA256SUMS
+          cat SHA256SUMS
+          ls -lh
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          # Grab the section between `## vX.Y.Z` and the next
+          # `## ` heading. If nothing matches (e.g. a hotfix tag
+          # without a CHANGELOG entry), fall back to a generic
+          # "see CHANGELOG" message.
+          version="${{ github.ref_name }}"
+          awk -v tag="## $version" '
+            $0 ~ tag {found=1; next}
+            found && /^## / {exit}
+            found {print}
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "See CHANGELOG.md for details." > release-notes.md
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          # Anything before v1.0.0 is marked prerelease.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          files: |
+            release/swartznet-${{ github.ref_name }}-*
+            release/swartznet-gui-${{ github.ref_name }}-*
+            release/SHA256SUMS
