@@ -41,6 +41,9 @@ type TorrentController interface {
 	// connections, forgets piece state). On-disk file content
 	// is left in place.
 	RemoveTorrent(infoHashHex string) error
+	// SetTorrentIndexing flips the per-torrent indexing toggle.
+	// Idempotent.
+	SetTorrentIndexing(infoHashHex string, enabled bool) error
 }
 
 // TorrentSnapshot mirrors engine.TorrentSnapshot. Re-declared
@@ -61,6 +64,7 @@ type TorrentSnapshot struct {
 	Seeders        int     `json:"seeders"`
 	Paused         bool    `json:"paused"`
 	Status         string  `json:"status"`
+	Indexing       bool    `json:"indexing"`
 }
 
 // TorrentAdder is the narrow interface the HTTP API needs from
@@ -185,6 +189,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /torrents/{infohash}/pause", s.handlePauseTorrent)
 	mux.HandleFunc("POST /torrents/{infohash}/resume", s.handleResumeTorrent)
 	mux.HandleFunc("DELETE /torrents/{infohash}", s.handleDeleteTorrent)
+	mux.HandleFunc("POST /torrents/{infohash}/indexing", s.handleSetTorrentIndexing)
 	mux.HandleFunc("GET /companion", s.handleCompanionStatus)
 	mux.HandleFunc("POST /companion/refresh", s.handleCompanionRefresh)
 	mux.HandleFunc("POST /companion/follow", s.handleCompanionFollow)
@@ -784,6 +789,38 @@ func (s *Server) handleResumeTorrent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 	s.controlOne(w, r, "remove", func(ih string) error {
 		return s.control.RemoveTorrent(ih)
+	})
+}
+
+// IndexingRequest is the body of POST /torrents/{infohash}/indexing.
+type IndexingRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (s *Server) handleSetTorrentIndexing(w http.ResponseWriter, r *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ihHex := r.PathValue("infohash")
+	if _, err := hex.DecodeString(ihHex); err != nil || len(ihHex) != 40 {
+		http.Error(w, "infohash must be 40 hex characters", http.StatusBadRequest)
+		return
+	}
+	var body IndexingRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.control.SetTorrentIndexing(ihHex, body.Enabled); err != nil {
+		http.Error(w, "indexing: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":       true,
+		"infohash": ihHex,
+		"enabled":  body.Enabled,
 	})
 }
 

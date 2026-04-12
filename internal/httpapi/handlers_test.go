@@ -193,6 +193,17 @@ func (f *fakeController) RemoveTorrent(ih string) error {
 	return nil
 }
 
+func (f *fakeController) SetTorrentIndexing(ih string, enabled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	verb := "index_on"
+	if !enabled {
+		verb = "index_off"
+	}
+	f.actions = append(f.actions, action{verb, ih})
+	return nil
+}
+
 func (f *fakeController) lastAction() action {
 	f.mu.Lock()
 	defer f.mu.Unlock()

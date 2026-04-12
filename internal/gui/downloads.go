@@ -38,6 +38,7 @@ var dlColumns = []struct {
 	{"Progress", 100},
 	{"Size", 90},
 	{"Peers", 60},
+	{"Indexed", 70},
 }
 
 func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
@@ -82,6 +83,12 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 				label.SetText(humanBytes(s.Size))
 			case 4: // Peers
 				label.SetText(fmt.Sprintf("%d", s.ActivePeers))
+			case 5: // Indexed
+				if s.Indexing {
+					label.SetText("yes")
+				} else {
+					label.SetText("no")
+				}
 			}
 		},
 	)
@@ -114,6 +121,9 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	addFileBtn := widget.NewButtonWithIcon("Add .torrent", theme.FolderOpenIcon(), func() {
 		dl.showAddFileDialog()
 	})
+	createBtn := widget.NewButtonWithIcon("Create Torrent", theme.DocumentCreateIcon(), func() {
+		createTorrentDialog(dl.d, dl.win())
+	})
 	pauseBtn := widget.NewButtonWithIcon("Pause", theme.MediaPauseIcon(), func() {
 		dl.pauseSelected()
 	})
@@ -123,14 +133,20 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	removeBtn := widget.NewButtonWithIcon("Remove", theme.DeleteIcon(), func() {
 		dl.removeSelected()
 	})
+	toggleIndexBtn := widget.NewButtonWithIcon("Toggle Index", theme.SearchIcon(), func() {
+		dl.toggleIndexSelected()
+	})
 
 	toolbar := container.NewHBox(
 		addMagnetBtn,
 		addFileBtn,
+		createBtn,
 		widget.NewSeparator(),
 		pauseBtn,
 		resumeBtn,
 		removeBtn,
+		widget.NewSeparator(),
+		toggleIndexBtn,
 	)
 
 	dl.content = container.NewBorder(toolbar, nil, nil, nil, dl.table)
@@ -165,30 +181,42 @@ func (dl *downloadsTab) showAddMagnetDialog() {
 	entry.SetPlaceHolder("magnet:?xt=urn:btih:...")
 	entry.MultiLine = false
 
+	indexCheck := widget.NewCheck("Index this torrent's files after download", nil)
+	indexCheck.SetChecked(true)
+
 	d := dialog.NewForm(
 		"Add Magnet URI",
 		"Add",
 		"Cancel",
 		[]*widget.FormItem{
 			widget.NewFormItem("Magnet URI", entry),
+			widget.NewFormItem("", indexCheck),
 		},
 		func(ok bool) {
 			if !ok || entry.Text == "" {
 				return
 			}
 			uri := entry.Text
+			shouldIndex := indexCheck.Checked
 			go func() {
-				_, err := dl.d.Eng.AddMagnetURI(uri)
+				ih, err := dl.d.Eng.AddMagnetURI(uri)
 				if err != nil {
 					fyne.Do(func() {
 						dialog.ShowError(err, dl.win())
 					})
+					return
+				}
+				if !shouldIndex {
+					// Flip the flag immediately so autoIndex's
+					// 5-minute wait for metadata doesn't index it
+					// when GotInfo fires.
+					_ = dl.d.Eng.SetTorrentIndexing(ih, false)
 				}
 			}()
 		},
 		dl.win(),
 	)
-	d.Resize(fyne.NewSize(500, 150))
+	d.Resize(fyne.NewSize(500, 180))
 	d.Show()
 }
 
@@ -200,16 +228,40 @@ func (dl *downloadsTab) showAddFileDialog() {
 		path := reader.URI().Path()
 		reader.Close()
 		go func() {
-			_, err := dl.d.Eng.AddTorrentFile(path)
+			h, err := dl.d.Eng.AddTorrentFile(path)
 			if err != nil {
 				fyne.Do(func() {
 					dialog.ShowError(err, dl.win())
 				})
+				return
 			}
+			// .torrent adds default to indexing = on; the user can
+			// flip it via the Toggle Index button afterwards. We
+			// don't prompt here because most .torrent adds are
+			// existing collections the user wants searchable.
+			_ = h
 		}()
 	}, dl.win())
 	fd.SetFilter(&torrentFilter{})
 	fd.Show()
+}
+
+func (dl *downloadsTab) toggleIndexSelected() {
+	ih := dl.selectedInfoHash()
+	if ih == "" {
+		return
+	}
+	// Read current flag from snapshot under lock, then flip it.
+	dl.mu.RLock()
+	var current bool
+	for _, s := range dl.snaps {
+		if s.InfoHash == ih {
+			current = s.Indexing
+			break
+		}
+	}
+	dl.mu.RUnlock()
+	go dl.d.Eng.SetTorrentIndexing(ih, !current)
 }
 
 func (dl *downloadsTab) pauseSelected() {

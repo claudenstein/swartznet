@@ -40,6 +40,10 @@ func (c *controllerAdapter) RemoveTorrent(infoHashHex string) error {
 	return c.eng.RemoveTorrent(infoHashHex)
 }
 
+func (c *controllerAdapter) SetTorrentIndexing(infoHashHex string, enabled bool) error {
+	return c.eng.SetTorrentIndexing(infoHashHex, enabled)
+}
+
 func (c *controllerAdapter) TorrentSnapshots() []httpapi.TorrentSnapshot {
 	src := c.eng.TorrentSnapshots()
 	out := make([]httpapi.TorrentSnapshot, 0, len(src))
@@ -59,6 +63,7 @@ func (c *controllerAdapter) TorrentSnapshots() []httpapi.TorrentSnapshot {
 			Seeders:        s.Seeders,
 			Paused:         s.Paused,
 			Status:         s.Status,
+			Indexing:       s.Indexing,
 		})
 	}
 	return out

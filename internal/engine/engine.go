@@ -202,6 +202,24 @@ type Handle struct {
 	// state here for the M10 GUI download controls.
 	pausedMu sync.Mutex
 	paused   bool
+
+	// indexMu guards indexing. When true (the default), autoIndex
+	// and ingestFileEvents feed this torrent's metadata and file
+	// contents into the attached *indexer.Index. When false, both
+	// paths skip silently. Toggle via Engine.SetTorrentIndexing.
+	indexMu  sync.Mutex
+	indexing bool
+}
+
+// IsIndexing reports whether this torrent is currently eligible
+// for automatic indexing (torrent-level and content-level). The
+// default for every newly-added torrent is true; set it to false
+// via Engine.SetTorrentIndexing before files complete if you want
+// to opt a specific torrent out.
+func (h *Handle) IsIndexing() bool {
+	h.indexMu.Lock()
+	defer h.indexMu.Unlock()
+	return h.indexing
 }
 
 // IsPaused reports whether this torrent has been explicitly
@@ -761,6 +779,7 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 		T:        t,
 		pieceSub: startPieceSubscription(t, e.log),
 		fileSub:  startFileTracker(t, e.log),
+		indexing: true,
 	}
 	e.handles[ih] = h
 	go e.autoIndex(h)
@@ -819,6 +838,13 @@ func (e *Engine) ingestFileEvents(h *Handle) {
 		if p == nil || closed {
 			continue
 		}
+		// Per-torrent opt-out: the user can flip this flag at any
+		// time via Engine.SetTorrentIndexing. A newly-flipped-off
+		// torrent stops feeding its remaining files into the
+		// pipeline; already-submitted chunks aren't recalled.
+		if !h.IsIndexing() {
+			continue
+		}
 		// Capture the file index by value for the closure.
 		idx := ev.FileIndex
 		in := indexer.FileInput{
@@ -869,7 +895,11 @@ func (e *Engine) autoIndex(h *Handle) {
 
 	doc := indexerDocFromTorrent(h.T)
 
-	if idx != nil {
+	// Per-torrent opt-out: torrents explicitly marked non-indexing
+	// skip the Bleve write but still go to the DHT publisher, so
+	// the user can publish a torrent's existence without exposing
+	// its file list in their own local searches.
+	if idx != nil && h.IsIndexing() {
 		if err := idx.IndexTorrent(doc); err != nil {
 			e.log.Warn("indexer.index_failed", "info_hash", doc.InfoHash, "err", err)
 		} else {
@@ -966,6 +996,12 @@ type TorrentSnapshot struct {
 	// current state: "metadata", "downloading", "seeding",
 	// "complete", or "paused".
 	Status string
+	// Indexing reports whether this torrent feeds the local Bleve
+	// index. Controlled via Engine.SetTorrentIndexing; default
+	// true. Independent of whether an index is globally attached —
+	// if Engine.SetIndex(nil), Indexing may still be true but
+	// will have no effect.
+	Indexing bool
 }
 
 // TorrentSnapshots returns a TorrentSnapshot for every torrent
@@ -1009,6 +1045,7 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 			Name:     t.Name(),
 			Paused:   paused,
 			Status:   status,
+			Indexing: h.IsIndexing(),
 		}
 	}
 
@@ -1051,6 +1088,7 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 		Seeders:        stats.ConnectedSeeders,
 		Paused:         paused,
 		Status:         status,
+		Indexing:       h.IsIndexing(),
 	}
 }
 
@@ -1097,6 +1135,30 @@ func (e *Engine) ResumeTorrent(infoHashHex string) error {
 	h.T.AllowDataDownload()
 	h.T.AllowDataUpload()
 	e.log.Info("engine.torrent_resumed", "info_hash", infoHashHex)
+	return nil
+}
+
+// SetTorrentIndexing flips the per-torrent indexing toggle for
+// the given infohash. When set to false, future file completions
+// for this torrent skip the content-extraction pipeline and the
+// torrent-level document is not written to the Bleve index.
+// Safe to call at any point in the torrent's lifecycle; the
+// effect is prospective only — already-indexed chunks remain in
+// the index. Idempotent.
+//
+// When disabling indexing for a torrent whose content is already
+// in the Bleve index, call indexer.DeleteContentForTorrent /
+// indexer.DeleteTorrent separately if you want the existing
+// entries removed as well.
+func (e *Engine) SetTorrentIndexing(infoHashHex string, enabled bool) error {
+	h, err := e.handleByHex(infoHashHex)
+	if err != nil {
+		return err
+	}
+	h.indexMu.Lock()
+	h.indexing = enabled
+	h.indexMu.Unlock()
+	e.log.Info("engine.torrent_indexing_set", "info_hash", infoHashHex, "enabled", enabled)
 	return nil
 }
 
