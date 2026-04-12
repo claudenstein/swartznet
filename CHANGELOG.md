@@ -66,6 +66,60 @@ a vanilla Go toolchain. The CLI continues to build with
 `CGO_ENABLED=0` and stays ~40 MB with the existing
 `build-release.sh` pipeline.
 
+### G8 — Per-torrent indexing control
+
+- New `Handle.IsIndexing() bool` and `Engine.SetTorrentIndexing(
+  hex, enabled) error` let the user decide, per torrent, whether
+  file downloads feed the extraction pipeline and whether the
+  torrent-level document is written to Bleve. Default remains on
+  — existing behaviour is preserved.
+- `TorrentSnapshot` gains an `Indexing bool` field, mirrored
+  through the httpapi struct as `"indexing":bool` so the web UI
+  can surface it in future work.
+- New HTTP endpoint `POST /torrents/{infohash}/indexing` with
+  body `{"enabled": true|false}`.
+- GUI Downloads tab gains a new "Indexed" column (yes/no) and a
+  "Toggle Index" toolbar button. The Add Magnet dialog gains an
+  "Index this torrent's files after download" checkbox (default
+  on). The `.torrent` file picker keeps indexing on by default;
+  the user can toggle afterwards via the toolbar button.
+- Two new tests: `TestSetTorrentIndexingUnknownInfohash`,
+  `TestSetTorrentIndexingReflectedInSnapshot`.
+
+### G9 — Create Torrent
+
+- New `Engine.CreateTorrent(CreateTorrentOptions) (*metainfo.MetaInfo, error)`
+  and `Engine.CreateTorrentFile(opts, outPath) (infohash, mi, error)`
+  wrap `metainfo.Info.BuildFromFilePath` plus bencode serialization
+  and atomic tempfile+rename for the on-disk variant.
+  `CreateTorrentOptions` exposes: Root (file or folder),
+  Name override, PieceLength (0 = Auto via
+  `metainfo.ChoosePieceLength`), Trackers, WebSeeds (BEP-19),
+  Private (BEP-27), Comment, CreatedBy.
+- GUI Downloads toolbar gains a "Create Torrent" button that
+  walks the user through every field, with file/folder pickers
+  for Root and a Save As… picker for output. "Start seeding
+  immediately" calls `AddTorrentMetaInfo` right after the file
+  is written.
+- Piece hashing runs in a background goroutine; a
+  `ProgressBarInfinite` modal stays up until completion so the
+  UI never blocks.
+- Four new tests: `TestCreateTorrentSingleFile`,
+  `TestCreateTorrentMultiFile`, `TestCreateTorrentFileWritesValid`,
+  `TestCreateTorrentMissingRoot`.
+
+### G10 — Documentation refresh
+
+- `docs/05-integration-design.md` §2 updated with the v0.3.0
+  architecture diagram (three frontends + `internal/daemon`
+  layer), plus new sections on per-torrent indexing control and
+  torrent creation.
+- `docs/08-operations.md` gains "Creating a new torrent" and
+  "Per-torrent indexing control" subsections explaining every
+  dialog field and the two paths for opting a torrent out.
+- `README.md` gains a "Three frontends" table and status-matrix
+  entries for G0-G9.
+
 ### M9 — Per-hit source tracking + targeted flag
 
 - New `internal/reputation.SourceTracker`: an LRU-bounded map of

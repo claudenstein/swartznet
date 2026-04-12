@@ -32,6 +32,9 @@ research and design documents that motivate the architecture.
 | **M9 — Per-hit source tracking + targeted flag** | ✅ Complete | LRU-bounded `reputation.SourceTracker` records which indexer pubkey returned which infohash during a Layer-D query; `POST /flag` uses that attribution to demote only the indexers actually responsible for a flagged hit instead of everyone returned in the last query. |
 | **M10 — GUI download controls** | ✅ Complete | New `engine.TorrentSnapshots` + pause/resume/remove APIs, four new HTTP endpoints (`GET /torrents`, `POST /torrents/{ih}/{pause,resume}`, `DELETE /torrents/{ih}`), and a Downloads tab in the web UI with live progress bars, status pills, and per-torrent controls polling every 2 s. |
 | **M11 — F3 companion content-index torrents** | ✅ Complete | SwartzNet's distributed content-search story. The daemon periodically serialises its local Bleve index to a gzipped JSON document, wraps it in a v1 `.torrent` metainfo, seeds it, and publishes a BEP-46-style mutable pointer at salt `_sn_content_index` (`companion.Publisher`). Subscribers follow publishers by their ed25519 pubkey; the `companion.SubscriberWorker` resolves each pointer, downloads the torrent, decodes the payload, and merges the records into the local index. New Companion tab in the web UI exposes the whole pipeline — publisher status, manual refresh, and an on-disk follow list managed through `/companion/{follow,unfollow,refresh}`. Closes the "distributed search" promise of the project's tagline without any new network protocol beyond the existing BitTorrent + BEP-44 stack. |
+| **v0.3.0 G0-G7 — Native Fyne GUI** | ✅ Complete | Cross-platform native desktop app as a third frontend alongside the CLI and web UI. All code is Go — no HTML/CSS/JS. Five tabs (Downloads / Search / Status / Companion / Settings), system tray with minimise-to-tray and download-complete notifications, dark theme matching the web UI. Shared `internal/daemon/` package extracted from `cmd_add.go` so both CLI and GUI use the same startup wiring. Requires CGo (Fyne's OpenGL bindings); CLI remains static. |
+| **v0.3.0 G8 — Per-torrent indexing control** | ✅ Complete | `Engine.SetTorrentIndexing(ih, enabled)` flips a per-torrent flag gated in `autoIndex` and `ingestFileEvents`. GUI exposes it as an "Index this torrent's files" checkbox in the Add Magnet dialog, an "Indexed" column in the Downloads table, and a "Toggle Index" toolbar button. HTTP surface: `POST /torrents/{infohash}/indexing {"enabled": bool}`. |
+| **v0.3.0 G9 — Create Torrent** | ✅ Complete | `Engine.CreateTorrent(opts)` / `CreateTorrentFile(opts, outPath)` wrap `metainfo.Info.BuildFromFilePath` with sensible defaults. GUI adds a "Create Torrent" toolbar button that walks users through root path, name, piece length (Auto / 64 KiB – 16 MiB), trackers, webseeds, comment, private flag, output path, and "start seeding immediately". Hashing runs in a background goroutine with a `ProgressBarInfinite` modal. |
 
 The full roadmap and per-milestone rationale is in
 [`docs/05-integration-design.md`](docs/05-integration-design.md) §12.
@@ -50,6 +53,16 @@ DHT using BEP-44 mutable items, keyed by per-publisher ed25519 pubkey with the
 keyword as salt (**Layer D**). Nothing we add requires a new reserved bit, a
 new DHT verb, or a second UDP port — vanilla clients see a normal peer speaking
 BEP-3/5/9/10/44.
+
+## Three frontends
+
+| Frontend | When to use | Binary |
+|---|---|---|
+| **CLI** (`swartznet add|search|status|flag|confirm`) | Scripting, SSH sessions, headless servers | ~40 MB, no CGo, fully static |
+| **Web UI** (`http://localhost:7654/` while daemon runs) | Remote access via port-forward, no install | Embedded in the CLI binary via `go:embed` |
+| **Native GUI** (`swartznet-gui`) | Desktop use — system tray, notifications, native dialogs, create-torrent wizard | ~46 MB, CGo (Fyne v2.7 + OpenGL) |
+
+All three call into the same `internal/daemon` package and can run concurrently against the same index/data dir. Build the GUI with `scripts/build-gui.sh`; see [docs/08-operations.md](docs/08-operations.md#native-gui-v030) for platform-specific build deps and `fyne-cross` instructions for cross-platform releases.
 
 ## Documentation
 

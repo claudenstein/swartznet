@@ -68,31 +68,65 @@ This tiering is the most important design decision in the entire project. It con
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  UI                                                                      │
-│  (CLI + optional Web UI + optional Tauri desktop shell)                  │
+│  Frontends (three, sharing the same daemon wiring)                       │
+│  - CLI            cmd/swartznet  (scriptable, no CGo)                    │
+│  - Web UI         go:embed HTML/CSS/JS, served on localhost:7654         │
+│  - Native GUI     cmd/swartznet-gui + internal/gui (Fyne v2, CGo)        │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  Search API  (local HTTP, single process)                                │
-│  - POST /search   {q, limit, scope: [local|swarm|companion]}             │
-│  - GET  /torrent/{ih}/files                                              │
-│  - POST /index/refresh                                                   │
+│  internal/daemon  (shared startup: engine + indexer + companion + httpapi)│
+├──────────────────────────────────────────────────────────────────────────┤
+│  Local HTTP API  (localhost only, loopback bind)                         │
+│  - POST /search    POST /torrent          POST /confirm    POST /flag    │
+│  - GET  /torrents  POST /torrents/*/{pause,resume,indexing}              │
+│  - DELETE /torrents/*                                                    │
+│  - GET/POST /capabilities    GET /status  GET /index/stats   GET /healthz│
+│  - GET/POST /companion {refresh,follow,unfollow}                         │
 ├──────────┬──────────────────────┬────────────────┬───────────────────────┤
 │ Local    │ Remote (peer-wire)   │ Remote (DHT)   │ Companion-index       │
-│ Index    │ lt_search over LTEP  │ BEP-44 keyword │ layer (BEP-46 style   │
+│ Index    │ sn_search over LTEP  │ BEP-44 keyword │ layer (BEP-46 style   │
 │ (Bleve)  │                      │ items          │  pointer torrents)    │
 ├──────────┴──────────────────────┴────────────────┴───────────────────────┤
-│  Ingestion Pipeline                                                      │
+│  Ingestion Pipeline   (per-torrent opt-in via Engine.SetTorrentIndexing) │
 │  - Piece verify hook  →  file reassembly  →  text extractor  →  Bleve    │
 │  - Torrent add hook   →  metadata summary  →  DHT publish queue          │
 ├──────────────────────────────────────────────────────────────────────────┤
+│  Torrent creation   (engine.CreateTorrent / CreateTorrentFile)           │
+│  - Wraps metainfo.Info.BuildFromFilePath + bencode + atomic file write   │
+├──────────────────────────────────────────────────────────────────────────┤
 │  BitTorrent Engine: anacrolix/torrent                                    │
 │  - BEP-3 peer wire, BEP-5 DHT, BEP-9 ut_metadata,                        │
-│    BEP-10 LTEP, BEP-11 ut_pex, BEP-44, BEP-52                            │
+│    BEP-10 LTEP, BEP-11 ut_pex, BEP-44, BEP-46, BEP-52                    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 Everything above the "BitTorrent Engine" line is ours. Everything below is vendored as a library via `go.mod`.
 
-The layer boundaries are strict: the ingestion pipeline does not know about the peer-wire protocol; the peer-wire `lt_search` handler does not know how Bleve encodes its index; the DHT publisher does not know about the local HTTP API. The only thing that crosses layers is a small `SearchResult` struct shared by the indexer and the query engine.
+The layer boundaries are strict: the ingestion pipeline does not know about the peer-wire protocol; the peer-wire `sn_search` handler does not know how Bleve encodes its index; the DHT publisher does not know about the local HTTP API. The only thing that crosses layers is a small `SearchResult` struct shared by the indexer and the query engine.
+
+The three frontends all call `internal/daemon.New()` to obtain a fully-wired node; this is the single source of truth for startup order and resource cleanup. The CLI and the native GUI link the same packages directly; the web UI is reached through the HTTP API like any external tool, even though it ships embedded in the same binary.
+
+### Per-torrent indexing control (v0.3.0)
+
+Every torrent added to SwartzNet defaults to being indexed: its torrent-level document (name, file list, trackers) is written to Bleve within seconds of metadata arrival, and as each file finishes downloading the extraction pipeline (PDF / EPUB / DOCX / ODT / plaintext / subtitles) feeds the text into Bleve content documents.
+
+Users can opt a specific torrent out via `Engine.SetTorrentIndexing(hex, false)`. The flag is checked inside `autoIndex` (torrent-level) and `ingestFileEvents` (content-level) and takes effect prospectively — already-indexed chunks remain in the index unless the caller additionally invokes `indexer.DeleteContentForTorrent`. The flag is surfaced:
+
+  - In the GUI as a checkbox on the Add Magnet dialog and as a "Toggle Index" toolbar button in the Downloads tab.
+  - In the HTTP API as `POST /torrents/{infohash}/indexing {"enabled": true|false}`.
+  - In the CLI as a future `swartznet index off <infohash>` subcommand (not yet implemented).
+
+The global `--no-index` CLI flag remains the stronger switch: it prevents Bleve from being opened at all, so no subsystem (including Layer D publishing) sees any torrent.
+
+### Torrent creation (v0.3.0)
+
+SwartzNet can build new `.torrent` files from local content via `Engine.CreateTorrent(CreateTorrentOptions)` and `CreateTorrentFile(opts, outPath)`. Both wrap `metainfo.Info.BuildFromFilePath` plus bencode serialization and an atomic temp-file rename for the on-disk variant. The GUI surfaces this as "Create Torrent" in the Downloads toolbar, accepting:
+
+  - Root (file or folder), auto-detected as single-file or multi-file.
+  - Piece length (Auto / 64 KiB / 256 KiB / 1 MiB / 2 MiB / 4 MiB / 8 MiB / 16 MiB) — Auto uses `metainfo.ChoosePieceLength`.
+  - Trackers (one per line), webseeds (BEP-19), comment, private flag (BEP-27), output path.
+  - Optional "start seeding immediately" which adds the MetaInfo to the engine and begins seeding from the same Root.
+
+Piece hashing is synchronous I/O. The GUI runs it in a background goroutine and shows a "Hashing pieces..." modal with `ProgressBarInfinite` until completion — minutes for 100+ GiB, seconds for small folders.
 
 ---
 

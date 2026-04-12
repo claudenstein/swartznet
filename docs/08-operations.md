@@ -310,9 +310,11 @@ The GUI binary is `cmd/swartznet-gui`. It starts its own daemon
 (same engine + indexer + companion wiring as the CLI) and presents
 five tabs:
 
-  - **Downloads** — live torrent table with progress, pause, resume,
-    remove. Add magnet URIs via toolbar dialog, or pick a `.torrent`
-    file with a native file picker.
+  - **Downloads** — live torrent table with Name / Status / Progress
+    / Size / Peers / Indexed columns. Toolbar actions: Add Magnet
+    (with per-torrent "index this?" checkbox), Add .torrent file
+    picker, **Create Torrent** (build a new .torrent from a local
+    file or folder), Pause, Resume, Remove, Toggle Index.
   - **Search** — query input plus Local / Swarm / DHT checkboxes,
     results rendered as cards with Confirm / Flag buttons.
   - **Status** — dashboard cards for local-index stats, swarm peer
@@ -327,6 +329,64 @@ five tabs:
 A system tray icon (on Linux, macOS, Windows) keeps the daemon
 running in the background when the window is closed. Completed
 downloads fire desktop notifications.
+
+### Creating a new torrent
+
+The "Create Torrent" button in the Downloads tab opens a modal
+that walks you through every field in a `.torrent` file:
+
+  - **Root** — file or folder to share. Folder produces a multi-
+    file torrent following BEP-3 conventions; file produces a
+    single-file torrent.
+  - **Name** — overrides the info.name field. Leave empty to use
+    the basename of Root.
+  - **Piece length** — Auto / 64 KiB / 256 KiB / 1 MiB / 2 MiB /
+    4 MiB / 8 MiB / 16 MiB. Auto uses `metainfo.ChoosePieceLength`
+    which targets 1024–2048 pieces total.
+  - **Trackers** — one announce URL per line, optional. Leaving it
+    empty produces a DHT-only torrent.
+  - **Webseeds** — optional HTTP(S) URLs (BEP-19) that serve the
+    exact content layout as an alternative download source.
+  - **Comment** — arbitrary human-readable note.
+  - **Private** — BEP-27 flag that disables DHT and PEX peer
+    discovery. Useful for private-tracker uploads.
+  - **Output .torrent path** — where to save the .torrent file.
+  - **Start seeding immediately** — when checked, the newly-created
+    torrent is added to the engine and seeded from the same Root
+    path right away.
+
+Piece hashing is synchronous and I/O-bound. A ~1 GiB folder takes
+seconds; 100 GiB takes minutes. A "Hashing pieces..." modal with
+an indeterminate progress bar stays up until hashing completes.
+
+The underlying engine method is `Engine.CreateTorrent(opts)` /
+`Engine.CreateTorrentFile(opts, outPath)`, both wrapping
+`metainfo.Info.BuildFromFilePath` from anacrolix/torrent.
+
+### Per-torrent indexing control
+
+By default every torrent added to SwartzNet is indexed: its
+metadata (name, file list, trackers) is written to the Bleve
+index within seconds, and as each file finishes downloading the
+extraction pipeline (PDF / EPUB / DOCX / ODT / plaintext /
+subtitles) feeds the text to Bleve content documents.
+
+Two ways to opt a torrent out:
+
+  1. When adding via **Add Magnet**, uncheck the "Index this
+     torrent's files after download" checkbox in the dialog. The
+     torrent will download and seed, but nothing about it hits
+     your local search index.
+  2. Select any row and click **Toggle Index**. The new state is
+     reflected in the "Indexed" column and takes effect
+     prospectively — file completions from that point forward
+     skip the pipeline, but content already indexed is not
+     removed (use `indexer.DeleteContentForTorrent` via a future
+     admin command if you want a full scrub).
+
+The **global** `--no-index` flag on `swartznet add` is a stronger
+switch: it prevents the Bleve index from being opened at all, so
+no torrent — past, present, or future — contributes anything.
 
 ### Building the GUI
 
