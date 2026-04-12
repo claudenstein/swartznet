@@ -25,15 +25,15 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		out         string
-		name        string
-		pieceKiB    int64
-		trackers    stringSliceFlag
-		webseeds    stringSliceFlag
-		comment     string
-		private     bool
-		startSeed   bool
-		dataDir     string
+		out       string
+		name      string
+		pieceKiB  int64
+		trackers  stringSliceFlag
+		webseeds  stringSliceFlag
+		comment   string
+		private   bool
+		startSeed bool
+		dataDir   string
 	)
 	fs.StringVar(&out, "o", "", "output .torrent path (required)")
 	fs.StringVar(&name, "name", "", "override the info.name field (default: basename of root)")

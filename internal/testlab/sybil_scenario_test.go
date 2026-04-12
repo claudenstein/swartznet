@@ -19,9 +19,10 @@ import (
 // results.
 //
 // This scenario validates the full chain:
-//   M5 reputation tracker → M9 source tracker →
-//   M13c seed list weight → M15d PeerBook →
-//   Lookup.Query MinIndexerScore pre-filter
+//
+//	M5 reputation tracker → M9 source tracker →
+//	M13c seed list weight → M15d PeerBook →
+//	Lookup.Query MinIndexerScore pre-filter
 //
 // No containers, no real DHT, no real torrent — everything
 // runs in-process via SharedMemoryStore.
@@ -115,9 +116,9 @@ func TestScenarioSybilResistance(t *testing.T) {
 	// dominate — the prior weight (5) matters less when the
 	// sample size is large.
 	sybilPK := reputation.PubKey(pubSybil)
-	tracker.RecordReturned(sybilPK, 50)   // simulate 50 hits seen from sybil
+	tracker.RecordReturned(sybilPK, 50) // simulate 50 hits seen from sybil
 	for i := 0; i < 20; i++ {
-		tracker.RecordFlagged(sybilPK)     // 20 flags out of 50 → raw = (0-20)/50 = 0
+		tracker.RecordFlagged(sybilPK) // 20 flags out of 50 → raw = (0-20)/50 = 0
 	}
 	// Score: raw = max(0, 0-20)/50 = 0. Smoothed ≈ (0*50 + 0.5*5)/(50+5) = 0.045
 	sybilScore := tracker.Score(sybilPK)

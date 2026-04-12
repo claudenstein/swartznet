@@ -255,4 +255,3 @@ func sortHandlesByQueueOrder(handles []*Handle) {
 		}
 	}
 }
-

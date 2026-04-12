@@ -81,7 +81,7 @@ func (fd *filesDialog) build(torrentName string) {
 			}
 			f := fd.files[id]
 			border := obj.(*fyne.Container)
-			leftCol := border.Objects[0].(*fyne.Container) // Name+progress VBox
+			leftCol := border.Objects[0].(*fyne.Container)  // Name+progress VBox
 			rightCol := border.Objects[1].(*fyne.Container) // size+prio HBox
 			nameLbl := leftCol.Objects[0].(*widget.Label)
 			progress := leftCol.Objects[1].(*widget.ProgressBar)
