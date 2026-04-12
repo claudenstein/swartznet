@@ -17,12 +17,17 @@ import (
 // infohashByte is the single byte that fills the entire
 // 20-byte infohash — tests use 0x01, 0x02, etc. so log lines
 // stay readable. name is the torrent name that Layer-S queries
-// will match against.
-func (n *Node) IndexTorrent(t *testing.T, infohashByte byte, name string) {
+// will match against. filePaths is an optional list of files
+// inside the torrent; scenarios that also call IndexContent
+// must list the same paths here so companion.BuildFromIndex
+// (which only emits file records for paths listed in
+// TorrentDoc.FilePaths) can attach the content chunks.
+func (n *Node) IndexTorrent(t *testing.T, infohashByte byte, name string, filePaths ...string) {
 	t.Helper()
 	if err := n.Index.IndexTorrent(indexer.TorrentDoc{
-		InfoHash: string(hexOf(infohashByte)),
-		Name:     name,
+		InfoHash:  string(hexOf(infohashByte)),
+		Name:      name,
+		FilePaths: filePaths,
 	}); err != nil {
 		t.Fatalf("testlab: IndexTorrent: %v", err)
 	}

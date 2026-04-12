@@ -47,6 +47,35 @@ type Config struct {
 	// Layer-D contribution to the network. Default: false.
 	DisableDHTPublish bool
 
+	// Regtest, when true, activates "regtest mode" — a
+	// deterministic fast-forward mode modeled on Bitcoin Core's
+	// `-regtest`. Every production time constant is accelerated
+	// so scenario tests that depend on "what happens after the
+	// publisher refreshes" run in seconds instead of hours:
+	//
+	//   - dhtindex.Publisher.RefreshInterval:  1h → 5s
+	//   - dhtindex.Publisher.MinPutInterval:  55m → 100ms
+	//   - companion.Publisher.Interval:        1h → 10s
+	//   - companion.Publisher.MinInterval:     1m → 100ms
+	//
+	// Regtest mode runs the exact same code paths as production
+	// with one config flag flipped — no mocks, no stubs. It is
+	// intended for:
+	//   - the internal/testlab harness (which enables it on every
+	//     spawned engine)
+	//   - docker-compose / k8s testbed containers (Layer B/C)
+	//   - CI jobs that run end-to-end scenarios
+	//   - developers reproducing production bugs locally
+	//
+	// It must NEVER be used in production — a real node running
+	// regtest mode would hammer the mainline DHT with a put every
+	// 5 seconds and get ratelimited into the ground. The engine
+	// logs engine.regtest_mode_active at Warn level on startup so
+	// it's unmissable.
+	//
+	// Default: false.
+	Regtest bool
+
 	// HTTPUserAgent overrides the HTTP user-agent string sent to trackers.
 	// Leave empty to use anacrolix/torrent's default.
 	HTTPUserAgent string

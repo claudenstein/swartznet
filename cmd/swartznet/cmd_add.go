@@ -33,6 +33,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		leechOnly    bool
 		noIndex      bool
 		apiAddr      string
+		regtest      bool
 	)
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for downloaded content")
 	fs.StringVar(&indexDir, "index-dir", "", "Bleve index directory (default: ~/.local/share/swartznet/index)")
@@ -42,6 +43,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&leechOnly, "leech-only", false, "disable uploading (debug)")
 	fs.BoolVar(&noIndex, "no-index", false, "don't write this torrent to the local index")
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
+	fs.BoolVar(&regtest, "regtest", false, "regtest mode: accelerated publisher/companion timings (TESTING ONLY — never run against mainnet)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -64,6 +66,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	cfg.DisableDHT = noDHT
 	cfg.DisableDHTPublish = noDHTPublish
 	cfg.NoUpload = leechOnly
+	cfg.Regtest = regtest
 
 	log := newLogger(stderr)
 	ctx, cancel := signalContext(context.Background())
@@ -93,7 +96,23 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	var compPub *companion.Publisher
 	if idx != nil && eng.PointerPutter() != nil && eng.Identity() != nil && cfg.CompanionDir != "" {
 		opts := companion.DefaultPublisherOptions()
-		opts.Dir = cfg.CompanionDir
+		if cfg.Regtest {
+			// M15a: regtest mode accelerates the companion
+			// publish cadence alongside the dhtindex publisher
+			// so scenario tests don't wait an hour to see the
+			// first companion torrent.
+			opts = companion.RegtestPublisherOptions()
+		}
+		// M15a bug fix: the companion JSON payload MUST land in
+		// the same directory anacrolix's file-storage layer
+		// reads from, or the publisher's torrent will have no
+		// verifiable bytes and subscribers will stall on the
+		// download. anacrolix reads from cfg.DataDir + info.Name,
+		// so the companion publisher writes its JSON.gz and
+		// .torrent wrapper to cfg.DataDir as well. The old
+		// cfg.CompanionDir field is now redundant (kept for
+		// back-compat; see docs/08-operations.md).
+		opts.Dir = cfg.DataDir
 		opts.PublisherKey = eng.Identity().PublicKeyBytes()
 		var err error
 		compPub, err = companion.NewPublisher(idx, eng.PointerPutter(), eng, opts, log)

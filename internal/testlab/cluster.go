@@ -49,14 +49,24 @@ type Cluster struct {
 
 // Node wraps a single *engine.Engine plus the per-node state a
 // test needs to inspect (index handle, identity, per-node
-// logger output).
+// logger output). All state-directory fields are absolute paths
+// rooted at t.TempDir() so scenario tests can locate files on
+// disk without reaching into the engine's config.
 type Node struct {
-	Eng      *engine.Engine
-	Index    *indexer.Index
-	LogBuf   *syncedBuffer
-	DataDir  string
-	IndexDir string
+	Eng          *engine.Engine
+	Index        *indexer.Index
+	LogBuf       *syncedBuffer
+	DataDir      string
+	IndexDir     string
+	companionDir string
 }
+
+// CompanionDir returns the directory the node would use for
+// the F3 companion publisher's on-disk artefacts (gzipped JSON
+// content index + wrapping .torrent). Scenario tests use it
+// when constructing a companion.Publisher directly rather than
+// relying on the engine's automatic wiring.
+func (n *Node) CompanionDir() string { return n.companionDir }
 
 // syncedBuffer is a bytes.Buffer with a mutex so per-node
 // loggers don't race when the test goroutine reads the tail.
@@ -127,8 +137,19 @@ func (c *Cluster) spawnNode(t *testing.T, idx int) *Node {
 	cfg.CompanionFollowFile = filepath.Join(root, "follows.json")
 	cfg.ListenPort = 0 // OS-assigned
 	cfg.DisableDHT = true
-	cfg.Seed = false
-	cfg.NoUpload = true // tests don't upload
+	// Seed = true so scenario tests that actually transfer
+	// data between nodes (e.g. the M14e F3 companion scenario)
+	// can do so — anacrolix won't serve data to peers when
+	// Seed is false. NoUpload is left at its zero value
+	// (false) for the same reason.
+	cfg.Seed = true
+	cfg.NoUpload = false
+	// M15a: regtest mode accelerates every production timer so
+	// scenario tests see publish/refresh events in seconds
+	// instead of hours. Mandatory for the testlab harness —
+	// without it the M14e F3 companion scenario would need to
+	// wait 3600s for the first refresh tick.
+	cfg.Regtest = true
 
 	buf := &syncedBuffer{}
 	// Debug-level logging helps when a scenario fails to
@@ -167,11 +188,12 @@ func (c *Cluster) spawnNode(t *testing.T, idx int) *Node {
 	}
 
 	return &Node{
-		Eng:      eng,
-		Index:    index,
-		LogBuf:   buf,
-		DataDir:  cfg.DataDir,
-		IndexDir: cfg.IndexDir,
+		Eng:          eng,
+		Index:        index,
+		LogBuf:       buf,
+		DataDir:      cfg.DataDir,
+		IndexDir:     cfg.IndexDir,
+		companionDir: cfg.CompanionDir,
 	}
 }
 

@@ -80,6 +80,20 @@ func DefaultPublisherOptions() PublisherOptions {
 	}
 }
 
+// RegtestPublisherOptions returns the accelerated options used
+// in regtest mode. Same philosophy as
+// dhtindex.RegtestPublisherOptions — shrink every production
+// time constant so scenario tests run in seconds, not hours.
+// NEVER use this in production.
+func RegtestPublisherOptions() PublisherOptions {
+	return PublisherOptions{
+		Interval:    10 * time.Second,
+		MinInterval: 100 * time.Millisecond,
+		PutTimeout:  5 * time.Second,
+		Build:       DefaultBuildOptions(),
+	}
+}
+
 // Publisher is the long-running worker that owns the F3
 // companion-index publication path:
 //

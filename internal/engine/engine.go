@@ -370,6 +370,17 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		"peer_id", fmt.Sprintf("%x", cl.PeerID()),
 		"dht_enabled", !cfg.DisableDHT,
 	)
+	if cfg.Regtest {
+		// Warn-level so it cannot be missed in operator logs —
+		// a real node running regtest mode would hammer the
+		// mainline DHT and get rate-limited into the ground.
+		// The bitcoin-lessons doc specifically calls out that
+		// regtest must be impossible to mistake for production.
+		log.Warn("engine.regtest_mode_active",
+			"warning", "DO NOT USE IN PRODUCTION",
+			"reason", "accelerated publisher / companion timings would be detected as abuse on mainnet",
+		)
+	}
 
 	eng := &Engine{
 		cfg:     cfg,
@@ -492,9 +503,19 @@ func (e *Engine) startPublisher() error {
 			return fmt.Errorf("engine: load publisher manifest: %w", err)
 		}
 		e.manifest = mf
-		e.publisher = dhtindex.NewPublisher(put, mf, dhtindex.DefaultPublisherOptions(), e.log)
+		// M15a: regtest mode swaps in accelerated time
+		// constants so scenario tests run in seconds instead
+		// of hours.
+		pubOpts := dhtindex.DefaultPublisherOptions()
+		if e.cfg.Regtest {
+			pubOpts = dhtindex.RegtestPublisherOptions()
+		}
+		e.publisher = dhtindex.NewPublisher(put, mf, pubOpts, e.log)
 		e.publisher.Start()
-		e.log.Info("engine.publisher_started", "manifest", e.cfg.PublisherManifest)
+		e.log.Info("engine.publisher_started",
+			"manifest", e.cfg.PublisherManifest,
+			"refresh_interval", pubOpts.RefreshInterval.String(),
+		)
 	}
 
 	// Build the matching lookup handle. Self-pubkey is added as a
@@ -1160,6 +1181,22 @@ func (e *Engine) Close() error {
 // value (tests, LAN discovery, etc.).
 func (e *Engine) LocalPort() int {
 	return e.client.LocalPort()
+}
+
+// HandleByInfoHash looks up a *Handle by 20-byte infohash.
+// Returns an error if the infohash is not currently registered
+// with the engine. Intended for test use — the internal/testlab
+// harness calls this to reach an anacrolix *Torrent for
+// operations the wrapper doesn't expose directly (e.g.
+// VerifyData, Stats, peer-list inspection).
+func (e *Engine) HandleByInfoHash(ih [20]byte) (*Handle, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	h, ok := e.handles[metainfo.Hash(ih)]
+	if !ok {
+		return nil, fmt.Errorf("engine: no handle for infohash %x", ih[:8])
+	}
+	return h, nil
 }
 
 // AddTrustedPeerEngine wires every listen address of other into

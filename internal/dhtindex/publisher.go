@@ -53,6 +53,26 @@ func DefaultPublisherOptions() PublisherOptions {
 	}
 }
 
+// RegtestPublisherOptions returns the accelerated options used
+// in regtest mode. Every production time constant is shrunk so
+// scenario tests that depend on "what happens after the next
+// refresh" run in seconds instead of hours. Mirrors Bitcoin
+// Core's regtest-chain time-constant overrides.
+//
+// NEVER use this in production — a real node running regtest
+// mode would hammer the mainline DHT and be rate-limited into
+// the ground. The engine logs a prominent warning at startup
+// when Config.Regtest is true so accidental production use is
+// unmissable.
+func RegtestPublisherOptions() PublisherOptions {
+	return PublisherOptions{
+		RefreshInterval: 5 * time.Second,
+		PutTimeout:      5 * time.Second,
+		QueueSize:       64,
+		MinPutInterval:  100 * time.Millisecond,
+	}
+}
+
 // Publisher is the long-running worker that owns the manifest and
 // drives all DHT puts. Construct with NewPublisher, attach via the
 // engine, and Stop on shutdown.
