@@ -39,6 +39,22 @@ func newFanoutSender() *fanoutSender {
 	}
 }
 
+// setAfter sets the scripted response for a peer. Must be used
+// instead of direct map writes because the PeerAnnounce
+// goroutine from OnRemoteHandshake races with test setup.
+func (f *fanoutSender) setAfter(peer string, fn func(*swarmsearch.Protocol, string, swarmsearch.Query)) {
+	f.mu.Lock()
+	f.after[peer] = fn
+	f.mu.Unlock()
+}
+
+// setFail sets the error to return for sends to a peer.
+func (f *fanoutSender) setFail(peer string, err error) {
+	f.mu.Lock()
+	f.fail[peer] = err
+	f.mu.Unlock()
+}
+
 func (f *fanoutSender) Send(peer string, payload []byte) error {
 	f.mu.Lock()
 	f.sent = append(f.sent, fanoutMsg{peer: peer, payload: bytes.Clone(payload)})
@@ -150,15 +166,15 @@ func TestQueryFanoutAndMerge(t *testing.T) {
 	markCapable(p, "10.0.0.2:6881")
 	markCapable(p, "10.0.0.3:6881")
 
-	s.after["10.0.0.1:6881"] = scriptedResult([]swarmsearch.Hit{
+	s.setAfter("10.0.0.1:6881", scriptedResult([]swarmsearch.Hit{
 		{IH: ih(0xaa), N: "Ubuntu 24.04", Sz: 6 * 1024 * 1024 * 1024, S: 100, Rank: 500},
-	})
-	s.after["10.0.0.2:6881"] = scriptedResult([]swarmsearch.Hit{
+	}))
+	s.setAfter("10.0.0.2:6881", scriptedResult([]swarmsearch.Hit{
 		{IH: ih(0xaa), N: "", Sz: 0, S: 130, Rank: 400}, // higher seeders, empty name
-	})
-	s.after["10.0.0.3:6881"] = scriptedResult([]swarmsearch.Hit{
+	}))
+	s.setAfter("10.0.0.3:6881", scriptedResult([]swarmsearch.Hit{
 		{IH: ih(0xbb), N: "Debian Bookworm", Sz: 1 * 1024 * 1024 * 1024, S: 10, Rank: 300},
-	})
+	}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -209,11 +225,11 @@ func TestQueryPartialReject(t *testing.T) {
 	markCapable(p, "10.0.0.1:6881")
 	markCapable(p, "10.0.0.2:6881")
 
-	s.after["10.0.0.1:6881"] = scriptedResult([]swarmsearch.Hit{
+	s.setAfter("10.0.0.1:6881", scriptedResult([]swarmsearch.Hit{
 		{IH: ih(0x11), N: "Found", Rank: 700},
-	})
-	s.after["10.0.0.2:6881"] = scriptedReject(
-		swarmsearch.RejectRateLimited, "over quota")
+	}))
+	s.setAfter("10.0.0.2:6881", scriptedReject(
+		swarmsearch.RejectRateLimited, "over quota"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

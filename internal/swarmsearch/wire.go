@@ -186,3 +186,38 @@ func DecodeReject(payload []byte) (Reject, error) {
 	}
 	return rj, nil
 }
+
+// PeerAnnounce is msg_type 3: a one-shot announcement a peer
+// sends after the LTEP handshake to declare its ServiceBits
+// and protocol version. Fires once per connection direction
+// (initiator → target AND target → initiator). The recipient
+// stores the announced services on the peer's PeerState so the
+// query fan-out can filter by capability without a round trip.
+//
+// Unknown bits in the Services field MUST be ignored per the
+// M15b invariant. Old peers that don't send PeerAnnounce are
+// treated as "services unknown" (zero mask), which is fine —
+// they're still queried normally; they just can't be filtered.
+type PeerAnnounce struct {
+	MsgType  int    `bencode:"msg_type"`
+	Version  int    `bencode:"v"`                   // ProtocolVersion
+	Services uint64 `bencode:"services,omitempty"`  // ServiceBits as uint64
+}
+
+// EncodePeerAnnounce serialises a PeerAnnounce message.
+func EncodePeerAnnounce(pa PeerAnnounce) ([]byte, error) {
+	pa.MsgType = MsgTypePeerAnnounce
+	return bencode.Marshal(pa)
+}
+
+// DecodePeerAnnounce parses a PeerAnnounce message.
+func DecodePeerAnnounce(payload []byte) (PeerAnnounce, error) {
+	var pa PeerAnnounce
+	if err := bencode.Unmarshal(payload, &pa); err != nil {
+		return pa, fmt.Errorf("swarmsearch: decode peer_announce: %w", err)
+	}
+	if pa.MsgType != MsgTypePeerAnnounce {
+		return pa, fmt.Errorf("swarmsearch: not a peer_announce, msg_type=%d", pa.MsgType)
+	}
+	return pa, nil
+}

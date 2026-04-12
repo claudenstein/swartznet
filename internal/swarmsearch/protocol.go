@@ -71,6 +71,11 @@ type PeerState struct {
 	// SeenAt is when we most recently exchanged an LTEP handshake
 	// with this peer. Used for evicting stale entries.
 	SeenAt time.Time
+	// Services is the M15b service-bits bitfield announced by
+	// the peer via a PeerAnnounce (MsgType 3) message. Zero if
+	// the peer hasn't sent one (old clients or the announce
+	// hasn't arrived yet). Unknown bits must be ignored.
+	Services ServiceBits
 }
 
 // Protocol is the central state for the sn_search extension. A single
@@ -287,6 +292,27 @@ func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessag
 		// responds correctly to a real query.
 		if p.book != nil {
 			p.book.AddNew(addr)
+		}
+		// M15b-wire: announce our services to the new peer so
+		// it can see our capabilities without a round trip.
+		// Fire-and-forget because the outgoing write needs the
+		// client lock and OnRemoteHandshake runs from the read
+		// loop (same deadlock as the sn_search query reply
+		// path fixed in M14a).
+		p.mu.RLock()
+		sender := p.sender
+		p.mu.RUnlock()
+		if sender != nil {
+			pa := PeerAnnounce{
+				Version:  ProtocolVersion,
+				Services: uint64(DefaultServices()),
+			}
+			payload, err := EncodePeerAnnounce(pa)
+			if err == nil {
+				go func() {
+					_ = sender.Send(addr, payload)
+				}()
+			}
 		}
 		p.log.Info("swarmsearch.peer_capable",
 			"peer", addr,

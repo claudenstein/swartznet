@@ -121,7 +121,24 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 		}
 		p.routeReject(peerAddr, rj)
 	case MsgTypePeerAnnounce:
-		p.log.Debug("swarmsearch.rx_peer_announce", "peer", peerAddr)
+		pa, err := DecodePeerAnnounce(payload)
+		if err != nil {
+			p.log.Debug("swarmsearch.rx_peer_announce.decode_err",
+				"peer", peerAddr, "err", err)
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_peer_announce")
+			return
+		}
+		p.mu.Lock()
+		if ps, ok := p.peers[peerAddr]; ok {
+			ps.Services = ServiceBits(pa.Services)
+			ps.Version = pa.Version
+		}
+		p.mu.Unlock()
+		p.log.Info("swarmsearch.rx_peer_announce",
+			"peer", peerAddr,
+			"version", pa.Version,
+			"services", pa.Services,
+		)
 	default:
 		p.log.Debug("swarmsearch.unknown_msg_type",
 			"peer", peerAddr, "msg_type", hdr.MsgType)
