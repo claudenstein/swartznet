@@ -1,0 +1,94 @@
+# SwartzNet Layer-B testbed — multi-container scenarios.
+#
+# Usage:
+#   # Build the binary first:
+#   scripts/build-release.sh testbed
+#
+#   # Healthy 3-node scenario (no network emulation):
+#   docker-compose up --build
+#
+#   # With netem (home DSL simulation):
+#   NETEM_PROFILE=/netem/home-dsl.sh docker-compose up --build
+#
+#   # Run the observer-side scenario script:
+#   testbed/scenarios/s1-healthy-search.sh
+#
+# All nodes run in --regtest mode so publisher/companion timings
+# are accelerated. No real mainline DHT is contacted.
+#
+# The network "swartznet" is a Docker bridge. Nodes discover
+# each other by hostname (seed-1, seed-2, leech-1). Each node's
+# HTTP API is exposed on localhost at different ports so the
+# scenario scripts can probe them individually.
+
+services:
+  # seed-1: pre-populates its index on startup via a magnet.
+  # In regtest mode the companion publisher fires within 10s.
+  seed-1:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-seed-1
+    hostname: seed-1
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+    ports:
+      - "17654:7654"
+    volumes:
+      - ./netem:/netem:ro
+    cap_add:
+      - NET_ADMIN  # required for tc netem
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=testbed-seed-1"
+    networks:
+      - swartznet
+
+  # seed-2: independent seed with different content.
+  seed-2:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-seed-2
+    hostname: seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+    ports:
+      - "17655:7654"
+    volumes:
+      - ./netem:/netem:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&dn=testbed-seed-2"
+    networks:
+      - swartznet
+
+  # leech-1: starts empty, discovers content via Layer S.
+  leech-1:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-leech-1
+    hostname: leech-1
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+    ports:
+      - "17656:7654"
+    volumes:
+      - ./netem:/netem:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=testbed-leech-1"
+    networks:
+      - swartznet
+
+networks:
+  swartznet:
+    driver: bridge
