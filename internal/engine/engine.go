@@ -233,7 +233,8 @@ func (h *Handle) FileEvents() <-chan FileCompleteEvent {
 // the data directory is created if missing. The underlying Client is started
 // in the background (it listens for peers and joins the DHT if enabled).
 func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, error) {
-	_ = ctx // reserved: future versions may use ctx for bootstrap timeouts
+	// ctx is used for the M16e feeler goroutine lifecycle.
+	// Cancelling it stops the feeler alongside the engine.
 	if log == nil {
 		log = slog.Default()
 	}
@@ -394,6 +395,15 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// find specific peers by address. The callbacks above and this
 	// sender share the same peerTracker instance.
 	swarm.SetSender(&swarmSender{peers: peers})
+	// M16e: start the feeler goroutine that periodically probes
+	// random "new" peers to promote them to "tried". Mirrors
+	// Bitcoin Core's feeler connection pattern. The goroutine
+	// runs until ctx is cancelled (engine shutdown).
+	feelerInterval := swarmsearch.FeelerIntervalProd
+	if cfg.Regtest {
+		feelerInterval = swarmsearch.FeelerIntervalRegtest
+	}
+	swarm.StartFeeler(ctx, feelerInterval)
 
 	// Load the M5 spam-resistance state (Bloom filter + reputation
 	// tracker) before the publisher / lookup so the lookup can be

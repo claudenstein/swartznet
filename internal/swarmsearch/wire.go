@@ -200,8 +200,8 @@ func DecodeReject(payload []byte) (Reject, error) {
 // they're still queried normally; they just can't be filtered.
 type PeerAnnounce struct {
 	MsgType  int    `bencode:"msg_type"`
-	Version  int    `bencode:"v"`                   // ProtocolVersion
-	Services uint64 `bencode:"services,omitempty"`  // ServiceBits as uint64
+	Version  int    `bencode:"v"`                  // ProtocolVersion
+	Services uint64 `bencode:"services,omitempty"` // ServiceBits as uint64
 }
 
 // EncodePeerAnnounce serialises a PeerAnnounce message.

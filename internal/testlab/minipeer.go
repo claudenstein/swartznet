@@ -106,7 +106,7 @@ func (mp *MiniPeer) SendExtended(extID int, payload []byte) error {
 	msgLen := 2 + len(payload) // msg_type + ext_id + payload
 	buf := make([]byte, 4+msgLen)
 	binary.BigEndian.PutUint32(buf[0:4], uint32(msgLen))
-	buf[4] = 20       // BEP-10 extended
+	buf[4] = 20 // BEP-10 extended
 	buf[5] = byte(extID)
 	copy(buf[6:], payload)
 	_, err := mp.conn.Write(buf)
