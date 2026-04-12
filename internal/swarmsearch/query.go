@@ -156,12 +156,7 @@ func (p *Protocol) Query(ctx context.Context, req QueryRequest) (*QueryResponse,
 	// point won't receive this query — that is intentional, so the
 	// result is bounded.
 	peerSnap := p.KnownPeers()
-	var targets []PeerState
-	for _, ps := range peerSnap {
-		if ps.Supported {
-			targets = append(targets, ps)
-		}
-	}
+	targets := p.selectTargets(peerSnap)
 	if len(targets) == 0 {
 		return nil, ErrNoCapablePeers
 	}
@@ -298,6 +293,81 @@ func (p *Protocol) routeReject(peerAddr string, r Reject) {
 // responses, summing ranks, taking the max seeder count, and
 // preserving the first non-empty name/size. Returns the merged list
 // sorted by score descending.
+// FeelerCount is the maximum number of "new" (untried) peers
+// included in each query's fan-out alongside all tried peers.
+// Feelers give untried peers a chance to demonstrate correct
+// behavior and earn promotion to tried, while keeping the
+// majority of fan-out slots for peers that already have a
+// track record. Bitcoin's feeler connections serve the exact
+// same purpose.
+const FeelerCount = 2
+
+// selectTargets builds the fan-out target list for a Query.
+// If a PeerBook is wired in, the target set is:
+//
+//	all tried peers (high confidence, always queried)
+//	+ up to FeelerCount random new peers (untried → promotion chance)
+//
+// If the book is empty (testlab Cluster before any queries,
+// or a fresh install) the method falls back to "all supported
+// peers" so the first query bootstraps the book.
+func (p *Protocol) selectTargets(snap []PeerState) []PeerState {
+	// Phase 1: build the candidate set of supported peers.
+	var supported []PeerState
+	for _, ps := range snap {
+		if ps.Supported {
+			supported = append(supported, ps)
+		}
+	}
+	if len(supported) == 0 {
+		return nil
+	}
+
+	// Fall back to all-supported in two cases:
+	// 1. No book wired (test harness / backwards compat).
+	// 2. Zero tried peers — the feeler cap is meaningless until
+	//    there IS a trusted core to prefer. Sending to all
+	//    supported peers on the first few queries bootstraps
+	//    the tried table via the Promote path, after which
+	//    subsequent queries use the tried-preferred split.
+	if p.book == nil || p.book.TriedCount() == 0 {
+		return supported
+	}
+
+	// Phase 2: split supported peers into tried vs. new using
+	// the book's classification.
+	triedSet := make(map[string]bool)
+	for _, a := range p.book.TriedAddrs() {
+		triedSet[a] = true
+	}
+
+	var targets []PeerState
+	var feelerCandidates []PeerState
+	for _, ps := range supported {
+		if triedSet[ps.Addr] {
+			targets = append(targets, ps) // always include
+		} else {
+			feelerCandidates = append(feelerCandidates, ps)
+		}
+	}
+
+	// Add up to FeelerCount new peers as feelers.
+	feelers := FeelerCount
+	if feelers > len(feelerCandidates) {
+		feelers = len(feelerCandidates)
+	}
+	targets = append(targets, feelerCandidates[:feelers]...)
+
+	// If the tried set somehow has zero overlap with the
+	// supported set (e.g. all tried peers disconnected since
+	// last query), fall back to all supported so we don't
+	// silently return zero targets.
+	if len(targets) == 0 {
+		return supported
+	}
+	return targets
+}
+
 func mergeResponses(responses []incomingResult) []MergedHit {
 	merged := make(map[string]*MergedHit)
 
