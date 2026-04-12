@@ -296,3 +296,98 @@ func (m *MemoryPutterGetter) Items() []KeywordValue {
 	}
 	return out
 }
+
+// SharedMemoryStore is a multi-publisher in-process key-value
+// map for BEP-44-style mutable items. Unlike MemoryPutterGetter
+// (one fixed publisher), a SharedMemoryStore can issue a Putter
+// per publisher while sharing the same underlying storage, so
+// multiple in-process nodes can publish under their own ed25519
+// keys and every node's Getter reads from the same view.
+//
+// Used by the internal/testlab package to run Layer-D scenarios
+// without a real DHT. Production code should never use this.
+type SharedMemoryStore struct {
+	mu    sync.Mutex
+	store map[[20]byte]storedItem
+}
+
+// NewSharedMemoryStore constructs an empty shared store.
+func NewSharedMemoryStore() *SharedMemoryStore {
+	return &SharedMemoryStore{
+		store: make(map[[20]byte]storedItem),
+	}
+}
+
+// PutterFor returns a Putter that writes to the shared store
+// under the given ed25519 private key. The key is captured at
+// call time; later changes to the key slice have no effect.
+func (s *SharedMemoryStore) PutterFor(priv ed25519.PrivateKey) Putter {
+	var pub [32]byte
+	if p, ok := priv.Public().(ed25519.PublicKey); ok {
+		copy(pub[:], p)
+	}
+	return &sharedPutter{store: s, priv: priv, pub: pub}
+}
+
+// Getter returns a Getter that reads from the shared store.
+// Multiple calls return independent handles but they all read
+// from the same underlying map.
+func (s *SharedMemoryStore) Getter() Getter {
+	return &sharedGetter{store: s}
+}
+
+// Items returns every KeywordValue currently in the store, in
+// unspecified order. Used by tests to assert what was published.
+func (s *SharedMemoryStore) Items() []KeywordValue {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]KeywordValue, 0, len(s.store))
+	for _, it := range s.store {
+		out = append(out, it.value)
+	}
+	return out
+}
+
+// sharedPutter is a Putter bound to one publisher key, writing
+// to a SharedMemoryStore.
+type sharedPutter struct {
+	store *SharedMemoryStore
+	priv  ed25519.PrivateKey
+	pub   [32]byte
+}
+
+func (p *sharedPutter) Put(ctx context.Context, salt []byte, value KeywordValue) error {
+	if _, err := EncodeValue(value); err != nil {
+		return err
+	}
+	target := sha1.Sum(append(p.pub[:], salt...))
+	p.store.mu.Lock()
+	defer p.store.mu.Unlock()
+	prev := p.store.store[target]
+	p.store.store[target] = storedItem{
+		pubkey: p.pub,
+		salt:   append([]byte(nil), salt...),
+		value:  value,
+		seq:    prev.seq + 1,
+		stored: time.Now(),
+	}
+	return nil
+}
+
+// sharedGetter is a Getter reading from a SharedMemoryStore.
+// The Get path does not verify signatures — it's a test-only
+// fake — so any caller can look up any (pubkey, salt) target.
+type sharedGetter struct {
+	store *SharedMemoryStore
+}
+
+func (g *sharedGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error) {
+	target := sha1.Sum(append(pubkey[:], salt...))
+	g.store.mu.Lock()
+	defer g.store.mu.Unlock()
+	item, ok := g.store.store[target]
+	if !ok {
+		return KeywordValue{}, errors.New("dhtindex: not found")
+	}
+	return item.value, nil
+}
