@@ -297,6 +297,28 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// arrives. We filter to sn_search frames by looking up the local
 	// extension id in the peer's map, and dispatch to the protocol
 	// with a reply closure bound to this exact connection.
+	//
+	// CRITICAL: anacrolix's mainReadLoop holds the client lock while
+	// dispatching this callback (peerconn.go mainReadLoop). Two
+	// things go wrong if we handle the message synchronously:
+	//
+	//  1. Deadlock: handleQuery eventually calls reply(), which
+	//     invokes pc.WriteExtendedMessage, which tries to re-acquire
+	//     the same client lock — self-deadlock on the read-loop
+	//     goroutine. The entire client freezes.
+	//  2. Performance: handleQuery runs a Bleve search synchronously
+	//     before producing a reply. That can take many milliseconds
+	//     or more on a large index. While it runs, the client lock
+	//     is held, which means NO peer on this client can send or
+	//     receive ANY message — one slow query stalls the whole
+	//     peer set.
+	//
+	// The fix: dispatch the entire HandleMessage call to a goroutine.
+	// The callback returns immediately, the read loop releases the
+	// lock, and sn_search work runs entirely off the critical path.
+	// The payload slice is copied because anacrolix reuses the
+	// decoder's buffer across messages.
+	swarmLog := log
 	tc.Callbacks.PeerConnReadExtensionMessage = append(
 		tc.Callbacks.PeerConnReadExtensionMessage,
 		func(ev torrent.PeerConnReadExtensionMessageEvent) {
@@ -305,10 +327,28 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 				return
 			}
 			peerAddr := ev.PeerConn.RemoteAddr.String()
-			reply := func(body []byte) error {
-				return ev.PeerConn.WriteExtendedMessage(swarmsearch.ExtensionName, body)
-			}
-			swarm.HandleMessage(peerAddr, ev.Payload, reply)
+			pc := ev.PeerConn
+			// Copy the payload: anacrolix's decoder buffer can be
+			// overwritten by the next message once we return from
+			// this callback.
+			payload := append([]byte(nil), ev.Payload...)
+			go func() {
+				reply := func(body []byte) error {
+					// Spawn ANOTHER goroutine for the write so
+					// the HandleMessage code path never blocks
+					// on the client lock if multiple writes
+					// queue up.
+					bodyCopy := append([]byte(nil), body...)
+					go func() {
+						if err := pc.WriteExtendedMessage(swarmsearch.ExtensionName, bodyCopy); err != nil {
+							swarmLog.Debug("engine.swarm.reply_err",
+								"peer", peerAddr, "err", err)
+						}
+					}()
+					return nil
+				}
+				swarm.HandleMessage(peerAddr, payload, reply)
+			}()
 		},
 	)
 	// PeerConnClosed lets us drop stale peer state from the
@@ -1120,4 +1160,30 @@ func (e *Engine) Close() error {
 // value (tests, LAN discovery, etc.).
 func (e *Engine) LocalPort() int {
 	return e.client.LocalPort()
+}
+
+// AddTrustedPeerEngine wires every listen address of other into
+// this engine's peer set for the given infohash, so the two
+// engines can connect without a running DHT or tracker. The
+// caller must have already added the same torrent (same
+// infohash) to both engines via AddTorrentMetaInfo / AddInfoHash.
+//
+// Used by the internal/testlab package to build in-process
+// multi-node clusters. Production code should not call this —
+// peers discover each other through the DHT / trackers / PEX in
+// the normal path.
+//
+// Returns the number of peer addresses that were added, or an
+// error if this engine has no handle for the given infohash.
+func (e *Engine) AddTrustedPeerEngine(ih [20]byte, other *Engine) (int, error) {
+	if other == nil {
+		return 0, errors.New("engine: nil other engine")
+	}
+	e.mu.Lock()
+	h, ok := e.handles[metainfo.Hash(ih)]
+	e.mu.Unlock()
+	if !ok {
+		return 0, fmt.Errorf("engine: no handle for infohash %x", ih[:8])
+	}
+	return h.T.AddClientPeer(other.client), nil
 }
