@@ -64,6 +64,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdFlag(rest, stdout, stderr)
 	case "confirm":
 		return cmdConfirm(rest, stdout, stderr)
+	case "create":
+		return cmdCreate(rest, stdout, stderr)
+	case "index":
+		return cmdIndex(rest, stdout, stderr)
+	case "files":
+		return cmdFiles(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -83,6 +89,9 @@ Commands:
   status                            Show the running daemon's index/swarm/publisher state.
   confirm <infohash>                Mark an infohash as known-good (boosts it in DHT lookups).
   flag <infohash>                   Mark an infohash as spam (lowers reputation of every claiming indexer).
+  create <path> -o <out.torrent>    Create a new .torrent file from local content.
+  index <infohash> <on|off>         Toggle per-torrent indexing on a running daemon.
+  files <infohash> [<idx> <prio>]   List files in a torrent, or set file priority (none/normal/high).
   version                           Print the version and exit.
   help                              Print this message.
 
