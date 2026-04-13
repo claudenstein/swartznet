@@ -43,6 +43,11 @@ func New(d *daemon.Daemon, version string) *App {
 
 	win := a.NewWindow("SwartzNet " + version)
 	win.SetIcon(AppIcon)
+	// Explicitly declare the window as user-resizable. Fyne's
+	// default is already false-for-fixed (i.e. resizable), but
+	// some window-manager + compositor combinations ignore the
+	// implicit default unless we state it outright.
+	win.SetFixedSize(false)
 	// Restore previous window size if we have one, otherwise
 	// default to a sensible 900x600.
 	prefs := a.Preferences()
@@ -70,12 +75,17 @@ func New(d *daemon.Daemon, version string) *App {
 	guiApp.dl = dl
 	guiApp.sr = sr
 
+	// Wrap each tab's content in a scroll container so the
+	// window is not locked to the sum of every tab's minimum
+	// size. Without this, Fyne would advertise a 1000+ px
+	// minimum on both axes to the window manager — a typical
+	// laptop with a 1366×768 screen couldn't shrink the window.
 	tabs := container.NewAppTabs(
-		container.NewTabItem("Downloads", dl.content),
-		container.NewTabItem("Search", sr.content),
-		container.NewTabItem("Status", st.content),
-		container.NewTabItem("Companion", cp.content),
-		container.NewTabItem("Settings", se.content),
+		container.NewTabItem("Downloads", container.NewScroll(dl.content)),
+		container.NewTabItem("Search", container.NewScroll(sr.content)),
+		container.NewTabItem("Status", container.NewScroll(st.content)),
+		container.NewTabItem("Companion", container.NewScroll(cp.content)),
+		container.NewTabItem("Settings", container.NewScroll(se.content)),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
 	guiApp.tabs = tabs
@@ -252,11 +262,15 @@ func (a *App) showAbout() {
 // titleLoop updates the window title with aggregate download +
 // upload throughput across every active torrent. Runs at 2 s
 // cadence, matching the Downloads tab's own polling so the two
-// views stay in sync.
+// views stay in sync. Only calls SetTitle when the computed
+// title actually changes, because some window managers treat
+// frequent title changes as a signal that the app is busy and
+// throttle other events (including interactive resize).
 func (a *App) titleLoop(ctx context.Context) {
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	base := "SwartzNet " + a.version
+	lastTitle := base
 	for {
 		select {
 		case <-ctx.Done():
@@ -277,6 +291,10 @@ func (a *App) titleLoop(ctx context.Context) {
 					humanBytes(totalUp),
 				)
 			}
+			if title == lastTitle {
+				continue
+			}
+			lastTitle = title
 			fyne.Do(func() { a.win.SetTitle(title) })
 		}
 	}
