@@ -167,4 +167,7 @@ var extTypes = map[string]string{
 	".epub":     "application/epub+zip",
 	".docx":     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 	".odt":      "application/vnd.oasis.opendocument.text",
+	".rtf":      "application/rtf",
+	".tar":      "application/x-tar",
+	".tgz":      "application/gzip",
 }

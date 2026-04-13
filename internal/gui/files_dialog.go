@@ -47,8 +47,9 @@ type filesDialog struct {
 	mu    sync.RWMutex
 	files []engine.FileSnapshot
 
-	list *widget.List
-	dlg  dialog.Dialog
+	list   *widget.List
+	dlg    dialog.Dialog
+	sortBy string // "index" | "path" | "size" | "progress" | "priority"
 }
 
 func (fd *filesDialog) build(torrentName string) {
@@ -114,7 +115,26 @@ func (fd *filesDialog) build(torrentName string) {
 	noneBtn := widget.NewButton("Deselect All", func() {
 		fd.setAllPriorities(engine.FilePriorityNone)
 	})
-	bulk := container.NewHBox(allBtn, noneBtn)
+
+	// Sort dropdown.
+	fd.sortBy = "index"
+	sortSelect := widget.NewSelect(
+		[]string{"index", "path", "size", "progress", "priority"},
+		func(s string) {
+			fd.mu.Lock()
+			fd.sortBy = s
+			fd.sortFilesLocked()
+			fd.mu.Unlock()
+			fd.list.Refresh()
+		},
+	)
+	sortSelect.SetSelected("index")
+
+	bulk := container.NewHBox(
+		allBtn, noneBtn,
+		widget.NewSeparator(),
+		widget.NewLabel("Sort by:"), sortSelect,
+	)
 
 	header := container.NewVBox(
 		widget.NewLabelWithStyle("Files in "+torrentName,
@@ -151,9 +171,47 @@ func (fd *filesDialog) pollLoop(ctx context.Context) {
 			fyne.Do(func() {
 				fd.mu.Lock()
 				fd.files = files
+				fd.sortFilesLocked()
 				fd.mu.Unlock()
 				fd.list.Refresh()
 			})
+		}
+	}
+}
+
+// sortFilesLocked reorders fd.files in place according to fd.sortBy.
+// Caller must hold fd.mu write-locked.
+func (fd *filesDialog) sortFilesLocked() {
+	var less func(a, b engine.FileSnapshot) bool
+	switch fd.sortBy {
+	case "path":
+		less = func(a, b engine.FileSnapshot) bool { return a.DisplayPath < b.DisplayPath }
+	case "size":
+		less = func(a, b engine.FileSnapshot) bool { return a.Length < b.Length }
+	case "progress":
+		less = func(a, b engine.FileSnapshot) bool { return a.Progress < b.Progress }
+	case "priority":
+		// Sort "none" < "normal" < "high".
+		prioRank := func(p string) int {
+			switch p {
+			case "none":
+				return 0
+			case "normal":
+				return 1
+			case "high":
+				return 2
+			}
+			return 1
+		}
+		less = func(a, b engine.FileSnapshot) bool { return prioRank(a.Priority) < prioRank(b.Priority) }
+	default: // "index" (default)
+		less = func(a, b engine.FileSnapshot) bool { return a.Index < b.Index }
+	}
+	// Simple insertion sort — torrents typically have <1000 files.
+	s := fd.files
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && less(s[j], s[j-1]); j-- {
+			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
 }

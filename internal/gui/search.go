@@ -32,6 +32,7 @@ type searchTab struct {
 	limitEntry *widget.Entry
 	searchBtn  *widget.Button
 	statusLbl  *widget.Label
+	progress   *widget.ProgressBarInfinite
 
 	resultBox *fyne.Container
 }
@@ -58,6 +59,9 @@ func newSearchTab(_ context.Context, d *daemon.Daemon) *searchTab {
 
 	st.statusLbl = widget.NewLabel("")
 	st.statusLbl.TextStyle.Italic = true
+	st.progress = widget.NewProgressBarInfinite()
+	st.progress.Stop()
+	st.progress.Hide()
 
 	st.resultBox = container.NewVBox()
 
@@ -67,7 +71,7 @@ func newSearchTab(_ context.Context, d *daemon.Daemon) *searchTab {
 	)
 
 	queryRow := container.NewBorder(nil, nil, nil, st.searchBtn, st.queryEntry)
-	header := container.NewVBox(queryRow, optionsRow, st.statusLbl)
+	header := container.NewVBox(queryRow, optionsRow, st.statusLbl, st.progress)
 
 	scrollResults := container.NewVScroll(st.resultBox)
 	st.content = container.NewBorder(header, nil, nil, nil, scrollResults)
@@ -83,6 +87,8 @@ func (st *searchTab) runSearch() {
 
 	st.searchBtn.Disable()
 	st.statusLbl.SetText("Searching...")
+	st.progress.Show()
+	st.progress.Start()
 	st.resultBox.RemoveAll()
 
 	limit := 20
@@ -149,6 +155,8 @@ func (st *searchTab) runSearch() {
 
 		fyne.Do(func() {
 			st.searchBtn.Enable()
+			st.progress.Stop()
+			st.progress.Hide()
 			st.buildResults(q, localResp, localErr, swarmResp, swarmErr, dhtResp, dhtErr)
 		})
 	}()

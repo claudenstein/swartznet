@@ -17,16 +17,18 @@ type statusTab struct {
 	d       *daemon.Daemon
 
 	// Card labels (updated by polling goroutine).
-	indexCard   *widget.Card
-	indexLabels []*widget.Label
-	swarmCard   *widget.Card
-	swarmLabels []*widget.Label
-	pubCard     *widget.Card
-	pubLabels   []*widget.Label
-	bloomCard   *widget.Card
-	bloomLabels []*widget.Label
-	repCard     *widget.Card
-	repList     *widget.List
+	torrentsCard   *widget.Card
+	torrentsLabels []*widget.Label
+	indexCard      *widget.Card
+	indexLabels    []*widget.Label
+	swarmCard      *widget.Card
+	swarmLabels    []*widget.Label
+	pubCard        *widget.Card
+	pubLabels      []*widget.Label
+	bloomCard      *widget.Card
+	bloomLabels    []*widget.Label
+	repCard        *widget.Card
+	repList        *widget.List
 
 	// Reputation snapshot for the list widget.
 	repSnap []repRow
@@ -40,6 +42,22 @@ type repRow struct {
 
 func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 	st := &statusTab{d: d}
+
+	// Torrents card — aggregate counts + throughput across every
+	// active torrent. Complements the per-torrent Downloads tab.
+	st.torrentsLabels = makeLabelGroup(7)
+	st.torrentsCard = widget.NewCard("Torrents", "",
+		container.NewVBox(
+			labelRow("Total:", st.torrentsLabels[0]),
+			labelRow("Downloading:", st.torrentsLabels[1]),
+			labelRow("Seeding:", st.torrentsLabels[2]),
+			labelRow("Queued:", st.torrentsLabels[3]),
+			labelRow("Paused:", st.torrentsLabels[4]),
+			widget.NewSeparator(),
+			labelRow("Download rate:", st.torrentsLabels[5]),
+			labelRow("Upload rate:", st.torrentsLabels[6]),
+		),
+	)
 
 	// Index card.
 	st.indexLabels = makeLabelGroup(4)
@@ -103,6 +121,7 @@ func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 	st.repCard = widget.NewCard("Reputation", "", st.repList)
 
 	grid := container.NewAdaptiveGrid(2,
+		st.torrentsCard,
 		st.indexCard,
 		st.swarmCard,
 		st.pubCard,
@@ -133,6 +152,26 @@ func (st *statusTab) pollLoop(ctx context.Context) {
 }
 
 func (st *statusTab) refresh() {
+	// Torrents summary (counts by status + aggregate throughput).
+	snaps := st.d.Eng.TorrentSnapshots()
+	var total, downloading, seeding, queued, paused int
+	var totalDown, totalUp int64
+	for _, s := range snaps {
+		total++
+		switch s.Status {
+		case "downloading":
+			downloading++
+		case "seeding":
+			seeding++
+		case "queued":
+			queued++
+		case "paused":
+			paused++
+		}
+		totalDown += s.DownloadRate
+		totalUp += s.UploadRate
+	}
+
 	// Index stats.
 	var docCount, torrentCount, contentCount uint64
 	var dirBytes int64
@@ -196,6 +235,14 @@ func (st *statusTab) refresh() {
 	}
 
 	fyne.Do(func() {
+		st.torrentsLabels[0].SetText(fmt.Sprintf("%d", total))
+		st.torrentsLabels[1].SetText(fmt.Sprintf("%d", downloading))
+		st.torrentsLabels[2].SetText(fmt.Sprintf("%d", seeding))
+		st.torrentsLabels[3].SetText(fmt.Sprintf("%d", queued))
+		st.torrentsLabels[4].SetText(fmt.Sprintf("%d", paused))
+		st.torrentsLabels[5].SetText(rateStr(totalDown))
+		st.torrentsLabels[6].SetText(rateStr(totalUp))
+
 		st.indexLabels[0].SetText(fmt.Sprintf("%d", docCount))
 		st.indexLabels[1].SetText(fmt.Sprintf("%d", torrentCount))
 		st.indexLabels[2].SetText(fmt.Sprintf("%d", contentCount))
