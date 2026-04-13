@@ -43,7 +43,13 @@ func New(d *daemon.Daemon, version string) *App {
 
 	win := a.NewWindow("SwartzNet " + version)
 	win.SetIcon(AppIcon)
-	win.Resize(fyne.NewSize(900, 600))
+	// Restore previous window size if we have one, otherwise
+	// default to a sensible 900x600.
+	prefs := a.Preferences()
+	win.Resize(fyne.NewSize(
+		float32(prefs.FloatWithFallback("window.width", 900)),
+		float32(prefs.FloatWithFallback("window.height", 600)),
+	))
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -88,9 +94,13 @@ func New(d *daemon.Daemon, version string) *App {
 	// System tray (desktop-only feature).
 	guiApp.setupSystemTray()
 
-	// Close intercept — minimize to tray instead of quit when
-	// the tray is available; otherwise fall back to normal close.
+	// Close intercept — persist window size first, then either
+	// minimize to tray (desktop platform) or do a real close.
 	win.SetCloseIntercept(func() {
+		size := win.Canvas().Size()
+		prefs.SetFloat("window.width", float64(size.Width))
+		prefs.SetFloat("window.height", float64(size.Height))
+
 		if _, ok := a.(desktop.App); ok {
 			win.Hide()
 		} else {
@@ -101,6 +111,9 @@ func New(d *daemon.Daemon, version string) *App {
 
 	// Watch engine for new completed files and fire OS notifications.
 	go guiApp.notificationLoop(ctx)
+
+	// Live-update the window title with aggregate throughput.
+	go guiApp.titleLoop(ctx)
 
 	return guiApp
 }
@@ -234,6 +247,39 @@ func (a *App) showAbout() {
 
 	dialog.ShowCustom("About SwartzNet",
 		"Close", content, a.win)
+}
+
+// titleLoop updates the window title with aggregate download +
+// upload throughput across every active torrent. Runs at 2 s
+// cadence, matching the Downloads tab's own polling so the two
+// views stay in sync.
+func (a *App) titleLoop(ctx context.Context) {
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	base := "SwartzNet " + a.version
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			var totalDown, totalUp int64
+			for _, s := range a.daemon.Eng.TorrentSnapshots() {
+				totalDown += s.DownloadRate
+				totalUp += s.UploadRate
+			}
+			var title string
+			if totalDown == 0 && totalUp == 0 {
+				title = base
+			} else {
+				title = fmt.Sprintf("%s  —  ↓ %s/s   ↑ %s/s",
+					base,
+					humanBytes(totalDown),
+					humanBytes(totalUp),
+				)
+			}
+			fyne.Do(func() { a.win.SetTitle(title) })
+		}
+	}
 }
 
 // notificationLoop polls the engine for newly-completed torrents

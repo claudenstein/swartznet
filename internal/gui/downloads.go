@@ -27,6 +27,10 @@ type downloadsTab struct {
 	table    *widget.Table
 	selected int // -1 = none
 
+	// Empty-state overlay. Shown when there are no torrents;
+	// Hidden otherwise. Updated in pollLoop.
+	emptyState *fyne.Container
+
 	// Column sorting. sortCol is the column index currently used
 	// for sorting (-1 = insertion order from the engine, which
 	// is effectively FIFO by add-time). sortDesc toggles between
@@ -188,7 +192,24 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	// surface a context menu operating on the selected row.
 	tableWithMenu := newRightClickCapture(dl.table, dl.buildContextMenu)
 
-	dl.content = container.NewBorder(toolbar, nil, nil, nil, tableWithMenu)
+	// Empty-state overlay: shown on top of the table when there
+	// are no torrents yet. We use a Stack container; pollLoop
+	// shows/hides the overlay based on snapshot count.
+	emptyLabel := widget.NewLabelWithStyle(
+		"No torrents yet",
+		fyne.TextAlignCenter,
+		fyne.TextStyle{Bold: true},
+	)
+	emptyHint := widget.NewLabelWithStyle(
+		"Add a magnet link, import a .torrent file, or create a new torrent from local content.",
+		fyne.TextAlignCenter,
+		fyne.TextStyle{},
+	)
+	dl.emptyState = container.NewCenter(container.NewVBox(emptyLabel, emptyHint))
+	dl.emptyState.Hide()
+
+	body := container.NewStack(tableWithMenu, dl.emptyState)
+	dl.content = container.NewBorder(toolbar, nil, nil, nil, body)
 
 	// Background polling goroutine.
 	go dl.pollLoop(ctx)
@@ -283,6 +304,11 @@ func (dl *downloadsTab) pollLoop(ctx context.Context) {
 				dl.sortSnapsLocked()
 				dl.mu.Unlock()
 				dl.table.Refresh()
+				if len(snaps) == 0 {
+					dl.emptyState.Show()
+				} else {
+					dl.emptyState.Hide()
+				}
 			})
 		}
 	}
