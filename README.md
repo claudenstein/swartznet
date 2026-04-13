@@ -6,6 +6,8 @@
 
 SwartzNet behaves like any other BitTorrent client on the wire — a vanilla peer sees a normal BEP-3/5/9/10/44 connection — but it adds full-text search across the content you've downloaded, optional keyword search across every SwartzNet peer you're connected to, and a DHT-backed discovery layer that lets you find torrents by topic rather than just by infohash.
 
+![SwartzNet native GUI — Downloads tab](docs/screenshots/downloads.png)
+
 ---
 
 ## Features
@@ -110,6 +112,18 @@ swartznet-gui
 ```
 
 The window presents five tabs — Downloads, Search, Status, Companion, Settings — and the app runs in your system tray so closing the window doesn't stop the daemon. See [docs/08-operations.md](docs/08-operations.md#native-gui-v030) for a tour of each tab.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/status.png" width="420"><br><em>Status tab — live operational dashboard</em></td>
+    <td align="center"><img src="docs/screenshots/settings.png" width="420"><br><em>Settings — sharing, bandwidth, queue</em></td>
+  </tr>
+</table>
+
+Useful GUI flags for demos and scripting:
+
+- `--torrent <path.torrent>` — preload a `.torrent` file at startup (repeat for multiple).
+- `--tab <downloads|search|status|companion|settings>` — open on a specific tab.
 
 ### Or use the browser
 
