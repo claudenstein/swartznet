@@ -26,6 +26,13 @@ type downloadsTab struct {
 
 	table    *widget.Table
 	selected int // -1 = none
+
+	// Column sorting. sortCol is the column index currently used
+	// for sorting (-1 = insertion order from the engine, which
+	// is effectively FIFO by add-time). sortDesc toggles between
+	// ascending and descending.
+	sortCol  int
+	sortDesc bool
 }
 
 // Column definitions for the torrent table.
@@ -38,6 +45,8 @@ var dlColumns = []struct {
 	{"Progress", 100},
 	{"Size", 90},
 	{"Peers", 60},
+	{"↓ speed", 90},
+	{"↑ speed", 90},
 	{"Indexed", 70},
 }
 
@@ -45,6 +54,7 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	dl := &downloadsTab{
 		d:        d,
 		selected: -1,
+		sortCol:  -1, // no active sort — engine insertion order
 	}
 
 	dl.table = widget.NewTableWithHeaders(
@@ -83,7 +93,11 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 				label.SetText(humanBytes(s.Size))
 			case 4: // Peers
 				label.SetText(fmt.Sprintf("%d", s.ActivePeers))
-			case 5: // Indexed
+			case 5: // Download rate
+				label.SetText(rateStr(s.DownloadRate))
+			case 6: // Upload rate
+				label.SetText(rateStr(s.UploadRate))
+			case 7: // Indexed
 				if s.Indexing {
 					label.SetText("yes")
 				} else {
@@ -100,7 +114,19 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 		label := cell.(*widget.Label)
 		if id.Row == -1 && id.Col >= 0 && id.Col < len(dlColumns) {
 			label.TextStyle.Bold = true
-			label.SetText(dlColumns[id.Col].name)
+			text := dlColumns[id.Col].name
+			dl.mu.RLock()
+			active := dl.sortCol == id.Col
+			desc := dl.sortDesc
+			dl.mu.RUnlock()
+			if active {
+				if desc {
+					text += " ▼"
+				} else {
+					text += " ▲"
+				}
+			}
+			label.SetText(text)
 		}
 	}
 
@@ -109,6 +135,11 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	}
 
 	dl.table.OnSelected = func(id widget.TableCellID) {
+		if id.Row == -1 {
+			// Header row click: toggle sort on this column.
+			dl.toggleSort(id.Col)
+			return
+		}
 		dl.mu.Lock()
 		dl.selected = id.Row
 		dl.mu.Unlock()
@@ -249,9 +280,87 @@ func (dl *downloadsTab) pollLoop(ctx context.Context) {
 			fyne.Do(func() {
 				dl.mu.Lock()
 				dl.snaps = snaps
+				dl.sortSnapsLocked()
 				dl.mu.Unlock()
 				dl.table.Refresh()
 			})
+		}
+	}
+}
+
+// toggleSort cycles the sort state for the given column index:
+//   - click a different column → switch to ascending on that column
+//   - click the active column → switch to descending
+//   - click a column that's already descending → clear sort
+func (dl *downloadsTab) toggleSort(col int) {
+	if col < 0 || col >= len(dlColumns) {
+		return
+	}
+	dl.mu.Lock()
+	defer dl.mu.Unlock()
+	switch {
+	case dl.sortCol != col:
+		dl.sortCol = col
+		dl.sortDesc = false
+	case !dl.sortDesc:
+		dl.sortDesc = true
+	default:
+		dl.sortCol = -1
+		dl.sortDesc = false
+	}
+	dl.sortSnapsLocked()
+	dl.table.Refresh()
+}
+
+// sortSnapsLocked sorts dl.snaps in place according to dl.sortCol
+// and dl.sortDesc. Caller must hold dl.mu write-locked.
+func (dl *downloadsTab) sortSnapsLocked() {
+	if dl.sortCol < 0 {
+		return
+	}
+	less := snapLess(dl.sortCol, dl.sortDesc)
+	sortSnapsSlice(dl.snaps, less)
+}
+
+// snapLess returns the comparator for a given column + direction.
+func snapLess(col int, desc bool) func(a, b engine.TorrentSnapshot) bool {
+	base := func(a, b engine.TorrentSnapshot) bool {
+		switch col {
+		case 0: // Name
+			return a.Name < b.Name
+		case 1: // Status
+			return a.Status < b.Status
+		case 2: // Progress
+			return a.Progress < b.Progress
+		case 3: // Size
+			return a.Size < b.Size
+		case 4: // Peers
+			return a.ActivePeers < b.ActivePeers
+		case 5: // Download rate
+			return a.DownloadRate < b.DownloadRate
+		case 6: // Upload rate
+			return a.UploadRate < b.UploadRate
+		case 7: // Indexed
+			if a.Indexing == b.Indexing {
+				return a.Name < b.Name
+			}
+			return !a.Indexing && b.Indexing
+		}
+		return false
+	}
+	if desc {
+		return func(a, b engine.TorrentSnapshot) bool { return base(b, a) }
+	}
+	return base
+}
+
+// sortSnapsSlice sorts s in place using less. Stable insertion
+// sort — torrent lists are small enough that the O(n²) upper
+// bound doesn't matter.
+func sortSnapsSlice(s []engine.TorrentSnapshot, less func(a, b engine.TorrentSnapshot) bool) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && less(s[j], s[j-1]); j-- {
+			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
 }
@@ -430,6 +539,15 @@ type torrentFilter struct{}
 
 func (f *torrentFilter) Matches(uri fyne.URI) bool {
 	return uri.Extension() == ".torrent"
+}
+
+// rateStr formats a bytes/sec rate. Returns "—" for zero so an
+// idle torrent doesn't show a distracting "0 B/s".
+func rateStr(bps int64) string {
+	if bps <= 0 {
+		return "—"
+	}
+	return humanBytes(bps) + "/s"
 }
 
 // humanBytes formats a byte count with binary prefixes.

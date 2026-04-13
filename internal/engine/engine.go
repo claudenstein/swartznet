@@ -226,6 +226,18 @@ type Handle struct {
 	queueMu    sync.Mutex
 	queued     bool
 	queueOrder int64
+
+	// rateMu guards the transfer-rate sampling state. snapshotOf
+	// computes per-second download/upload rate by subtracting the
+	// previous reading's useful-data counts over wall-clock
+	// delta, so the GUI can show live throughput without us
+	// polling at a higher cadence than the GUI itself.
+	rateMu           sync.Mutex
+	lastRateSampleAt time.Time
+	lastBytesRead    int64
+	lastBytesWritten int64
+	lastDownloadRate int64
+	lastUploadRate   int64
 }
 
 // IsQueued reports whether this handle is currently waiting for a
@@ -234,6 +246,60 @@ func (h *Handle) IsQueued() bool {
 	h.queueMu.Lock()
 	defer h.queueMu.Unlock()
 	return h.queued
+}
+
+// sampleRate reads the current anacrolix ConnStats, subtracts the
+// previous reading to derive a per-second download/upload rate,
+// updates the cached state, and returns the fresh rates in
+// bytes/sec.
+//
+// Returns zeros on the first call (no previous reading to compare
+// against), and on calls that happen too close together (<100ms)
+// we return the last computed rate rather than a noisy value.
+// The expected call cadence is the GUI's 2-second poll; at that
+// cadence the rate samples stay useful and don't flicker.
+func (h *Handle) sampleRate() (downBPS, upBPS int64) {
+	if h.T.Info() == nil {
+		return 0, 0
+	}
+	stats := h.T.Stats()
+	now := time.Now()
+	readNow := stats.BytesReadUsefulData.Int64()
+	writeNow := stats.BytesWrittenData.Int64()
+
+	h.rateMu.Lock()
+	defer h.rateMu.Unlock()
+
+	prevAt := h.lastRateSampleAt
+	if prevAt.IsZero() {
+		// First reading — seed state, return zeros.
+		h.lastRateSampleAt = now
+		h.lastBytesRead = readNow
+		h.lastBytesWritten = writeNow
+		return 0, 0
+	}
+
+	elapsed := now.Sub(prevAt)
+	if elapsed < 100*time.Millisecond {
+		return h.lastDownloadRate, h.lastUploadRate
+	}
+
+	elapsedSec := elapsed.Seconds()
+	dr := int64(float64(readNow-h.lastBytesRead) / elapsedSec)
+	ur := int64(float64(writeNow-h.lastBytesWritten) / elapsedSec)
+	if dr < 0 {
+		dr = 0 // stats counters never go backwards, but be defensive
+	}
+	if ur < 0 {
+		ur = 0
+	}
+
+	h.lastRateSampleAt = now
+	h.lastBytesRead = readNow
+	h.lastBytesWritten = writeNow
+	h.lastDownloadRate = dr
+	h.lastUploadRate = ur
+	return dr, ur
 }
 
 func (h *Handle) setQueued(v bool) {
@@ -1092,6 +1158,14 @@ type TorrentSnapshot struct {
 	// torrents keep their metadata+indexing but do not download
 	// file contents until a slot opens.
 	Queued bool
+	// DownloadRate is the average bytes/second received from
+	// peers since the previous TorrentSnapshots call. Zero on
+	// the first call (no prior sample) and while the torrent
+	// has no metadata yet. Computed from anacrolix's
+	// BytesReadUsefulData counter.
+	DownloadRate int64
+	// UploadRate mirrors DownloadRate for bytes sent to peers.
+	UploadRate int64
 }
 
 // TorrentSnapshots returns a TorrentSnapshot for every torrent
@@ -1149,6 +1223,7 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 	completed := t.BytesCompleted()
 	missing := t.BytesMissing()
 	files := len(t.Files())
+	downRate, upRate := h.sampleRate()
 
 	var progress float64
 	if size > 0 {
@@ -1187,6 +1262,8 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 		Status:         status,
 		Indexing:       h.IsIndexing(),
 		Queued:         queued,
+		DownloadRate:   downRate,
+		UploadRate:     upRate,
 	}
 }
 

@@ -26,6 +26,8 @@ type App struct {
 	cancel  context.CancelFunc
 	version string
 	dl      *downloadsTab
+	sr      *searchTab
+	tabs    *container.AppTabs
 
 	// lastNotified guards against re-sending the same completion
 	// notification on every poll.
@@ -60,6 +62,7 @@ func New(d *daemon.Daemon, version string) *App {
 	cp := newCompanionTab(ctx, d)
 	se := newSettingsTab(d)
 	guiApp.dl = dl
+	guiApp.sr = sr
 
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Downloads", dl.content),
@@ -69,6 +72,9 @@ func New(d *daemon.Daemon, version string) *App {
 		container.NewTabItem("Settings", se.content),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
+	guiApp.tabs = tabs
+
+	guiApp.installShortcuts()
 
 	// Main menu: About + Quit.
 	aboutItem := fyne.NewMenuItem("About SwartzNet", func() {
@@ -97,6 +103,69 @@ func New(d *daemon.Daemon, version string) *App {
 	go guiApp.notificationLoop(ctx)
 
 	return guiApp
+}
+
+// installShortcuts wires up the keyboard shortcuts on the main
+// window's canvas:
+//
+//	Ctrl+N / Cmd+N   — Add magnet dialog (opens on Downloads tab).
+//	Ctrl+F / Cmd+F   — Switch to Search tab and focus the query
+//	                   entry. Users can start typing immediately.
+//	Ctrl+Q / Cmd+Q   — Quit the application.
+//	Delete           — Remove the currently-selected torrent row.
+//
+// Fyne uses desktop.CustomShortcut for key+modifier combinations;
+// plain key-only shortcuts like Delete go through Canvas.SetOnTypedKey.
+func (a *App) installShortcuts() {
+	canvas := a.win.Canvas()
+
+	ctrl := fyne.KeyModifierControl
+	// On macOS, Fyne's convention is that Super (Cmd) maps through
+	// the same modifier constant on every platform when the user's
+	// keyboard layout is macOS. Using Control is the widely-
+	// compatible default; macOS users who want Cmd-based shortcuts
+	// can be accommodated in a later pass if feedback warrants it.
+
+	addMagnet := &desktop.CustomShortcut{
+		KeyName:  fyne.KeyN,
+		Modifier: ctrl,
+	}
+	canvas.AddShortcut(addMagnet, func(_ fyne.Shortcut) {
+		a.tabs.SelectIndex(0) // Downloads tab
+		if a.dl != nil {
+			a.dl.showAddMagnetDialog()
+		}
+	})
+
+	focusSearch := &desktop.CustomShortcut{
+		KeyName:  fyne.KeyF,
+		Modifier: ctrl,
+	}
+	canvas.AddShortcut(focusSearch, func(_ fyne.Shortcut) {
+		a.tabs.SelectIndex(1) // Search tab
+		if a.sr != nil && a.sr.queryEntry != nil {
+			canvas.Focus(a.sr.queryEntry)
+		}
+	})
+
+	quit := &desktop.CustomShortcut{
+		KeyName:  fyne.KeyQ,
+		Modifier: ctrl,
+	}
+	canvas.AddShortcut(quit, func(_ fyne.Shortcut) {
+		a.cancel()
+		a.fyne.Quit()
+	})
+
+	// Delete key on a selected downloads row — bare key, no modifier.
+	// Use SetOnTypedKey so we catch it regardless of which widget
+	// holds focus (the table's own Tapped handler doesn't surface
+	// key events).
+	canvas.SetOnTypedKey(func(ev *fyne.KeyEvent) {
+		if ev.Name == fyne.KeyDelete && a.tabs.SelectedIndex() == 0 && a.dl != nil {
+			a.dl.removeSelected()
+		}
+	})
 }
 
 // setupSystemTray wires up the system tray menu if the platform
