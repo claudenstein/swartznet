@@ -139,6 +139,15 @@ type Config struct {
 	// is created on demand by the GUI; if it does not exist on
 	// startup the subscriber starts with an empty follow list.
 	CompanionFollowFile string
+
+	// TrustPath is the on-disk JSON path for the publisher
+	// trust list — ed25519 pubkeys whose signed .torrent files
+	// get implicit trust (auto-confirmed to the known-good
+	// Bloom filter, surfaced in search with a "trusted" flag).
+	// Default: ~/.local/share/swartznet/trust.json. Empty
+	// disables the trust list entirely (equivalent to trusting
+	// nobody automatically).
+	TrustPath string
 }
 
 // Default returns a Config populated with sensible defaults for a normal
@@ -161,6 +170,7 @@ func Default() Config {
 		MinIndexerScore:     0,
 		CompanionDir:        defaultCompanionDir(),
 		CompanionFollowFile: defaultCompanionFollowFile(),
+		TrustPath:           defaultTrustPath(),
 	}
 }
 
@@ -241,6 +251,12 @@ func defaultCompanionDir() string {
 // default path for the F3 companion subscriber's follow list.
 func defaultCompanionFollowFile() string {
 	return filepath.Join(swartznetShareRoot(), "companion-follows.json")
+}
+
+// defaultTrustPath returns the platform-appropriate default
+// path for the publisher trust list.
+func defaultTrustPath() string {
+	return filepath.Join(swartznetShareRoot(), "trust.json")
 }
 
 // swartznetShareRoot returns the per-user root directory SwartzNet uses for

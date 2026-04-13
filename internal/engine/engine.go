@@ -23,6 +23,7 @@ import (
 	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/signing"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
+	"github.com/swartznet/swartznet/internal/trust"
 )
 
 // Engine owns an anacrolix/torrent Client and wires SwartzNet's extension
@@ -55,6 +56,7 @@ type Engine struct {
 	bloom         *reputation.BloomFilter   // M5 known-good infohash filter; nil if disabled
 	tracker       *reputation.Tracker       // M5 per-pubkey reputation tracker; nil if disabled
 	sources       *reputation.SourceTracker // M9 per-hit source tracker; always non-nil after New
+	trust         *trust.Store              // v0.5 publisher trust list; nil if disabled
 
 	ulLimiter *rate.Limiter // upload rate limiter; rate.Inf when unlimited
 	dlLimiter *rate.Limiter // download rate limiter; rate.Inf when unlimited
@@ -112,6 +114,10 @@ func (e *Engine) KnownGoodBloom() *reputation.BloomFilter { return e.bloom }
 // after engine.New (the tracker has no on-disk persistence; it
 // repopulates naturally as the user runs queries).
 func (e *Engine) SourceTracker() *reputation.SourceTracker { return e.sources }
+
+// TrustStore returns the publisher-trust list, or nil if
+// trust-list loading failed or is disabled in the config.
+func (e *Engine) TrustStore() *trust.Store { return e.trust }
 
 // peerTracker maintains a thread-safe address → *torrent.PeerConn map.
 // Populated by the PeerConnAdded callback and cleaned by PeerConnClosed.
@@ -594,6 +600,21 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// unconditionally keeps the targeted-flag path always
 	// available even when the daemon was just restarted.
 	eng.sources = reputation.NewSourceTracker(0)
+
+	// Load (or create) the publisher trust list. Failures are
+	// non-fatal: a daemon without a trust list still works, it
+	// just can't auto-confirm downloads from signed publishers.
+	if cfg.TrustPath != "" {
+		if ts, err := trust.LoadOrCreate(cfg.TrustPath); err != nil {
+			log.Warn("engine.trust_load_err", "err", err)
+		} else {
+			eng.trust = ts
+			log.Info("engine.trust_loaded",
+				"path", cfg.TrustPath,
+				"entries", len(ts.List()),
+			)
+		}
+	}
 
 	// Load (or create) the persistent identity, then start a DHT
 	// publisher backed by it. Failures here are non-fatal: a node
@@ -1110,6 +1131,23 @@ func (e *Engine) autoIndex(h *Handle) {
 			SizeBytes: doc.SizeBytes,
 		})
 	}
+
+	// Auto-confirm torrents signed by a trusted publisher. A
+	// trusted publisher's signature is the strongest "this
+	// torrent is legitimate" signal we have: the user has
+	// explicitly added the pubkey to their trust list, so we
+	// don't need to wait for completion to mark it known-good.
+	if h.SignedBy() != "" && e.trust != nil && e.trust.IsTrusted(h.SignedBy()) {
+		if bf := e.KnownGoodBloom(); bf != nil {
+			ih := h.T.InfoHash()
+			bf.Add(ih[:])
+			e.log.Info("engine.bloom.trusted_publisher_confirmed",
+				"info_hash", ih.HexString(),
+				"pubkey", h.SignedBy(),
+				"label", e.trust.Label(h.SignedBy()),
+			)
+		}
+	}
 }
 
 // indexerDocFromTorrent extracts a TorrentDoc from a live anacrolix/torrent
@@ -1210,6 +1248,10 @@ type TorrentSnapshot struct {
 	// torrent was added via magnet / raw infohash. See the
 	// `internal/signing` package for the signing scheme.
 	SignedBy string
+	// TrustedPublisher is true when SignedBy is non-empty AND
+	// the pubkey is in the Engine's trust store. Lets the GUI
+	// render trusted torrents with a distinct badge.
+	TrustedPublisher bool
 }
 
 // TorrentSnapshots returns a TorrentSnapshot for every torrent
@@ -1220,7 +1262,14 @@ func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
 	handles := e.Torrents()
 	out := make([]TorrentSnapshot, 0, len(handles))
 	for _, h := range handles {
-		out = append(out, snapshotOf(h))
+		s := snapshotOf(h)
+		// Populate TrustedPublisher from the engine's trust
+		// store (snapshotOf itself has no engine reference, so
+		// this second-pass fill-in keeps the helper pure).
+		if s.SignedBy != "" && e.trust != nil && e.trust.IsTrusted(s.SignedBy) {
+			s.TrustedPublisher = true
+		}
+		out = append(out, s)
 	}
 	return out
 }

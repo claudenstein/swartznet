@@ -69,25 +69,26 @@ type TorrentFile struct {
 // here so the httpapi package does not import internal/engine.
 // The engine's snapshotter returns a slice of these directly.
 type TorrentSnapshot struct {
-	InfoHash       string  `json:"infohash"`
-	Name           string  `json:"name"`
-	Size           int64   `json:"size"`
-	BytesCompleted int64   `json:"bytes_completed"`
-	BytesMissing   int64   `json:"bytes_missing"`
-	Progress       float64 `json:"progress"`
-	Files          int     `json:"files"`
-	ActivePeers    int     `json:"active_peers"`
-	HalfOpenPeers  int     `json:"half_open_peers"`
-	PendingPeers   int     `json:"pending_peers"`
-	TotalPeers     int     `json:"total_peers"`
-	Seeders        int     `json:"seeders"`
-	Paused         bool    `json:"paused"`
-	Status         string  `json:"status"`
-	Indexing       bool    `json:"indexing"`
-	Queued         bool    `json:"queued"`
-	DownloadRate   int64   `json:"download_rate"`
-	UploadRate     int64   `json:"upload_rate"`
-	SignedBy       string  `json:"signed_by,omitempty"`
+	InfoHash         string  `json:"infohash"`
+	Name             string  `json:"name"`
+	Size             int64   `json:"size"`
+	BytesCompleted   int64   `json:"bytes_completed"`
+	BytesMissing     int64   `json:"bytes_missing"`
+	Progress         float64 `json:"progress"`
+	Files            int     `json:"files"`
+	ActivePeers      int     `json:"active_peers"`
+	HalfOpenPeers    int     `json:"half_open_peers"`
+	PendingPeers     int     `json:"pending_peers"`
+	TotalPeers       int     `json:"total_peers"`
+	Seeders          int     `json:"seeders"`
+	Paused           bool    `json:"paused"`
+	Status           string  `json:"status"`
+	Indexing         bool    `json:"indexing"`
+	Queued           bool    `json:"queued"`
+	DownloadRate     int64   `json:"download_rate"`
+	UploadRate       int64   `json:"upload_rate"`
+	SignedBy         string  `json:"signed_by,omitempty"`
+	TrustedPublisher bool    `json:"trusted_publisher,omitempty"`
 }
 
 // TorrentAdder is the narrow interface the HTTP API needs from

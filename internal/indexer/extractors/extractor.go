@@ -173,4 +173,10 @@ var extTypes = map[string]string{
 	".fb2":      "application/x-fictionbook+xml",
 	".pptx":     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	".odp":      "application/vnd.oasis.opendocument.presentation",
+	".mobi":     "application/x-mobipocket-ebook",
+	".azw":      "application/vnd.amazon.ebook",
+	".azw3":     "application/vnd.amazon.ebook",
+	".mp3":      "audio/mpeg",
+	".jpg":      "image/jpeg",
+	".jpeg":     "image/jpeg",
 }

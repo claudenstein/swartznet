@@ -15,6 +15,90 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.5.0 — 2026-04-13
+
+**Highlight: publisher trust.** Builds on v0.4.0's signed
+torrents with a user-managed whitelist: `.torrent` files
+signed by a trusted publisher are auto-confirmed to the
+known-good Bloom filter as soon as their metadata arrives,
+surfaced with a star badge in the Downloads table, and
+available via a new context menu for one-click trust /
+revoke.
+
+Also in this release: three new metadata extractors (MOBI
+ebooks, MP3 ID3 tags, JPEG EXIF) pushing the total to 14,
+plus a polished Verify Signature dialog.
+
+### Publisher trust — `internal/trust` package
+
+Persistent JSON trust list (default:
+`~/.local/share/swartznet/trust.json`). Atomic tempfile+rename
+writes. Load at daemon startup, mutate through the Store API.
+
+New API:
+
+  - `trust.LoadOrCreate(path)` returns a `*Store`.
+  - `Store.Add/Remove/IsTrusted/Label/List`.
+  - `engine.Engine.TrustStore()` accessor.
+  - `TorrentSnapshot.TrustedPublisher bool`.
+
+Engine behaviour: when `autoIndex` sees a handle whose
+`SignedBy()` is non-empty AND the pubkey is in the trust
+store, the torrent's infohash is added to the known-good
+Bloom filter immediately — no waiting for download
+completion.
+
+CLI:
+
+  - `swartznet trust list [--json] [--file path]`
+  - `swartznet trust add <pubkey> [<label>]`
+  - `swartznet trust remove <pubkey>`
+
+GUI:
+
+  - Downloads "Signed" column shows ★ prefix for trusted
+    publishers, ✓ prefix for signed-but-not-trusted, — for
+    unsigned.
+  - Right-click on a signed torrent: "Verify signature..."
+    opens a form dialog with the full pubkey, trust status,
+    trust label, and signed infohash. A separate menu item
+    toggles trust ("Trust this publisher" /
+    "Revoke trust for this publisher").
+
+HTTP API: `GET /torrents` items gain optional
+`trusted_publisher bool`.
+
+Five trust-store tests; the signature-dialog integration is
+covered by the existing engine signing round-trip tests.
+
+### New metadata extractors
+
+  - **MOBI** (`internal/indexer/extractors/mobi.go`) —
+    pure-Go reader for Amazon Kindle .mobi / .azw / .azw3
+    metadata. Walks the PalmDB + MOBI header, extracts the
+    full-title field, parses EXTH records for author,
+    publisher, description, ISBN, subject, published date,
+    language. 3 tests with a synthetic MOBI byte stream.
+  - **ID3** (`internal/indexer/extractors/id3.go`) — ID3v2.3
+    and ID3v2.4 tag reader for MP3 files. Surfaces TIT2
+    title, TPE1 artist, TALB album, TDRC/TYER year, TCON
+    genre, TRCK track, TPUB publisher, COMM comment, USLT
+    lyrics. Handles all four ID3 encodings (ISO-8859-1,
+    UTF-16 BOM, UTF-16 BE, UTF-8). 4 tests.
+  - **EXIF** (`internal/indexer/extractors/exif.go`) — JPEG
+    APP1 EXIF reader. Walks the TIFF header + IFD0,
+    extracts camera make/model, software, artist,
+    description, copyright, date taken, and GPS coordinates
+    (if present). 3 tests.
+
+The existing `TestDispatchRefusesBinary` updated: .jpg now
+dispatches to the EXIF extractor (correctly — for metadata,
+not pixel data). .mkv still returns nil.
+
+**Total extractors now: 14** — plaintext, subtitle, PDF,
+EPUB, DOCX, ODT, RTF, archive, FB2, PPTX, ODP, MOBI, ID3,
+EXIF.
+
 ## v0.4.0 — 2026-04-13
 
 **Highlight: signed torrents.** SwartzNet can now sign and

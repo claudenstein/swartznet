@@ -109,11 +109,12 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 					label.SetText("no")
 				}
 			case 8: // Signed
-				if s.SignedBy == "" {
+				switch {
+				case s.SignedBy == "":
 					label.SetText("—")
-				} else {
-					// Show a short prefix so the column stays compact.
-					// Full pubkey is available via context menu/tooltip.
+				case s.TrustedPublisher:
+					label.SetText("★ " + s.SignedBy[:8])
+				default:
 					label.SetText("✓ " + s.SignedBy[:8])
 				}
 			}
@@ -275,12 +276,37 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 	copyHash := fyne.NewMenuItem("Copy infohash", func() {
 		fyne.CurrentApp().Clipboard().SetContent(ih)
 	})
-	var copySigner *fyne.MenuItem
+	var signatureItems []*fyne.MenuItem
 	if snap.SignedBy != "" {
 		signer := snap.SignedBy // capture
-		copySigner = fyne.NewMenuItem("Copy publisher pubkey", func() {
-			fyne.CurrentApp().Clipboard().SetContent(signer)
-		})
+		trusted := snap.TrustedPublisher
+		signatureItems = append(signatureItems,
+			fyne.NewMenuItem("Verify signature...", func() {
+				dl.showSignatureDialog(snap)
+			}),
+		)
+		if trusted {
+			signatureItems = append(signatureItems,
+				fyne.NewMenuItem("Revoke trust for this publisher", func() {
+					if ts := dl.d.Eng.TrustStore(); ts != nil {
+						_ = ts.Remove(signer)
+					}
+				}),
+			)
+		} else {
+			signatureItems = append(signatureItems,
+				fyne.NewMenuItem("Trust this publisher", func() {
+					if ts := dl.d.Eng.TrustStore(); ts != nil {
+						_ = ts.Add(signer, "")
+					}
+				}),
+			)
+		}
+		signatureItems = append(signatureItems,
+			fyne.NewMenuItem("Copy publisher pubkey", func() {
+				fyne.CurrentApp().Clipboard().SetContent(signer)
+			}),
+		)
 	}
 
 	items := []*fyne.MenuItem{
@@ -311,10 +337,45 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 		copyMagnet,
 		copyHash,
 	)
-	if copySigner != nil {
-		items = append(items, copySigner)
+	if len(signatureItems) > 0 {
+		items = append(items, fyne.NewMenuItemSeparator())
+		items = append(items, signatureItems...)
 	}
 	return fyne.NewMenu("Torrent actions", items...)
+}
+
+// showSignatureDialog opens a modal detailing the signature
+// info for the given torrent: full pubkey, trust status, label
+// (if trusted), and the info-hash that was signed.
+func (dl *downloadsTab) showSignatureDialog(snap engine.TorrentSnapshot) {
+	if snap.SignedBy == "" {
+		return
+	}
+
+	label := ""
+	if ts := dl.d.Eng.TrustStore(); ts != nil {
+		label = ts.Label(snap.SignedBy)
+	}
+
+	trustLabel := widget.NewLabel("untrusted")
+	if snap.TrustedPublisher {
+		trustLabel.SetText("✓ trusted")
+		trustLabel.TextStyle.Bold = true
+	}
+
+	labelDisplay := label
+	if labelDisplay == "" {
+		labelDisplay = "—"
+	}
+
+	content := widget.NewForm(
+		widget.NewFormItem("Torrent", widget.NewLabel(snap.Name)),
+		widget.NewFormItem("InfoHash", widget.NewLabel(snap.InfoHash)),
+		widget.NewFormItem("Publisher pubkey", widget.NewLabel(snap.SignedBy)),
+		widget.NewFormItem("Trust status", trustLabel),
+		widget.NewFormItem("Trust label", widget.NewLabel(labelDisplay)),
+	)
+	dialog.ShowCustom("Signature verified", "Close", content, dl.win())
 }
 
 func (dl *downloadsTab) pollLoop(ctx context.Context) {

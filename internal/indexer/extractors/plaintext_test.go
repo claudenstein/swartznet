@@ -113,12 +113,18 @@ func TestDispatchPicksPlaintext(t *testing.T) {
 
 func TestDispatchRefusesBinary(t *testing.T) {
 	t.Parallel()
+	// No extractor should claim a .mkv video file.
 	e, _ := Dispatch(Candidate{Path: "movie.mkv", Size: 5 * 1024 * 1024 * 1024})
 	if e != nil {
-		t.Errorf("plaintext claimed .mkv file; Dispatch returned %s", e.Name())
+		t.Errorf("unexpected extractor claimed .mkv: %s", e.Name())
 	}
+	// Plaintext must not claim .jpg; the EXIF extractor does
+	// (for camera/photo metadata — not pixel data).
 	e, _ = Dispatch(Candidate{Path: "image.jpg", Size: 2 * 1024 * 1024})
-	if e != nil {
-		t.Errorf("plaintext claimed .jpg file; Dispatch returned %s", e.Name())
+	if e != nil && e.Name() == "plaintext" {
+		t.Error("plaintext wrongly claimed .jpg")
+	}
+	if e != nil && e.Name() != "exif" {
+		t.Errorf("expected exif or nil for .jpg, got %s", e.Name())
 	}
 }
