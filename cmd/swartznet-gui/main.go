@@ -35,6 +35,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		noDHT        bool
 		noDHTPublish bool
 		apiAddr      string
+		loadFiles    torrentFileFlag
+		startTab     string
 	)
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for downloaded content")
 	fs.StringVar(&indexDir, "index-dir", "", "Bleve index directory")
@@ -42,6 +44,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&noDHT, "no-dht", false, "disable the mainline DHT entirely")
 	fs.BoolVar(&noDHTPublish, "no-dht-publish", false, "join DHT but don't publish BEP-44 items")
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
+	fs.Var(&loadFiles, "torrent", "load a .torrent file at startup (repeat for multiple)")
+	fs.StringVar(&startTab, "tab", "", "open a specific tab at startup (downloads|search|status|companion|settings)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -81,12 +85,32 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "HTTP API listening on %s\n", d.API.Addr())
 	}
 
+	// Auto-load any .torrent files the user passed with --torrent.
+	// Useful for demos, screenshots, and re-launching the GUI
+	// pre-populated with a known set of torrents.
+	for _, path := range loadFiles {
+		if _, err := d.Eng.AddTorrentFile(path); err != nil {
+			fmt.Fprintf(stderr, "warning: load %s: %v\n", path, err)
+		} else {
+			fmt.Fprintf(stdout, "Loaded %s\n", path)
+		}
+	}
+
 	app := gui.New(d, Version)
+	if startTab != "" {
+		app.SelectTab(startTab)
+	}
 	app.Run()
 	app.Cleanup()
 
 	return 0
 }
+
+// torrentFileFlag implements flag.Value for repeated --torrent flags.
+type torrentFileFlag []string
+
+func (t *torrentFileFlag) String() string     { return fmt.Sprintf("%v", []string(*t)) }
+func (t *torrentFileFlag) Set(v string) error { *t = append(*t, v); return nil }
 
 func newLogger(w io.Writer) *slog.Logger {
 	lvl := slog.LevelInfo

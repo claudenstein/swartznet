@@ -325,6 +325,27 @@ func (a *App) notificationLoop(ctx context.Context) {
 	}
 }
 
+// SelectTab switches the AppTabs to the named tab. Case-insensitive.
+// Unknown names are silently ignored. Useful for --tab startup
+// flag and for screenshots.
+func (a *App) SelectTab(name string) {
+	if a.tabs == nil {
+		return
+	}
+	switch name {
+	case "downloads", "Downloads":
+		a.tabs.SelectIndex(0)
+	case "search", "Search":
+		a.tabs.SelectIndex(1)
+	case "status", "Status":
+		a.tabs.SelectIndex(2)
+	case "companion", "Companion":
+		a.tabs.SelectIndex(3)
+	case "settings", "Settings":
+		a.tabs.SelectIndex(4)
+	}
+}
+
 // Run enters the Fyne event loop. Blocks until the window is closed
 // OR (when system tray is available) until ShowAndRun returns. The
 // tray can keep the daemon alive even after the window closes.

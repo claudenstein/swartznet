@@ -116,6 +116,15 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	}
 	dl.table.UpdateHeader = func(id widget.TableCellID, cell fyne.CanvasObject) {
 		label := cell.(*widget.Label)
+		// Fyne's NewTableWithHeaders renders BOTH a column header
+		// row (id.Row == -1) and a row header column (id.Col == -1).
+		// Blank the row-header cell so it doesn't show the
+		// CreateHeader placeholder "Header" text.
+		if id.Col == -1 {
+			label.TextStyle.Bold = false
+			label.SetText("")
+			return
+		}
 		if id.Row == -1 && id.Col >= 0 && id.Col < len(dlColumns) {
 			label.TextStyle.Bold = true
 			text := dlColumns[id.Col].name
