@@ -15,6 +15,26 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.6.1 — 2026-04-13
+
+Web UI polish patch on top of v0.6.0.
+
+  - **Status panel**: new "Torrents" card at the top of the
+    grid showing total + counts by status (downloading /
+    seeding / queued / paused) + aggregate ↓/↑ throughput +
+    signed/trusted counts. Computed from the same /torrents
+    poll the Downloads tab uses, so no extra round trip.
+  - **Keyboard shortcut**: pressing `/` (or `Ctrl/Cmd+K`)
+    anywhere on the page switches to the Search tab and
+    focuses the query input. Standard convention used by
+    GitHub, Slack, Discord, Linear. Suppressed while the
+    user is already typing in another input.
+
+Search-result signed-publisher badges deferred to v0.7.0
+where they'll land alongside a search-by-publisher filter
+that requires persisting `signed_by` on each Bleve
+TorrentDoc.
+
 ## v0.6.0 — 2026-04-13
 
 Two focused additions: **four media metadata extractors**

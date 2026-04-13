@@ -33,6 +33,32 @@
     if (t.dataset.tab === 'companion') refreshCompanion();
   }));
 
+  // Keyboard shortcuts. Standard browser convention: pressing
+  // "/" focuses the search input (and switches to the Search
+  // tab if needed) — like GitHub, Slack, Discord, Linear, etc.
+  // We also accept Ctrl/Cmd+K which a few apps use. Both are
+  // ignored when the user is already typing in another input.
+  document.addEventListener('keydown', ev => {
+    const target = ev.target;
+    const inEditable = target && (
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.isContentEditable
+    );
+    const isSlash = ev.key === '/' && !inEditable && !ev.ctrlKey && !ev.metaKey;
+    const isCtrlK = ev.key === 'k' && (ev.ctrlKey || ev.metaKey);
+    if (isSlash || isCtrlK) {
+      ev.preventDefault();
+      const searchTab = document.querySelector('[data-tab="search"]');
+      if (searchTab) searchTab.click();
+      const q = document.getElementById('search-query');
+      if (q) {
+        q.focus();
+        q.select();
+      }
+    }
+  });
+
   // ---------- helpers ----------
 
   function humanBytes(n) {
@@ -368,11 +394,12 @@
 
   async function refreshStatus() {
     try {
-      const [s, ixStats] = await Promise.all([
+      const [s, ixStats, torrents] = await Promise.all([
         getJSON('/status'),
         getJSON('/index/stats').catch(() => null), // optional — tolerate older daemons
+        getJSON('/torrents').catch(() => null),    // for the Torrents card
       ]);
-      renderStatus(s, ixStats);
+      renderStatus(s, ixStats, torrents);
     } catch (err) {
       statusDisplay.innerHTML = '';
       statusDisplay.appendChild(elt('p', { class: 'hint', text: 'error: ' + err.message }));
@@ -383,9 +410,42 @@
     }
   }
 
-  function renderStatus(s, ixStats) {
+  function renderStatus(s, ixStats, torrents) {
     statusDisplay.innerHTML = '';
     const grid = elt('div', { class: 'status-grid' });
+
+    // Torrents card — counts by status + aggregate throughput.
+    // Mirrors the native GUI's "Torrents" card. Computed from
+    // the same /torrents poll the Downloads tab uses.
+    if (torrents && Array.isArray(torrents.torrents)) {
+      let total = 0, downloading = 0, seeding = 0, queued = 0, paused = 0;
+      let totalDown = 0, totalUp = 0, signedCount = 0, trustedCount = 0;
+      for (const t of torrents.torrents) {
+        total++;
+        switch (t.status) {
+          case 'downloading': downloading++; break;
+          case 'seeding': seeding++; break;
+          case 'queued': queued++; break;
+          case 'paused': paused++; break;
+        }
+        totalDown += t.download_rate || 0;
+        totalUp += t.upload_rate || 0;
+        if (t.signed_by) signedCount++;
+        if (t.trusted_publisher) trustedCount++;
+      }
+      const rateStr = bps => bps > 0 ? humanBytes(bps) + '/s' : '—';
+      grid.appendChild(card('Torrents', [
+        ['total', String(total)],
+        ['downloading', String(downloading)],
+        ['seeding', String(seeding)],
+        ['queued', String(queued)],
+        ['paused', String(paused)],
+        ['↓ rate', rateStr(totalDown)],
+        ['↑ rate', rateStr(totalUp)],
+        ['signed', String(signedCount)],
+        ['trusted', String(trustedCount)],
+      ]));
+    }
 
     // Local index card. If the new /index/stats endpoint
     // answered, enrich the card with dir size + corpus text +
