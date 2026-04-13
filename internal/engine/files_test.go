@@ -9,10 +9,11 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
-// waitForPriority polls up to timeout for the given file's priority
-// to match want. Needed because autoDownload runs in a goroutine
-// after metadata arrives.
-func waitForPriority(t *testing.T, eng *engine.Engine, ihHex string, fileIndex int, want string, timeout time.Duration) []engine.FileSnapshot {
+// waitForAllPriorities polls up to timeout for every file in the
+// torrent to report the given priority. Needed because
+// autoDownload loops over files one at a time, so reading mid-
+// loop can see a mixed state.
+func waitForAllPriorities(t *testing.T, eng *engine.Engine, ihHex string, want string, timeout time.Duration) []engine.FileSnapshot {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -20,11 +21,18 @@ func waitForPriority(t *testing.T, eng *engine.Engine, ihHex string, fileIndex i
 		if err != nil {
 			t.Fatalf("TorrentFiles: %v", err)
 		}
-		if fileIndex < len(files) && files[fileIndex].Priority == want {
+		allMatch := len(files) > 0
+		for _, f := range files {
+			if f.Priority != want {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
 			return files
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for file %d priority=%q (last snapshot: %+v)", fileIndex, want, files)
+			t.Fatalf("timeout waiting for all files priority=%q (last snapshot: %+v)", want, files)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -59,10 +67,13 @@ func TestTorrentFilesAndSetPriority(t *testing.T) {
 	}
 	ihHex := mi.HashInfoBytes().HexString()
 
-	// Initial snapshot: wait for autoDownload goroutine to flip all
-	// files to normal priority. Up to 2 seconds is plenty — the
-	// goroutine just waits on GotInfo which has already fired.
-	files := waitForPriority(t, eng, ihHex, 0, "normal", 2*time.Second)
+	// Initial snapshot: wait for autoDownload goroutine to flip
+	// every file to normal priority. autoDownload iterates files
+	// and calls SetPriority one at a time; reading back mid-loop
+	// can see a mixed state, so poll until every file is normal
+	// (or timeout). Up to 5 seconds is plenty — the goroutine
+	// just waits on GotInfo which has already fired.
+	files := waitForAllPriorities(t, eng, ihHex, "normal", 5*time.Second)
 	if len(files) != 3 {
 		t.Fatalf("file count: got %d, want 3", len(files))
 	}

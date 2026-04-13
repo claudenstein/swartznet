@@ -15,6 +15,21 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.3.1 — 2026-04-13
+
+Feature-packed point release on top of v0.3.0. Six new user-
+facing capabilities, a product-focused documentation rewrite,
+and a full GitHub Actions CI/CD pipeline so future tags build
+cross-platform binaries automatically.
+
+**Highlights:** file selection for multi-file torrents,
+bandwidth rate limits, download queue with concurrency cap and
+reorderable queue positions, CLI parity for the v0.3.0 features
+(`create` / `index` / `files`), right-click context menu in the
+Downloads tab, and — for the first time in any SwartzNet
+release — pre-built GUI binaries for **macOS (Intel + Apple
+Silicon) and Windows** alongside the existing Linux GUI binary.
+
 ### File selection for multi-file torrents
 
 - New `Engine.TorrentFiles(infoHashHex) ([]FileSnapshot, error)`
