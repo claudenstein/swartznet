@@ -177,6 +177,32 @@
 
       <button id="cap-save">Save sharing settings</button>
       <p id="cap-saved" class="hint"></p>
+
+      <fieldset>
+        <legend>Bandwidth limits</legend>
+        <p class="hint">Zero means unlimited. Applies immediately across every peer connection.</p>
+        <label>
+          Download (KiB/s):
+          <input type="number" id="rate-download" min="0" step="1" value="0">
+        </label>
+        <label>
+          Upload (KiB/s):
+          <input type="number" id="rate-upload" min="0" step="1" value="0">
+        </label>
+        <button id="rate-save">Save bandwidth limits</button>
+        <p id="rate-saved" class="hint"></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Queue</legend>
+        <p class="hint">Cap how many torrents download concurrently. Zero = unlimited. Paused / complete torrents don't count.</p>
+        <label>
+          Max active downloads:
+          <input type="number" id="queue-max" min="0" step="1" value="0">
+        </label>
+        <button id="queue-save">Save queue settings</button>
+        <p id="queue-saved" class="hint"></p>
+      </fieldset>
     </section>
   </main>
 

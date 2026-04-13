@@ -218,6 +218,13 @@ func (f *fakeController) SetFilePriority(ih string, idx int, priority string) er
 	return nil
 }
 
+func (f *fakeController) UploadLimitBytesPerSec() int64     { return 0 }
+func (f *fakeController) DownloadLimitBytesPerSec() int64   { return 0 }
+func (f *fakeController) SetUploadLimitBytesPerSec(int64)   {}
+func (f *fakeController) SetDownloadLimitBytesPerSec(int64) {}
+func (f *fakeController) MaxActiveDownloads() int           { return 0 }
+func (f *fakeController) SetMaxActiveDownloads(int)         {}
+
 func (f *fakeController) lastAction() action {
 	f.mu.Lock()
 	defer f.mu.Unlock()

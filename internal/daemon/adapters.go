@@ -68,6 +68,25 @@ func (c *controllerAdapter) SetFilePriority(infoHashHex string, fileIndex int, p
 	return c.eng.SetFilePriority(infoHashHex, fileIndex, engine.FilePriority(priority))
 }
 
+func (c *controllerAdapter) UploadLimitBytesPerSec() int64 {
+	return c.eng.UploadLimitBytesPerSec()
+}
+func (c *controllerAdapter) DownloadLimitBytesPerSec() int64 {
+	return c.eng.DownloadLimitBytesPerSec()
+}
+func (c *controllerAdapter) SetUploadLimitBytesPerSec(bps int64) {
+	c.eng.SetUploadLimitBytesPerSec(bps)
+}
+func (c *controllerAdapter) SetDownloadLimitBytesPerSec(bps int64) {
+	c.eng.SetDownloadLimitBytesPerSec(bps)
+}
+func (c *controllerAdapter) MaxActiveDownloads() int {
+	return c.eng.MaxActiveDownloads()
+}
+func (c *controllerAdapter) SetMaxActiveDownloads(n int) {
+	c.eng.SetMaxActiveDownloads(n)
+}
+
 func (c *controllerAdapter) TorrentSnapshots() []httpapi.TorrentSnapshot {
 	src := c.eng.TorrentSnapshots()
 	out := make([]httpapi.TorrentSnapshot, 0, len(src))

@@ -561,3 +561,64 @@ footer {
 
 footer a { color: var(--text-dim); }
 footer a:hover { color: var(--accent); }
+
+/* Signed-publisher badges in the Downloads panel. */
+.signed {
+  color: var(--good);
+  font-weight: 600;
+}
+.signed-trusted {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+/* Files dialog (opened from Downloads → files button). */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-dialog {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.5rem;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow: auto;
+  min-width: 480px;
+}
+.modal-dialog h3 { margin-top: 0; }
+.files-bulk { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+.files-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+.files-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.files-table .files-path {
+  max-width: 30rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+.files-table button {
+  margin-right: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+}
+.files-table button.priority-active {
+  background: var(--accent-2);
+  color: #fff;
+  border-color: var(--accent-2);
+}

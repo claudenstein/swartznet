@@ -51,6 +51,16 @@ type TorrentController interface {
 	// SetFilePriority flips a single file's download priority.
 	// priority must be "none", "normal", or "high".
 	SetFilePriority(infoHashHex string, fileIndex int, priority string) error
+
+	// Rate-limit + queue accessors back the /config/* endpoints
+	// that the web UI uses to match the native-GUI Settings
+	// tab. Zero means unlimited for all three.
+	UploadLimitBytesPerSec() int64
+	DownloadLimitBytesPerSec() int64
+	SetUploadLimitBytesPerSec(bps int64)
+	SetDownloadLimitBytesPerSec(bps int64)
+	MaxActiveDownloads() int
+	SetMaxActiveDownloads(n int)
 }
 
 // TorrentFile mirrors engine.FileSnapshot so the httpapi layer
@@ -221,6 +231,10 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /companion/follow", s.handleCompanionFollow)
 	mux.HandleFunc("POST /companion/unfollow", s.handleCompanionUnfollow)
 	mux.HandleFunc("GET /index/stats", s.handleIndexStats)
+	mux.HandleFunc("GET /config/rate-limit", s.handleGetRateLimit)
+	mux.HandleFunc("POST /config/rate-limit", s.handleSetRateLimit)
+	mux.HandleFunc("GET /config/queue", s.handleGetQueue)
+	mux.HandleFunc("POST /config/queue", s.handleSetQueue)
 
 	// Web UI: serve the embedded index.html at / and the
 	// static assets at /static/. The HTTP API endpoints above
@@ -916,6 +930,87 @@ func (s *Server) handleSetFilePriority(w http.ResponseWriter, r *http.Request) {
 		"index":    idx,
 		"priority": body.Priority,
 	})
+}
+
+// RateLimitResponse is the GET body of /config/rate-limit.
+type RateLimitResponse struct {
+	UploadBytesPerSec   int64 `json:"upload_bps"`
+	DownloadBytesPerSec int64 `json:"download_bps"`
+}
+
+// RateLimitRequest is the POST body of /config/rate-limit. Any
+// field that is not provided (zero) is treated as "do not
+// change"; callers can explicitly pass a negative number to
+// clear a cap (or zero in a field set to the new desired value).
+// For simplicity we interpret zero as "set to unlimited" here,
+// matching the GUI's expectation — just like the Settings tab
+// uses zero in its entries.
+type RateLimitRequest struct {
+	UploadBytesPerSec   int64 `json:"upload_bps"`
+	DownloadBytesPerSec int64 `json:"download_bps"`
+}
+
+func (s *Server) handleGetRateLimit(w http.ResponseWriter, _ *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	resp := RateLimitResponse{
+		UploadBytesPerSec:   s.control.UploadLimitBytesPerSec(),
+		DownloadBytesPerSec: s.control.DownloadLimitBytesPerSec(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleSetRateLimit(w http.ResponseWriter, r *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var body RateLimitRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.control.SetUploadLimitBytesPerSec(body.UploadBytesPerSec)
+	s.control.SetDownloadLimitBytesPerSec(body.DownloadBytesPerSec)
+	s.handleGetRateLimit(w, r)
+}
+
+// QueueResponse is the GET body of /config/queue.
+type QueueResponse struct {
+	MaxActiveDownloads int `json:"max_active_downloads"`
+}
+
+// QueueRequest is the POST body of /config/queue.
+type QueueRequest struct {
+	MaxActiveDownloads int `json:"max_active_downloads"`
+}
+
+func (s *Server) handleGetQueue(w http.ResponseWriter, _ *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(QueueResponse{
+		MaxActiveDownloads: s.control.MaxActiveDownloads(),
+	})
+}
+
+func (s *Server) handleSetQueue(w http.ResponseWriter, r *http.Request) {
+	if s.control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var body QueueRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.control.SetMaxActiveDownloads(body.MaxActiveDownloads)
+	s.handleGetQueue(w, r)
 }
 
 // controlOne is the shared body for the three pause / resume /

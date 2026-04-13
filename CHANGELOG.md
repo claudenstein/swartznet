@@ -15,6 +15,80 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.6.0 — 2026-04-13
+
+Two focused additions: **four media metadata extractors**
+(FLAC, OGG, MKV, MP4) and **web-UI parity with the native
+GUI** for the features that landed between v0.3.0 and v0.5.0.
+
+### New media metadata extractors
+
+Pure-Go, stdlib-only implementations. Each extracts the
+human-visible metadata from the container's header / tag
+blocks; audio/video frame data is intentionally skipped.
+
+  - **FLAC** (`internal/indexer/extractors/flac.go`) — walks
+    the metadata-block chain to find the VORBIS_COMMENT block
+    and decodes title, artist, album, date, genre, track,
+    composer, label, ISRC, copyright.
+  - **OGG Vorbis / Opus** (`internal/indexer/extractors/ogg.go`)
+    — parses Ogg pages, locates the comment packet (prefixed
+    with either `\x03vorbis` or `OpusTags`), and reuses the
+    FLAC Vorbis-comment parser.
+  - **MKV / WebM** (`internal/indexer/extractors/mkv.go`) —
+    EBML walker bounded to Info / Tracks / Chapters / Tags
+    elements. Extracts title, muxer, writer, per-track name,
+    language, and per-chapter ChapString. Bounded at 16 MiB
+    of read because MKV metadata always lives near the start.
+  - **MP4 / M4A / M4B / M4V** (`internal/indexer/extractors/mp4.go`)
+    — QuickTime atom walker limited to moov / udta / meta /
+    ilst. Extracts the full iTunes-style tag set: title,
+    artist, album artist, album, date, genre, composer,
+    encoder, comment, description, grouping, copyright,
+    track, disc.
+
+12 new extractor tests synthesize the relevant container
+format in-memory so tests don't depend on external files.
+
+**Total extractors: 18** (plaintext, subtitle, PDF, EPUB,
+DOCX, ODT, RTF, archive, FB2, PPTX, ODP, MOBI, ID3, EXIF,
+FLAC, OGG, MKV, MP4).
+
+### Web-UI parity
+
+The embedded HTML/CSS/JS web UI at `http://localhost:7654/`
+now shows the same Downloads-tab information the native GUI
+does, plus the same Settings controls.
+
+Downloads panel:
+
+  - Transfer speed (↓/↑ B/s) in the meta line when any rate
+    is non-zero.
+  - Signed-publisher badge: ★ for trusted, ✓ for signed-
+    untrusted. Tooltip shows the full pubkey.
+  - Per-row buttons for **files** and **index: on/off**.
+  - Files dialog (modal) with per-file progress + priority
+    (none/normal/high) buttons + Select All / Deselect All
+    bulk actions.
+
+Settings panel gains two new fieldsets:
+
+  - **Bandwidth limits** — download/upload KiB/s entries
+    backed by new endpoints `GET/POST /config/rate-limit`.
+  - **Queue** — max-active-downloads entry backed by
+    `GET/POST /config/queue`.
+
+New HTTP endpoints:
+
+  - `GET /config/rate-limit` / `POST /config/rate-limit`
+    `{upload_bps, download_bps}` — both 0 = unlimited.
+  - `GET /config/queue` / `POST /config/queue`
+    `{max_active_downloads}` — 0 = unlimited.
+
+CSS additions: `.signed` / `.signed-trusted` badges, modal
+overlay + dialog, files-table with path / size / progress /
+priority columns.
+
 ## v0.5.0 — 2026-04-13
 
 **Highlight: publisher trust.** Builds on v0.4.0's signed

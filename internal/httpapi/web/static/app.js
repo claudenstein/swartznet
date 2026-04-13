@@ -541,6 +541,22 @@
     if (t.files > 0) {
       meta.appendChild(elt('span', { text: 'files ' + t.files }));
     }
+    // Transfer rates — match the native GUI's ↓/↑ columns.
+    if (t.download_rate > 0 || t.upload_rate > 0) {
+      meta.appendChild(elt('span', {
+        text: '↓ ' + humanBytes(t.download_rate || 0) + '/s · ↑ ' + humanBytes(t.upload_rate || 0) + '/s',
+      }));
+    }
+    // Signed publisher, if any — gold star for trusted.
+    if (t.signed_by) {
+      const badge = t.trusted_publisher ? '★' : '✓';
+      meta.appendChild(elt('span', {
+        class: t.trusted_publisher ? 'signed-trusted' : 'signed',
+        text: badge + ' ' + t.signed_by.slice(0, 8),
+        title: 'Signed by ' + t.signed_by +
+          (t.trusted_publisher ? ' (trusted publisher)' : ''),
+      }));
+    }
     meta.appendChild(elt('span', { text: t.infohash.slice(0, 16) + '…' }));
     card.appendChild(meta);
 
@@ -576,6 +592,16 @@
         controlTorrent('remove', t.infohash);
       },
     }));
+    actions.appendChild(elt('button', {
+      text: '📁 files',
+      title: 'Show per-file list and priorities',
+      onclick: () => showFilesDialog(t),
+    }));
+    actions.appendChild(elt('button', {
+      text: t.indexing ? '🔍 index: on' : '🔍 index: off',
+      title: 'Toggle whether this torrent feeds the local index',
+      onclick: () => toggleIndexing(t.infohash, !t.indexing),
+    }));
     card.appendChild(actions);
 
     return card;
@@ -601,6 +627,109 @@
       refreshDownloads();
     } catch (err) {
       alert(action + ' failed: ' + err.message);
+    }
+  }
+
+  async function toggleIndexing(infohash, enabled) {
+    try {
+      const r = await fetch('/torrents/' + infohash + '/indexing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: enabled }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
+      refreshDownloads();
+    } catch (err) {
+      alert('indexing toggle failed: ' + err.message);
+    }
+  }
+
+  // ---------- files dialog ----------
+
+  async function showFilesDialog(t) {
+    let files;
+    try {
+      const r = await fetch('/torrents/' + t.infohash + '/files');
+      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
+      const body = await r.json();
+      files = body.files || [];
+    } catch (err) {
+      alert('files: ' + err.message);
+      return;
+    }
+
+    // Strip any existing overlay so double-clicks don't stack.
+    const existing = document.getElementById('files-modal');
+    if (existing) existing.remove();
+
+    const overlay = elt('div', { id: 'files-modal', class: 'modal-overlay' });
+    const dialog = elt('div', { class: 'modal-dialog' });
+    dialog.appendChild(elt('h3', { text: 'Files in ' + (t.name || t.infohash) }));
+    if (files.length === 0) {
+      dialog.appendChild(elt('p', { class: 'hint',
+        text: '(torrent metadata not yet available)' }));
+    } else {
+      // Bulk actions.
+      const bulk = elt('div', { class: 'files-bulk' });
+      bulk.appendChild(elt('button', {
+        text: 'Select All',
+        onclick: async () => { await setAllPriorities(t.infohash, files, 'normal'); showFilesDialog(t); },
+      }));
+      bulk.appendChild(elt('button', {
+        text: 'Deselect All',
+        onclick: async () => { await setAllPriorities(t.infohash, files, 'none'); showFilesDialog(t); },
+      }));
+      dialog.appendChild(bulk);
+
+      const list = elt('table', { class: 'files-table' });
+      files.forEach(f => {
+        const row = elt('tr');
+        row.appendChild(elt('td', { class: 'files-path', text: f.display_path, title: f.display_path }));
+        row.appendChild(elt('td', { text: humanBytes(f.length || 0) }));
+        row.appendChild(elt('td', { text: ((f.progress || 0) * 100).toFixed(1) + '%' }));
+        const prioCell = elt('td');
+        ['none', 'normal', 'high'].forEach(p => {
+          const btn = elt('button', {
+            text: p,
+            class: f.priority === p ? 'priority-active' : '',
+            onclick: async () => {
+              try {
+                const r = await fetch('/torrents/' + t.infohash + '/files/' + f.index + '/priority', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ priority: p }),
+                });
+                if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
+                showFilesDialog(t);
+              } catch (err) { alert('priority: ' + err.message); }
+            },
+          });
+          prioCell.appendChild(btn);
+        });
+        row.appendChild(prioCell);
+        list.appendChild(row);
+      });
+      dialog.appendChild(list);
+    }
+    dialog.appendChild(elt('button', {
+      text: 'Close',
+      class: 'primary',
+      onclick: () => overlay.remove(),
+    }));
+    overlay.appendChild(dialog);
+    overlay.addEventListener('click', ev => {
+      if (ev.target === overlay) overlay.remove();
+    });
+    document.body.appendChild(overlay);
+  }
+
+  async function setAllPriorities(infohash, files, priority) {
+    for (const f of files) {
+      await fetch('/torrents/' + infohash + '/files/' + f.index + '/priority', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ priority: priority }),
+      });
     }
   }
 
@@ -641,6 +770,53 @@
     }
   }
   loadCapabilities();
+
+  // ---------- rate limit + queue (parity with native GUI) ----------
+
+  async function loadRateLimit() {
+    try {
+      const r = await getJSON('/config/rate-limit');
+      document.getElementById('rate-download').value =
+        r.download_bps > 0 ? Math.round(r.download_bps / 1024) : 0;
+      document.getElementById('rate-upload').value =
+        r.upload_bps > 0 ? Math.round(r.upload_bps / 1024) : 0;
+    } catch (err) { /* endpoint missing — ignore */ }
+  }
+  document.getElementById('rate-save').addEventListener('click', async () => {
+    const dl = parseInt(document.getElementById('rate-download').value, 10) || 0;
+    const ul = parseInt(document.getElementById('rate-upload').value, 10) || 0;
+    const msg = document.getElementById('rate-saved');
+    try {
+      await postJSON('/config/rate-limit', {
+        upload_bps: ul * 1024,
+        download_bps: dl * 1024,
+      });
+      msg.textContent = '✓ saved';
+      setTimeout(() => { msg.textContent = ''; }, 3000);
+    } catch (err) {
+      msg.textContent = 'error: ' + err.message;
+    }
+  });
+  loadRateLimit();
+
+  async function loadQueue() {
+    try {
+      const r = await getJSON('/config/queue');
+      document.getElementById('queue-max').value = r.max_active_downloads || 0;
+    } catch (err) { /* ignore */ }
+  }
+  document.getElementById('queue-save').addEventListener('click', async () => {
+    const n = parseInt(document.getElementById('queue-max').value, 10) || 0;
+    const msg = document.getElementById('queue-saved');
+    try {
+      await postJSON('/config/queue', { max_active_downloads: n });
+      msg.textContent = '✓ saved';
+      setTimeout(() => { msg.textContent = ''; }, 3000);
+    } catch (err) {
+      msg.textContent = 'error: ' + err.message;
+    }
+  });
+  loadQueue();
 
   // ---------- companion (M11e) ----------
 
