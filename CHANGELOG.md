@@ -15,6 +15,44 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.3.3 — 2026-04-13
+
+GUI polish pass #2 plus two new text extractors — shipped the
+same day as v0.3.2.
+
+### GUI polish
+
+- **Files dialog sort:** new "Sort by" dropdown (index /
+  path / size / progress / priority) in the per-torrent Files
+  modal. Persists across the 2-second poll refresh.
+- **Search in-flight indicator:** `ProgressBarInfinite`
+  appears under the status label while any of the Local /
+  Swarm / DHT layers is running. Visible feedback that the
+  query is in progress, especially important for swarm and
+  DHT queries that can take seconds.
+- **Torrents card on Status tab:** new card at the top of
+  the Status grid showing total count, counts broken down by
+  status (downloading / seeding / queued / paused), plus
+  aggregate download and upload throughput.
+
+### New content extractors
+
+- **RTF** (`internal/indexer/extractors/rtf.go`): pure-Go
+  parser for the subset of RTF used by every mainstream
+  generator (Word, LibreOffice, Apple TextEdit, Pages export).
+  Strips control words, groups, and common destinations
+  (fonttbl / stylesheet / colortbl / info / pict / bin /
+  header / footer / ...); decodes `\uN` Unicode escapes and
+  `\'XX` hex escapes; emits `\par` as newline, `\tab` as tab.
+  Claims by MIME (application/rtf, text/rtf) or `.rtf`
+  extension. 4 tests.
+- **Archive** (`internal/indexer/extractors/archive.go`):
+  indexes the *file names* inside ZIP / TAR / TAR.GZ / TGZ
+  archives, sorted and newline-joined. Lets searches match
+  "changelog.md" inside a source tarball without unpacking.
+  Pure-Go stdlib (archive/zip, archive/tar, compress/gzip).
+  Detects format via magic bytes. 4 tests.
+
 ## v0.3.2 — 2026-04-13
 
 Quality-of-life point release on top of v0.3.1. Every item is
