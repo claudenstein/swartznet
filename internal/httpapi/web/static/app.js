@@ -157,6 +157,7 @@
   const optSwarm = document.getElementById('opt-swarm');
   const optDHT = document.getElementById('opt-dht');
   const optLimit = document.getElementById('opt-limit');
+  const optSignedBy = document.getElementById('search-signed-by');
 
   searchForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -171,6 +172,8 @@
         dht: optDHT.checked,
         highlight: true,
       };
+      const signedBy = (optSignedBy.value || '').trim().toLowerCase();
+      if (signedBy) body.signed_by = signedBy;
       const res = await postJSON('/search', body);
       renderResults(res, q);
     } catch (err) {
@@ -242,9 +245,21 @@
       appendFragments(hit, h, 'text');
     } else {
       hit.appendChild(renderHighlightedName(h));
-      hit.appendChild(elt('div', { class: 'hit-meta' },
+      const meta = elt('div', { class: 'hit-meta' },
         [h.infohash + ' · ' + humanBytes(h.size_bytes) +
-          ' · score=' + (h.score || 0).toFixed(3)]));
+          ' · score=' + (h.score || 0).toFixed(3)]);
+      if (h.signed_by) {
+        meta.appendChild(elt('span', {
+          class: 'signed',
+          text: ' · ✓ ' + h.signed_by.slice(0, 8),
+          title: 'Signed by ' + h.signed_by + ' — click to filter to this publisher',
+          onclick: () => {
+            document.getElementById('search-signed-by').value = h.signed_by;
+            document.getElementById('search-go').click();
+          },
+        }));
+      }
+      hit.appendChild(meta);
       // File-list fragments on torrent hits help show which
       // file path matched.
       appendFragments(hit, h, 'files');

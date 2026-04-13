@@ -1104,6 +1104,7 @@ func (e *Engine) autoIndex(h *Handle) {
 	}
 
 	doc := indexerDocFromTorrent(h.T)
+	doc.SignedBy = h.SignedBy()
 
 	// Per-torrent opt-out: torrents explicitly marked non-indexing
 	// skip the Bleve write but still go to the DHT publisher, so

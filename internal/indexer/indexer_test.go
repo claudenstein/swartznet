@@ -509,3 +509,534 @@ func TestDeleteTorrent(t *testing.T) {
 		t.Errorf("second delete: %v", err)
 	}
 }
+
+// TestAllTorrentDocsEmpty verifies AllTorrentDocs on an empty index
+// returns a nil/empty slice with no error.
+func TestAllTorrentDocsEmpty(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	docs, err := idx.AllTorrentDocs()
+	if err != nil {
+		t.Fatalf("AllTorrentDocs: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("AllTorrentDocs on empty index returned %d docs, want 0", len(docs))
+	}
+}
+
+// TestAllTorrentDocsSingle verifies AllTorrentDocs returns a single
+// torrent doc with all fields correctly reconstructed from stored fields.
+func TestAllTorrentDocsSingle(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	added := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	want := indexer.TorrentDoc{
+		InfoHash:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Name:      "ubuntu 24.04 desktop amd64 iso",
+		FilePaths: []string{"ubuntu-24.04-desktop-amd64.iso", "README.diskdefines"},
+		Trackers:  []string{"udp://tracker.example.org:1337/announce"},
+		SizeBytes: 6 * 1024 * 1024 * 1024,
+		FileCount: 2,
+		AddedAt:   added,
+	}
+	if err := idx.IndexTorrent(want); err != nil {
+		t.Fatalf("IndexTorrent: %v", err)
+	}
+
+	docs, err := idx.AllTorrentDocs()
+	if err != nil {
+		t.Fatalf("AllTorrentDocs: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("AllTorrentDocs returned %d docs, want 1", len(docs))
+	}
+	got := docs[0]
+	if got.InfoHash != want.InfoHash {
+		t.Errorf("InfoHash = %q, want %q", got.InfoHash, want.InfoHash)
+	}
+	if got.Name != want.Name {
+		t.Errorf("Name = %q, want %q", got.Name, want.Name)
+	}
+	if got.SizeBytes != want.SizeBytes {
+		t.Errorf("SizeBytes = %d, want %d", got.SizeBytes, want.SizeBytes)
+	}
+	if got.FileCount != want.FileCount {
+		t.Errorf("FileCount = %d, want %d", got.FileCount, want.FileCount)
+	}
+	if len(got.FilePaths) != len(want.FilePaths) {
+		t.Errorf("FilePaths len = %d, want %d", len(got.FilePaths), len(want.FilePaths))
+	} else {
+		for i := range want.FilePaths {
+			if got.FilePaths[i] != want.FilePaths[i] {
+				t.Errorf("FilePaths[%d] = %q, want %q", i, got.FilePaths[i], want.FilePaths[i])
+			}
+		}
+	}
+	if len(got.Trackers) != len(want.Trackers) {
+		t.Errorf("Trackers len = %d, want %d", len(got.Trackers), len(want.Trackers))
+	} else {
+		for i := range want.Trackers {
+			if got.Trackers[i] != want.Trackers[i] {
+				t.Errorf("Trackers[%d] = %q, want %q", i, got.Trackers[i], want.Trackers[i])
+			}
+		}
+	}
+	if !got.AddedAt.Equal(want.AddedAt) {
+		t.Errorf("AddedAt = %v, want %v", got.AddedAt, want.AddedAt)
+	}
+}
+
+// TestAllTorrentDocsMultiple verifies AllTorrentDocs returns all indexed
+// torrent docs when multiple are present. Also ensures content docs are
+// excluded from the result.
+func TestAllTorrentDocsMultiple(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	hashes := []string{
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"cccccccccccccccccccccccccccccccccccccccc",
+	}
+	for _, h := range hashes {
+		if err := idx.IndexTorrent(indexer.TorrentDoc{
+			InfoHash: h,
+			Name:     "torrent-" + h[:4],
+		}); err != nil {
+			t.Fatalf("IndexTorrent(%s): %v", h[:4], err)
+		}
+	}
+
+	// Also index a content doc that must NOT appear in AllTorrentDocs.
+	if err := idx.IndexContent(indexer.ContentDoc{
+		InfoHash:  hashes[0],
+		FilePath:  "readme.txt",
+		Text:      "some extracted content",
+		Extractor: "plaintext",
+	}); err != nil {
+		t.Fatalf("IndexContent: %v", err)
+	}
+
+	docs, err := idx.AllTorrentDocs()
+	if err != nil {
+		t.Fatalf("AllTorrentDocs: %v", err)
+	}
+	if len(docs) != 3 {
+		t.Fatalf("AllTorrentDocs returned %d docs, want 3", len(docs))
+	}
+
+	// Collect returned infohashes into a set.
+	got := make(map[string]bool, len(docs))
+	for _, d := range docs {
+		got[d.InfoHash] = true
+	}
+	for _, h := range hashes {
+		if !got[h] {
+			t.Errorf("AllTorrentDocs missing infohash %s", h[:8])
+		}
+	}
+}
+
+// TestContentDocsForInfoHashEmpty verifies that querying content docs
+// for an infohash with no content returns an empty slice, no error.
+func TestContentDocsForInfoHashEmpty(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	docs, err := idx.ContentDocsForInfoHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err != nil {
+		t.Fatalf("ContentDocsForInfoHash: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("expected 0 content docs, got %d", len(docs))
+	}
+}
+
+// TestContentDocsForInfoHashRoundTrip indexes several content docs under
+// two different infohashes, then retrieves by infohash and verifies that
+// only the correct docs are returned with all fields reconstructed.
+func TestContentDocsForInfoHashRoundTrip(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	ih1 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	ih2 := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	// Two content docs for ih1, one for ih2.
+	ih1Docs := []indexer.ContentDoc{
+		{
+			InfoHash:  ih1,
+			FileIndex: 0,
+			FilePath:  "chapter1.txt",
+			FileSize:  5000,
+			Mime:      "text/plain",
+			Text:      "the quick brown fox",
+			Extractor: "plaintext",
+		},
+		{
+			InfoHash:   ih1,
+			FileIndex:  0,
+			FilePath:   "chapter1.txt",
+			FileSize:   5000,
+			Mime:       "text/plain",
+			Text:       "jumps over the lazy dog",
+			Extractor:  "plaintext",
+			ChunkIndex: 1,
+		},
+	}
+	ih2Doc := indexer.ContentDoc{
+		InfoHash:  ih2,
+		FileIndex: 0,
+		FilePath:  "notes.txt",
+		FileSize:  200,
+		Mime:      "text/plain",
+		Text:      "unrelated text",
+		Extractor: "plaintext",
+	}
+
+	for _, d := range ih1Docs {
+		if err := idx.IndexContent(d); err != nil {
+			t.Fatalf("IndexContent: %v", err)
+		}
+	}
+	if err := idx.IndexContent(ih2Doc); err != nil {
+		t.Fatalf("IndexContent: %v", err)
+	}
+
+	// Retrieve for ih1 — should get exactly 2 docs.
+	got, err := idx.ContentDocsForInfoHash(ih1)
+	if err != nil {
+		t.Fatalf("ContentDocsForInfoHash(%s): %v", ih1[:8], err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ContentDocsForInfoHash returned %d docs, want 2", len(got))
+	}
+
+	// Verify field reconstruction on retrieved docs.
+	texts := make(map[string]bool)
+	for _, d := range got {
+		texts[d.Text] = true
+		if d.InfoHash != ih1 {
+			t.Errorf("doc InfoHash = %q, want %q", d.InfoHash, ih1)
+		}
+		if d.FilePath != "chapter1.txt" {
+			t.Errorf("doc FilePath = %q, want chapter1.txt", d.FilePath)
+		}
+		if d.FileSize != 5000 {
+			t.Errorf("doc FileSize = %d, want 5000", d.FileSize)
+		}
+		if d.Mime != "text/plain" {
+			t.Errorf("doc Mime = %q, want text/plain", d.Mime)
+		}
+		if d.Extractor != "plaintext" {
+			t.Errorf("doc Extractor = %q, want plaintext", d.Extractor)
+		}
+		if d.IndexedAt.IsZero() {
+			t.Error("doc IndexedAt is zero, want non-zero")
+		}
+	}
+	if !texts["the quick brown fox"] {
+		t.Error("missing text 'the quick brown fox'")
+	}
+	if !texts["jumps over the lazy dog"] {
+		t.Error("missing text 'jumps over the lazy dog'")
+	}
+
+	// Retrieve for ih2 — should get exactly 1 doc.
+	got2, err := idx.ContentDocsForInfoHash(ih2)
+	if err != nil {
+		t.Fatalf("ContentDocsForInfoHash(%s): %v", ih2[:8], err)
+	}
+	if len(got2) != 1 {
+		t.Fatalf("ContentDocsForInfoHash returned %d docs, want 1", len(got2))
+	}
+	if got2[0].Text != "unrelated text" {
+		t.Errorf("doc Text = %q, want 'unrelated text'", got2[0].Text)
+	}
+}
+
+// TestContentDocsForInfoHashCaseInsensitive verifies that the infohash
+// lookup is case-insensitive (upper-case input still finds lower-cased
+// stored docs).
+func TestContentDocsForInfoHashCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	ih := "aabbccddaabbccddaabbccddaabbccddaabbccdd"
+	if err := idx.IndexContent(indexer.ContentDoc{
+		InfoHash:  ih,
+		FilePath:  "test.txt",
+		Text:      "case test content",
+		Extractor: "plaintext",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query with upper-case infohash.
+	got, err := idx.ContentDocsForInfoHash(strings.ToUpper(ih))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 doc, got %d", len(got))
+	}
+	if got[0].Text != "case test content" {
+		t.Errorf("Text = %q, want 'case test content'", got[0].Text)
+	}
+}
+
+// TestStatsEmptyIndex verifies all Stats fields on a fresh empty index.
+// InflationRatio must be 0, and all counters must be 0.
+func TestStatsEmptyIndex(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	st, err := idx.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if st.TorrentCount != 0 {
+		t.Errorf("TorrentCount = %d, want 0", st.TorrentCount)
+	}
+	if st.ContentCount != 0 {
+		t.Errorf("ContentCount = %d, want 0", st.ContentCount)
+	}
+	if st.CorpusTextBytes != 0 {
+		t.Errorf("CorpusTextBytes = %d, want 0", st.CorpusTextBytes)
+	}
+	if st.InflationRatio != 0 {
+		t.Errorf("InflationRatio = %v, want 0", st.InflationRatio)
+	}
+	// DirBytes should be positive even for an empty index because Bleve
+	// writes metadata files on creation.
+	if st.DirBytes <= 0 {
+		t.Errorf("DirBytes = %d, want > 0", st.DirBytes)
+	}
+	// DocCount may be 0 (no user docs).
+	if st.DocCount != 0 {
+		t.Errorf("DocCount = %d, want 0", st.DocCount)
+	}
+}
+
+// TestStatsLargeCorpus verifies Stats with many content docs. This
+// ensures the paginated CorpusTextBytes scan works correctly across
+// more than one batch-worth of docs wouldn't be practical to test at
+// batch=1000, so we verify the sum is correct for a moderate corpus.
+func TestStatsLargeCorpus(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	ih := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := idx.IndexTorrent(indexer.TorrentDoc{
+		InfoHash: ih,
+		Name:     "corpus test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const numDocs = 50
+	text := "abcdefghij" // 10 bytes each
+	var wantBytes int64
+	for i := 0; i < numDocs; i++ {
+		if err := idx.IndexContent(indexer.ContentDoc{
+			InfoHash:   ih,
+			FileIndex:  i,
+			FilePath:   "file.txt",
+			Text:       text,
+			Extractor:  "plaintext",
+			ChunkIndex: i,
+		}); err != nil {
+			t.Fatalf("IndexContent #%d: %v", i, err)
+		}
+		wantBytes += int64(len(text))
+	}
+
+	st, err := idx.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if st.ContentCount != numDocs {
+		t.Errorf("ContentCount = %d, want %d", st.ContentCount, numDocs)
+	}
+	if st.TorrentCount != 1 {
+		t.Errorf("TorrentCount = %d, want 1", st.TorrentCount)
+	}
+	if st.CorpusTextBytes != wantBytes {
+		t.Errorf("CorpusTextBytes = %d, want %d", st.CorpusTextBytes, wantBytes)
+	}
+	if st.InflationRatio <= 0 {
+		t.Errorf("InflationRatio = %v, want > 0", st.InflationRatio)
+	}
+}
+
+// TestAllTorrentDocsExcludesContent ensures that AllTorrentDocs never
+// returns content-level documents, even when the index holds both types.
+func TestAllTorrentDocsExcludesContent(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	ih := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Index only content docs — no torrent doc.
+	for i := 0; i < 5; i++ {
+		if err := idx.IndexContent(indexer.ContentDoc{
+			InfoHash:   ih,
+			FileIndex:  i,
+			FilePath:   "file.txt",
+			Text:       "some text here",
+			Extractor:  "plaintext",
+			ChunkIndex: i,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	docs, err := idx.AllTorrentDocs()
+	if err != nil {
+		t.Fatalf("AllTorrentDocs: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("AllTorrentDocs returned %d docs, want 0 (only content docs in index)", len(docs))
+	}
+}
+
+// TestTorrentDocFieldReconstruction verifies that torrent docs indexed
+// with multiple trackers and file paths are faithfully reconstructed
+// by AllTorrentDocs (field round-trip through Bleve stored fields).
+func TestTorrentDocFieldReconstruction(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := indexer.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	want := indexer.TorrentDoc{
+		InfoHash: "aabbccddeeff00112233aabbccddeeff00112233",
+		Name:     "multi-tracker test",
+		FilePaths: []string{
+			"dir/file1.txt",
+			"dir/file2.pdf",
+			"dir/sub/file3.epub",
+		},
+		Trackers: []string{
+			"udp://tracker.one.org:1337/announce",
+			"udp://tracker.two.org:6969/announce",
+		},
+		SizeBytes: 123456789,
+		FileCount: 3,
+		AddedAt:   time.Date(2026, 1, 15, 8, 30, 0, 0, time.UTC),
+	}
+
+	if err := idx.IndexTorrent(want); err != nil {
+		t.Fatal(err)
+	}
+
+	docs, err := idx.AllTorrentDocs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("got %d docs, want 1", len(docs))
+	}
+	got := docs[0]
+
+	if got.InfoHash != want.InfoHash {
+		t.Errorf("InfoHash = %q, want %q", got.InfoHash, want.InfoHash)
+	}
+	if got.Name != want.Name {
+		t.Errorf("Name = %q, want %q", got.Name, want.Name)
+	}
+	if got.SizeBytes != want.SizeBytes {
+		t.Errorf("SizeBytes = %d, want %d", got.SizeBytes, want.SizeBytes)
+	}
+	if got.FileCount != want.FileCount {
+		t.Errorf("FileCount = %d, want %d", got.FileCount, want.FileCount)
+	}
+	if !got.AddedAt.Equal(want.AddedAt) {
+		t.Errorf("AddedAt = %v, want %v", got.AddedAt, want.AddedAt)
+	}
+
+	// FilePaths round-trip through newline-join in toBleve and split in
+	// torrentDocFromFields.
+	if len(got.FilePaths) != len(want.FilePaths) {
+		t.Fatalf("FilePaths len = %d, want %d", len(got.FilePaths), len(want.FilePaths))
+	}
+	for i := range want.FilePaths {
+		if got.FilePaths[i] != want.FilePaths[i] {
+			t.Errorf("FilePaths[%d] = %q, want %q", i, got.FilePaths[i], want.FilePaths[i])
+		}
+	}
+
+	// Multiple trackers round-trip through Bleve's stored array.
+	if len(got.Trackers) != len(want.Trackers) {
+		t.Fatalf("Trackers len = %d, want %d", len(got.Trackers), len(want.Trackers))
+	}
+	trackerSet := make(map[string]bool, len(got.Trackers))
+	for _, tr := range got.Trackers {
+		trackerSet[tr] = true
+	}
+	for _, tr := range want.Trackers {
+		if !trackerSet[tr] {
+			t.Errorf("missing tracker %q in reconstructed doc", tr)
+		}
+	}
+}

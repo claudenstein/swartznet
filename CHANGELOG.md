@@ -15,6 +15,65 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.7.0 — 2026-04-13
+
+**Headline: search by publisher.** Every torrent indexed since
+v0.4.0 carries an optional ed25519 publisher signature on its
+`.torrent` file. Bleve now stores that signature on each
+TorrentDoc, exposes it as a search hit field, and accepts a
+`SignedBy` filter that restricts results to a specific
+publisher.
+
+### Index schema bump (v2 → v3)
+
+  - `TorrentDoc.SignedBy string` (64-char hex) added,
+    persisted as a Bleve keyword field for exact-match
+    filtering.
+  - `SearchRequest.SignedBy string` filter — when set, the
+    query is conjuncted with a term match on the
+    `signed_by` field.
+  - `SearchHit.SignedBy string` returned on every hit so
+    UIs can render a badge.
+  - Existing indexes auto-rebuild on first open under v0.7.0
+    (the `SchemaVersion` sentinel mismatch triggers a clean
+    rebuild — same code path as v0.2 → v0.3 of the index).
+
+Two new tests: `TestSearchSignedByFilter` (3 docs split
+across two pubkeys, each pubkey reachable via the filter)
+and `TestSearchSignedByPersistsThroughIndex` (round-trip the
+signed_by field through Bleve).
+
+### CLI
+
+  - `swartznet search --signed-by <pubkey>` flag passes
+    through to the search API. Combine with `--swarm` /
+    `--dht` as needed; the filter only applies to local
+    Layer-L hits today.
+
+### HTTP API
+
+  - `POST /search` body gains `signed_by string`.
+  - `GET /search` `local.hits[].signed_by` populated for
+    torrent-level matches.
+
+### Web UI
+
+  - New `publisher` text input next to the search options.
+    Accepts a 64-char hex pubkey; `pattern` validates client-
+    side.
+  - Search hits show a `✓ <pubkey-prefix>` badge for signed
+    torrents. Clicking the badge sets the publisher filter
+    and re-runs the search — fast pivot to "everything else
+    by this publisher".
+
+### Native GUI
+
+  - Search hit subtitle gains `✓ signed by <pubkey-prefix>`
+    when the local hit's SignedBy is non-empty.
+  - Trust-aware rendering (gold ★ for trusted) deferred to
+    v0.8 when the SearchHit type carries TrustedPublisher
+    natively without an engine round-trip.
+
 ## v0.6.1 — 2026-04-13
 
 Web UI polish patch on top of v0.6.0.

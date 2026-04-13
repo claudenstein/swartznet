@@ -37,7 +37,14 @@
           <label>limit
             <input type="number" id="opt-limit" value="20" min="1" max="100">
           </label>
-          <button type="submit">Search</button>
+          <label>publisher
+            <input type="text" id="search-signed-by"
+                   placeholder="64-char hex pubkey (optional)"
+                   pattern="[0-9a-fA-F]{64}"
+                   title="restrict local results to torrents signed by this publisher"
+                   size="20">
+          </label>
+          <button type="submit" id="search-go">Search</button>
         </div>
       </form>
 

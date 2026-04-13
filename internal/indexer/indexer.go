@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/search/query"
 )
 
 // schemaSentinelKey is the Bleve Index.SetInternal key under which we
@@ -163,6 +164,11 @@ type TorrentDoc struct {
 	SizeBytes int64     // total torrent size in bytes
 	FileCount int       // cached len(FilePaths) for faceting
 	AddedAt   time.Time // when this was added to the index
+	// SignedBy is the 64-char hex ed25519 pubkey of whoever
+	// signed this torrent's .torrent file, or empty for
+	// unsigned torrents. Stored as a keyword field so the
+	// search-by-publisher facet can match it exactly.
+	SignedBy string
 }
 
 // docID returns the Bleve document ID for a torrent. We use the infohash
@@ -190,6 +196,7 @@ func (d TorrentDoc) toBleve() map[string]any {
 		fieldSizeBytes: d.SizeBytes,
 		fieldAddedAt:   d.AddedAt,
 		fieldFileCount: d.FileCount,
+		fieldSignedBy:  strings.ToLower(d.SignedBy),
 	}
 }
 
@@ -548,6 +555,11 @@ type SearchRequest struct {
 	// and are most useful for content-level hits where the caller
 	// wants to show the match in context.
 	Highlight bool
+	// SignedBy, when non-empty, restricts results to torrents
+	// whose .torrent file was signed with this 64-char hex
+	// ed25519 pubkey. Combine with Query (or leave Query empty
+	// to fetch every signed torrent from this publisher).
+	SignedBy string
 }
 
 // SearchHit is a single result row returned by Search. Fields marked
@@ -565,6 +577,7 @@ type SearchHit struct {
 	SizeBytes int64    // total torrent bytes
 	FileCount int      // cached file count
 	Trackers  []string // tracker URLs (may be empty)
+	SignedBy  string   // 64-char hex pubkey of the .torrent signer (empty for unsigned)
 
 	// Content-level fields.
 	FileIndex int    // position in torrent's file list
@@ -628,13 +641,21 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 		req.Limit = 20
 	}
 
-	q := bleve.NewQueryStringQuery(req.Query)
+	// Build the query: free-form text (req.Query) AND, if
+	// SignedBy is set, an exact-match keyword filter on the
+	// signing pubkey.
+	var q query.Query = bleve.NewQueryStringQuery(req.Query)
+	if req.SignedBy != "" {
+		signedQ := bleve.NewTermQuery(strings.ToLower(req.SignedBy))
+		signedQ.SetField(fieldSignedBy)
+		q = bleve.NewConjunctionQuery(q, signedQ)
+	}
 	sr := bleve.NewSearchRequestOptions(q, req.Limit, 0, false)
 	sr.Fields = []string{
 		fieldType,
 		fieldInfoHash,
 		// torrent fields
-		fieldName, fieldSizeBytes, fieldFileCount, fieldTrackers,
+		fieldName, fieldSizeBytes, fieldFileCount, fieldTrackers, fieldSignedBy,
 		// content fields
 		fieldFileIndex, fieldFilePath, fieldFileSize, fieldMime, fieldExtractor,
 	}
@@ -684,6 +705,9 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 					hit.Trackers = append(hit.Trackers, s)
 				}
 			}
+		}
+		if v, ok := h.Fields[fieldSignedBy].(string); ok {
+			hit.SignedBy = v
 		}
 		// Content-level fields.
 		if v, ok := h.Fields[fieldFileIndex].(float64); ok {

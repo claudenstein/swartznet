@@ -221,6 +221,13 @@ func (st *searchTab) makeLocalHitCard(h indexer.SearchHit) fyne.CanvasObject {
 	if h.SizeBytes > 0 {
 		subtitle += "  " + humanBytes(h.SizeBytes)
 	}
+	if h.SignedBy != "" {
+		// Indicate signature on the subtitle. Trusted-publisher
+		// resolution would need an extra round-trip to the
+		// engine's TrustStore — defer that to a future iteration
+		// where SearchHit carries TrustedPublisher directly.
+		subtitle += fmt.Sprintf("  ✓ signed by %s", h.SignedBy[:8])
+	}
 
 	confirmBtn := widget.NewButton("Confirm", func() {
 		st.confirmHit(h.InfoHash)

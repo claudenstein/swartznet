@@ -38,6 +38,7 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 		apiAddr     string
 		swarmTimeMs int
 		dhtTimeMs   int
+		signedBy    string
 	)
 	fs.StringVar(&indexDir, "index-dir", "", "path to the Bleve index (default: ~/.local/share/swartznet/index)")
 	fs.IntVar(&limit, "limit", 20, "maximum results to return")
@@ -47,6 +48,7 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	fs.IntVar(&swarmTimeMs, "swarm-timeout-ms", 2000, "swarm fan-out timeout in milliseconds")
 	fs.IntVar(&dhtTimeMs, "dht-timeout-ms", 5000, "DHT lookup timeout in milliseconds")
+	fs.StringVar(&signedBy, "signed-by", "", "restrict local results to torrents signed by this 64-char hex pubkey")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -56,8 +58,13 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 	}
 	query := strings.Join(fs.Args(), " ")
 
-	if useSwarm || useDHT {
-		return cmdSearchViaAPI(stdout, stderr, apiAddr, query, limit, swarmTimeMs, dhtTimeMs, useSwarm, useDHT, asJSON)
+	if useSwarm || useDHT || signedBy != "" {
+		// Route through the daemon API so the signed-by filter
+		// rides on the same JSON shape used everywhere else.
+		// (The local-index-only path also accepts the filter,
+		// but the API route lets us combine it with swarm/DHT
+		// fan-outs in one call.)
+		return cmdSearchViaAPI(stdout, stderr, apiAddr, query, limit, swarmTimeMs, dhtTimeMs, useSwarm, useDHT, signedBy, asJSON)
 	}
 
 	// Direct local-only path: open the Bleve index in-process.
@@ -85,7 +92,7 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 
 // cmdSearchViaAPI talks to a running `swartznet add` daemon over the
 // local HTTP API to run a combined local + swarm + DHT search.
-func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swarmTimeoutMs, dhtTimeoutMs int, useSwarm, useDHT bool, asJSON bool) int {
+func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swarmTimeoutMs, dhtTimeoutMs int, useSwarm, useDHT bool, signedBy string, asJSON bool) int {
 	body, err := json.Marshal(httpapi.SearchRequest{
 		Q:              query,
 		Limit:          limit,
@@ -93,6 +100,7 @@ func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swa
 		DHT:            useDHT,
 		SwarmTimeoutMs: swarmTimeoutMs,
 		DHTTimeoutMs:   dhtTimeoutMs,
+		SignedBy:       signedBy,
 	})
 	if err != nil {
 		return reportRunErr(err, stderr)

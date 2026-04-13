@@ -123,6 +123,63 @@ func TestPipelineSkipsBinary(t *testing.T) {
 	}
 }
 
+// TestPipelineSubmitAfterStop verifies that Submit returns false after
+// Stop has been called, once the internal input channel buffer is full.
+// The Pipeline's input channel has a fixed buffer (64). After Stop, the
+// worker goroutine has exited and nothing drains the channel, so once
+// the buffer is saturated the only ready select case is the closed
+// stopCh, guaranteeing Submit returns false.
+func TestPipelineSubmitAfterStop(t *testing.T) {
+	t.Parallel()
+
+	idx, err := indexer.Open(filepath.Join(t.TempDir(), "index.bleve"))
+	if err != nil {
+		t.Fatalf("Open index: %v", err)
+	}
+	defer idx.Close()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := indexer.NewPipeline(idx, log, 0)
+	p.Start()
+	p.Stop()
+
+	// Fill the buffered input channel (cap=64). After Stop the worker
+	// goroutine has exited, so nothing drains the channel. Some sends
+	// may return false (stopCh wins the select race), so we keep
+	// sending until the buffer is truly saturated.
+	for i := 0; i < 256; i++ {
+		ok := p.Submit(indexer.FileInput{
+			InfoHash:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			FileIndex:  i,
+			Path:       "fill.txt",
+			Size:       1,
+			OpenReader: mockOpenReader("x"),
+		})
+		if !ok {
+			// stopCh won. The buffer might not be full yet, but at
+			// some point it will be. Keep going.
+			continue
+		}
+	}
+
+	// Now the buffer is full (64 successful sends out of 256 attempts
+	// is overwhelmingly likely). The send case cannot proceed, so the
+	// only ready case in Submit's select is <-p.stopCh. Verify across
+	// multiple calls for confidence.
+	for i := 0; i < 10; i++ {
+		ok := p.Submit(indexer.FileInput{
+			InfoHash:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			FileIndex:  1000 + i,
+			Path:       "overflow.txt",
+			Size:       10,
+			OpenReader: mockOpenReader("hello world"),
+		})
+		if ok {
+			t.Errorf("Submit #%d returned true after Stop with full buffer; want false", i)
+		}
+	}
+}
+
 // TestIndexContentAndDelete exercises the direct IndexContent /
 // DeleteContentForTorrent path without the pipeline.
 func TestIndexContentAndDelete(t *testing.T) {

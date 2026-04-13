@@ -33,6 +33,7 @@ const (
 	fieldSizeBytes = "size_bytes"
 	fieldAddedAt   = "added_at"
 	fieldFileCount = "file_count"
+	fieldSignedBy  = "signed_by" // 64-char hex pubkey of the .torrent signer (v0.7+)
 
 	// Content document fields.
 	fieldFileIndex = "file_index" // position in the torrent's file list
@@ -48,7 +49,11 @@ const (
 // is not backwards compatible with indexes created under an earlier version.
 // The Index.Open path writes this as a sentinel document on first creation
 // and checks it on reopen; a mismatch triggers a clean rebuild.
-const SchemaVersion = 2
+//
+// v3 (2026-04-13): TorrentDoc gains the signed_by field — a 64-char hex
+// ed25519 pubkey of whoever signed the source .torrent file (or empty
+// for unsigned torrents). Required for the search-by-publisher facet.
+const SchemaVersion = 3
 
 // buildMapping constructs the Bleve index mapping for SwartzNet. M2.0
 // ships a single document type ("torrent"); M2.2 will add a "content"
@@ -90,6 +95,7 @@ func buildMapping() *mapping.IndexMappingImpl {
 	torrent.AddFieldMappingsAt(fieldSizeBytes, num)
 	torrent.AddFieldMappingsAt(fieldAddedAt, dt)
 	torrent.AddFieldMappingsAt(fieldFileCount, num)
+	torrent.AddFieldMappingsAt(fieldSignedBy, kw)
 
 	content := bleve.NewDocumentMapping()
 	content.AddFieldMappingsAt(fieldInfoHash, kw)

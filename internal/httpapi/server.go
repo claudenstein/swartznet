@@ -292,6 +292,11 @@ type SearchRequest struct {
 	SwarmTimeoutMs int `json:"swarm_timeout_ms,omitempty"`
 	// DHTTimeoutMs bounds the Layer-D get traversal. Zero → 5s.
 	DHTTimeoutMs int `json:"dht_timeout_ms,omitempty"`
+	// SignedBy, when non-empty, restricts local results to
+	// torrents whose .torrent file was signed by this 64-char
+	// hex ed25519 pubkey. Currently only filters Layer L; the
+	// swarm and DHT layers don't carry signed metadata.
+	SignedBy string `json:"signed_by,omitempty"`
 	// Highlight, when true, asks the local indexer to return
 	// matched-text fragments on each hit (LocalHit.Fragments).
 	// Fragments are wrapped with <mark>...</mark> by Bleve's
@@ -343,6 +348,12 @@ type LocalHit struct {
 	Mime      string  `json:"mime,omitempty"`
 	Extractor string  `json:"extractor,omitempty"`
 	Score     float64 `json:"score"`
+	// SignedBy is the 64-char hex pubkey that signed the
+	// torrent's .torrent file, populated for torrent-level
+	// hits where the indexer recorded one. Empty for content
+	// hits (which are anchored to the file, not the torrent
+	// metainfo).
+	SignedBy string `json:"signed_by,omitempty"`
 	// Fragments maps a Bleve field name to a list of matched
 	// text fragments, pre-wrapped by Bleve's HTML highlighter
 	// so that matching terms appear as <mark>term</mark>.
@@ -393,6 +404,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			Query:     req.Q,
 			Limit:     req.Limit,
 			Highlight: req.Highlight,
+			SignedBy:  req.SignedBy,
 		})
 		if err != nil {
 			s.log.Warn("httpapi.local_err", "err", err)
@@ -412,6 +424,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				Extractor: h.Extractor,
 				Score:     h.Score,
 				Fragments: h.Fragments,
+				SignedBy:  h.SignedBy,
 			})
 		}
 	}
