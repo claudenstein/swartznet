@@ -15,6 +15,78 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.3.2 — 2026-04-13
+
+Quality-of-life point release on top of v0.3.1. Every item is
+small in isolation but the cumulative effect is that the GUI
+now feels like a real desktop app rather than a proof of
+concept.
+
+### GUI polish
+
+- **Transfer speed:** new ↓/↑ columns in the Downloads table
+  showing per-torrent bytes/sec. Window title shows aggregate
+  throughput when transfers are active.
+- **Sortable columns:** click any Downloads column header to
+  sort ascending; click again for descending; a third click
+  clears the sort. An arrow (▲/▼) marks the active column.
+- **Keyboard shortcuts:** `Ctrl+N` opens the Add Magnet
+  dialog, `Ctrl+F` switches to Search and focuses the query
+  entry, `Ctrl+Q` quits, `Delete` removes the selected
+  torrent.
+- **Persistent window size:** Fyne Preferences stores the
+  window dimensions on close and restores them on next
+  launch.
+- **Empty state:** "No torrents yet" message replaces the
+  previously blank Downloads table for new installs.
+- **Row-header bug fix:** Fyne's `NewTableWithHeaders`
+  exposes both a column-header row and a row-header column.
+  The row-header cells used to show the CreateHeader
+  placeholder text "Header"; they now render blank.
+- **Resizable window fix:** the GUI advertised a 1110×1216
+  minimum size to the window manager (the sum of every tab's
+  content minimum size). On a 1366×768 laptop screen, the WM
+  correctly refused to shrink below that minimum, which users
+  reported as "the resize cursor appears but nothing
+  happens". Fix: wrap each tab's content in a scroll
+  container. Minimum drops to 209×33; scroll bars appear
+  automatically when the content is bigger than the window.
+
+### New GUI flags
+
+- `--torrent <path.torrent>` — repeatable, loads the given
+  `.torrent` file at startup. Useful for demos, scripted
+  reproductions, and screenshots.
+- `--tab <downloads|search|status|companion|settings>` —
+  opens on a specific tab instead of the default Downloads.
+
+### README overhaul
+
+README is now product-focused: hero paragraph, feature
+bullets, install (pre-built binaries + build-from-source),
+quick-start (add/search/create/GUI), three-frontends table,
+documentation pointers, configuration, non-goals, dev/license.
+The previous 24-row milestone matrix moved to
+[docs/MILESTONES.md](docs/MILESTONES.md). New
+[docs/README.md](docs/README.md) indexes every document by
+audience. Three native GUI screenshots under
+`docs/screenshots/` illustrate the Downloads, Status, and
+Settings tabs.
+
+### CI/CD
+
+- `.github/workflows/test.yml` runs `go mod tidy` check,
+  `gofmt -l -s`, `go vet`, and `go test -race` on every
+  push to main and every PR. Excludes `internal/testlab/`
+  (integration tests that are flaky on shared runners).
+- `.github/workflows/release.yml` fires on every `v*` tag,
+  builds five CLI binaries (linux amd64/arm64, darwin
+  amd64/arm64, windows amd64) and four GUI binaries (linux,
+  darwin amd64 via cross-compile from arm64, darwin arm64,
+  windows), regenerates SHA256SUMS, extracts the matching
+  CHANGELOG section into release notes, and publishes the
+  GitHub Release. Prerelease flag is automatic for v0.* tags.
+
 ## v0.3.1 — 2026-04-13
 
 Feature-packed point release on top of v0.3.0. Six new user-
