@@ -15,6 +15,91 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+## v0.4.0 — 2026-04-13
+
+**Highlight: signed torrents.** SwartzNet can now sign and
+verify `.torrent` files with ed25519 publisher signatures.
+Downloads coming from a trusted publisher (anyone whose pubkey
+you know) can be attributed with cryptographic certainty;
+vanilla BitTorrent clients ignore the signature fields and
+treat the `.torrent` as any other — full wire compatibility.
+
+Also in this release: three new content extractors pushing the
+total to 11 (FB2, PPTX, ODP join plaintext, subtitle, PDF,
+EPUB, DOCX, ODT, RTF, archive).
+
+### Signed torrents — `internal/signing` package
+
+Two new optional top-level fields are added to the .torrent
+metainfo dictionary:
+
+  - `snet.pubkey`  32-byte ed25519 public key
+  - `snet.sig`     64-byte ed25519 signature
+
+The signature payload is `"SN-TORRENT-V1|" || <infohash>`.
+The domain prefix prevents signature reuse across future
+uses of the same key; the infohash binds the signature to
+the content.
+
+Compatibility: every other BitTorrent client (qBittorrent,
+Transmission, libtorrent, anacrolix/torrent itself, etc.)
+already ignores unknown top-level metainfo fields. A signed
+`.torrent` downloads normally in every client; only SwartzNet
+reads the signing fields.
+
+New API:
+
+  - `internal/signing.SignBytes(raw, priv) ([]byte, error)`
+  - `internal/signing.VerifyBytes(raw) (Signature, error)`
+  - `internal/signing.SignFile(path, priv) error`
+  - `internal/signing.VerifyFile(path) (Signature, error)`
+  - `engine.CreateTorrentOptions.SignWith ed25519.PrivateKey`
+  - `engine.Handle.SignedBy() string`
+  - `engine.TorrentSnapshot.SignedBy string` (hex pubkey)
+
+CLI:
+
+  - `swartznet create --sign` signs with the node's identity
+    (loaded from `~/.local/share/swartznet/identity.key` by
+    default; override with `--identity <path>`).
+
+GUI:
+
+  - Create Torrent dialog gains a "Sign with my ed25519
+    identity" checkbox (enabled by default).
+  - Downloads table gains a "Signed" column showing "✓ <prefix>"
+    for verified signatures or "—" for unsigned.
+  - Right-click context menu gains a "Copy publisher pubkey"
+    action when the torrent is signed.
+
+HTTP API:
+
+  - `GET /torrents` response items gain an optional
+    `signed_by` field containing the 64-char hex pubkey.
+
+Five signing tests plus two engine integration tests cover
+round-trip, unsigned files, tampered content, file-on-disk
+round-trip, and the pubkey-hex encoder.
+
+### New content extractors
+
+  - **FB2** (`internal/indexer/extractors/fb2.go`) — pure-Go
+    XML walker for FictionBook 2.x ebooks. Extracts body
+    paragraphs + titles, skips `<binary>` cover art and
+    `<stylesheet>`. Permissive charset handling so
+    windows-1251-declared documents don't bounce out.
+  - **PPTX** (`internal/indexer/extractors/pptx.go`) —
+    PowerPoint presentations. Iterates
+    `ppt/slides/slideN.xml` in numeric order, pulls text
+    from every `<a:t>` element. Mirrors the DOCX design.
+  - **ODP** (`internal/indexer/extractors/odp.go`) —
+    LibreOffice Impress presentations. Reuses the ODT
+    extractor's XML walker (same `<text:p>` / `<text:h>` /
+    `<text:span>` shape).
+
+Seven new extractor tests covering all three formats plus
+dispatch-by-extension checks.
+
 ## v0.3.3 — 2026-04-13
 
 GUI polish pass #2 plus two new text extractors — shipped the

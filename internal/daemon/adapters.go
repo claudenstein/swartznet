@@ -91,6 +91,7 @@ func (c *controllerAdapter) TorrentSnapshots() []httpapi.TorrentSnapshot {
 			Queued:         s.Queued,
 			DownloadRate:   s.DownloadRate,
 			UploadRate:     s.UploadRate,
+			SignedBy:       s.SignedBy,
 		})
 	}
 	return out

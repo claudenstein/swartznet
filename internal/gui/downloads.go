@@ -52,6 +52,7 @@ var dlColumns = []struct {
 	{"↓ speed", 90},
 	{"↑ speed", 90},
 	{"Indexed", 70},
+	{"Signed", 100},
 }
 
 func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
@@ -106,6 +107,14 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 					label.SetText("yes")
 				} else {
 					label.SetText("no")
+				}
+			case 8: // Signed
+				if s.SignedBy == "" {
+					label.SetText("—")
+				} else {
+					// Show a short prefix so the column stays compact.
+					// Full pubkey is available via context menu/tooltip.
+					label.SetText("✓ " + s.SignedBy[:8])
 				}
 			}
 		},
@@ -266,6 +275,13 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 	copyHash := fyne.NewMenuItem("Copy infohash", func() {
 		fyne.CurrentApp().Clipboard().SetContent(ih)
 	})
+	var copySigner *fyne.MenuItem
+	if snap.SignedBy != "" {
+		signer := snap.SignedBy // capture
+		copySigner = fyne.NewMenuItem("Copy publisher pubkey", func() {
+			fyne.CurrentApp().Clipboard().SetContent(signer)
+		})
+	}
 
 	items := []*fyne.MenuItem{
 		fyne.NewMenuItem("Files...", func() { dl.showFilesForSelected() }),
@@ -295,6 +311,9 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 		copyMagnet,
 		copyHash,
 	)
+	if copySigner != nil {
+		items = append(items, copySigner)
+	}
 	return fyne.NewMenu("Torrent actions", items...)
 }
 
@@ -380,6 +399,11 @@ func snapLess(col int, desc bool) func(a, b engine.TorrentSnapshot) bool {
 				return a.Name < b.Name
 			}
 			return !a.Indexing && b.Indexing
+		case 8: // Signed — signed torrents first when ascending
+			if (a.SignedBy != "") == (b.SignedBy != "") {
+				return a.SignedBy < b.SignedBy
+			}
+			return a.SignedBy != "" && b.SignedBy == ""
 		}
 		return false
 	}

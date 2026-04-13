@@ -21,6 +21,7 @@ import (
 	"github.com/swartznet/swartznet/internal/identity"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/reputation"
+	"github.com/swartznet/swartznet/internal/signing"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
@@ -227,6 +228,13 @@ type Handle struct {
 	queued     bool
 	queueOrder int64
 
+	// signedBy is the 64-char lowercase hex form of the ed25519
+	// public key that signed this torrent's .torrent file, or
+	// empty if the torrent was unsigned or verification failed.
+	// Populated at add-time by AddTorrentFile; magnet/infohash
+	// adds always leave this empty.
+	signedBy string
+
 	// rateMu guards the transfer-rate sampling state. snapshotOf
 	// computes per-second download/upload rate by subtracting the
 	// previous reading's useful-data counts over wall-clock
@@ -239,6 +247,12 @@ type Handle struct {
 	lastDownloadRate int64
 	lastUploadRate   int64
 }
+
+// SignedBy returns the ed25519 public key (64-char hex) that
+// signed this torrent's .torrent file, or empty string if the
+// torrent was unsigned, verification failed, or the torrent was
+// added via magnet / raw infohash. Read-only: set at add time.
+func (h *Handle) SignedBy() string { return h.signedBy }
 
 // IsQueued reports whether this handle is currently waiting for a
 // download slot. See Engine.SetMaxActiveDownloads.
@@ -745,6 +759,26 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("engine: load .torrent: %w", err)
 	}
+
+	// Verify the SwartzNet publisher signature, if present.
+	// ErrNotSigned is normal — most .torrent files in the world
+	// are unsigned. ErrBadSignature is rare but worth flagging
+	// in the log so the user sees why their signed torrent
+	// didn't show a verified publisher.
+	var signedBy string
+	if sig, verr := signing.VerifyFile(path); verr == nil {
+		signedBy = sig.PubKeyHex()
+		e.log.Info("engine.torrent_signature_verified",
+			"path", path,
+			"pubkey", signedBy,
+		)
+	} else if !errors.Is(verr, signing.ErrNotSigned) {
+		e.log.Warn("engine.torrent_signature_rejected",
+			"path", path,
+			"err", verr,
+		)
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -754,7 +788,11 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("engine: add torrent: %w", err)
 	}
-	return e.registerLocked(t), nil
+	h := e.registerLocked(t)
+	if signedBy != "" {
+		h.signedBy = signedBy
+	}
+	return h, nil
 }
 
 // AddInfoHash adds a torrent by raw 20-byte infohash. Equivalent
@@ -1166,6 +1204,12 @@ type TorrentSnapshot struct {
 	DownloadRate int64
 	// UploadRate mirrors DownloadRate for bytes sent to peers.
 	UploadRate int64
+	// SignedBy is the 64-char hex ed25519 public key that
+	// signed this torrent's .torrent file. Empty when the
+	// torrent is unsigned, verification failed, or the
+	// torrent was added via magnet / raw infohash. See the
+	// `internal/signing` package for the signing scheme.
+	SignedBy string
 }
 
 // TorrentSnapshots returns a TorrentSnapshot for every torrent
@@ -1215,6 +1259,7 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 			Status:   status,
 			Indexing: h.IsIndexing(),
 			Queued:   queued,
+			SignedBy: h.SignedBy(),
 		}
 	}
 
@@ -1264,6 +1309,7 @@ func snapshotOf(h *Handle) TorrentSnapshot {
 		Queued:         queued,
 		DownloadRate:   downRate,
 		UploadRate:     upRate,
+		SignedBy:       h.SignedBy(),
 	}
 }
 

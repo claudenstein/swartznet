@@ -10,6 +10,7 @@ import (
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
+	"github.com/swartznet/swartznet/internal/identity"
 )
 
 // cmdCreate implements `swartznet create <root> -o <output.torrent>`.
@@ -25,15 +26,17 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		out       string
-		name      string
-		pieceKiB  int64
-		trackers  stringSliceFlag
-		webseeds  stringSliceFlag
-		comment   string
-		private   bool
-		startSeed bool
-		dataDir   string
+		out          string
+		name         string
+		pieceKiB     int64
+		trackers     stringSliceFlag
+		webseeds     stringSliceFlag
+		comment      string
+		private      bool
+		startSeed    bool
+		dataDir      string
+		sign         bool
+		identityPath string
 	)
 	fs.StringVar(&out, "o", "", "output .torrent path (required)")
 	fs.StringVar(&name, "name", "", "override the info.name field (default: basename of root)")
@@ -44,6 +47,8 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&private, "private", false, "mark as private (BEP-27: disables DHT/PEX)")
 	fs.BoolVar(&startSeed, "seed", false, "after creation, start seeding the content")
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for seeding (required if --seed, must contain the root)")
+	fs.BoolVar(&sign, "sign", false, "sign the .torrent file with our ed25519 identity so downloaders running SwartzNet can verify the publisher")
+	fs.StringVar(&identityPath, "identity", "", "path to the ed25519 identity.key file (defaults to ~/.local/share/swartznet/identity.key)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -67,6 +72,23 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 		Private:     private,
 		Comment:     comment,
 		CreatedBy:   "swartznet " + Version,
+	}
+
+	// Load the signing identity if --sign was requested. We load
+	// BEFORE spinning up the engine so a bad key path fails fast
+	// without starting piece hashing.
+	if sign {
+		cfg := config.Default()
+		path := identityPath
+		if path == "" {
+			path = cfg.IdentityPath
+		}
+		id, err := identity.LoadOrCreate(path)
+		if err != nil {
+			return reportRunErr(fmt.Errorf("load identity: %w", err), stderr)
+		}
+		opts.SignWith = id.PrivateKey
+		fmt.Fprintf(stdout, "Signing with identity %s\n", id.PublicKeyHex())
 	}
 
 	// We don't need a running engine for CreateTorrent, but the

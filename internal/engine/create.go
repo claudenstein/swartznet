@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/swartznet/swartznet/internal/signing"
 )
 
 // CreateTorrentOptions describes the torrent to build.
@@ -50,6 +53,16 @@ type CreateTorrentOptions struct {
 	// CreatedBy identifies the tool that built the torrent. When
 	// empty, defaults to "SwartzNet".
 	CreatedBy string
+
+	// SignWith, when non-nil, is an ed25519 private key used to
+	// sign the resulting torrent per the `internal/signing`
+	// package spec. The public key + signature are added as
+	// optional top-level metainfo fields (`snet.pubkey` and
+	// `snet.sig`); vanilla BitTorrent clients ignore these, so
+	// the torrent remains wire-compatible. Downloaders running
+	// SwartzNet verify the signature at add time and can surface
+	// the signing pubkey in the UI.
+	SignWith ed25519.PrivateKey
 }
 
 // CreateTorrent hashes the content at opts.Root and builds an
@@ -151,19 +164,24 @@ func (e *Engine) CreateTorrentFile(opts CreateTorrentOptions, outPath string) (s
 		return "", nil, err
 	}
 
-	tmp := outPath + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	// Serialize the metainfo, sign it if requested, then write.
+	// We marshal to bytes first (rather than streaming via
+	// mi.Write) so the signing layer can read/modify the
+	// bencoded form in a single pass.
+	miBytes, err := bencode.Marshal(mi)
 	if err != nil {
-		return "", nil, fmt.Errorf("open tmp: %w", err)
+		return "", nil, fmt.Errorf("marshal metainfo: %w", err)
 	}
-	if err := mi.Write(f); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return "", nil, fmt.Errorf("write torrent: %w", err)
+	if opts.SignWith != nil {
+		miBytes, err = signing.SignBytes(miBytes, opts.SignWith)
+		if err != nil {
+			return "", nil, fmt.Errorf("sign: %w", err)
+		}
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return "", nil, fmt.Errorf("close tmp: %w", err)
+
+	tmp := outPath + ".tmp"
+	if err := os.WriteFile(tmp, miBytes, 0o644); err != nil {
+		return "", nil, fmt.Errorf("write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, outPath); err != nil {
 		_ = os.Remove(tmp)

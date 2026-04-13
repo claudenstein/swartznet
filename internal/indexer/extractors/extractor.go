@@ -170,4 +170,7 @@ var extTypes = map[string]string{
 	".rtf":      "application/rtf",
 	".tar":      "application/x-tar",
 	".tgz":      "application/gzip",
+	".fb2":      "application/x-fictionbook+xml",
+	".pptx":     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	".odp":      "application/vnd.oasis.opendocument.presentation",
 }

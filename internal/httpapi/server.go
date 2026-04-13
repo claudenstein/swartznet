@@ -87,6 +87,7 @@ type TorrentSnapshot struct {
 	Queued         bool    `json:"queued"`
 	DownloadRate   int64   `json:"download_rate"`
 	UploadRate     int64   `json:"upload_rate"`
+	SignedBy       string  `json:"signed_by,omitempty"`
 }
 
 // TorrentAdder is the narrow interface the HTTP API needs from

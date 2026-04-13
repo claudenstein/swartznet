@@ -97,6 +97,11 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 
 	privateCheck := widget.NewCheck("Private torrent (disable DHT/PEX discovery, BEP-27)", nil)
 
+	signCheck := widget.NewCheck("Sign with my ed25519 identity (SwartzNet downloaders can verify publisher)", nil)
+	// Default on: every running SwartzNet node has an identity
+	// available, and signing costs effectively nothing.
+	signCheck.SetChecked(true)
+
 	seedCheck := widget.NewCheck("Start seeding immediately after creation", nil)
 	seedCheck.SetChecked(true)
 
@@ -138,6 +143,7 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 			widget.NewLabel("Comment"),
 			commentEntry,
 			privateCheck,
+			signCheck,
 		)),
 		widget.NewCard("Output", "", container.NewVBox(
 			widget.NewLabel("Output .torrent path"),
@@ -166,7 +172,7 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 				dialog.ShowError(fmt.Errorf("output path required"), win)
 				return
 			}
-			runCreateTorrent(d, win, engine.CreateTorrentOptions{
+			opts := engine.CreateTorrentOptions{
 				Root:        strings.TrimSpace(rootEntry.Text),
 				Name:        strings.TrimSpace(nameEntry.Text),
 				PieceLength: pieceLengthFromLabel(pieceSelect.Selected),
@@ -174,7 +180,13 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 				WebSeeds:    splitLines(webseedsEntry.Text),
 				Private:     privateCheck.Checked,
 				Comment:     strings.TrimSpace(commentEntry.Text),
-			}, strings.TrimSpace(outEntry.Text), seedCheck.Checked)
+			}
+			if signCheck.Checked {
+				if id := d.Eng.Identity(); id != nil {
+					opts.SignWith = id.PrivateKey
+				}
+			}
+			runCreateTorrent(d, win, opts, strings.TrimSpace(outEntry.Text), seedCheck.Checked)
 		},
 		win,
 	)
