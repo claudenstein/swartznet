@@ -1,6 +1,19 @@
 package engine
 
-import "golang.org/x/time/rate"
+import (
+	"math"
+
+	"golang.org/x/time/rate"
+)
+
+// unlimitedBurst is the burst value used when a limiter is in
+// "unlimited" mode (rate.Inf). Must be positive because
+// anacrolix's openNewConns path checks DownloadRateLimiter.Tokens()
+// > 0 before allowing a new outgoing connection — a zero burst
+// would block all dial attempts, even though rate.Inf itself means
+// "no rate limiting". math.MaxInt32 ≈ 2 GiB, plenty of headroom
+// for any single reservation the client will ever make.
+const unlimitedBurst = math.MaxInt32
 
 // UploadLimitBytesPerSec returns the current upload bandwidth cap
 // in bytes per second. Zero means unlimited.
@@ -56,7 +69,7 @@ func setLimiterBytesPerSec(l *rate.Limiter, bps int64) {
 	}
 	if bps <= 0 {
 		l.SetLimit(rate.Inf)
-		l.SetBurst(0)
+		l.SetBurst(unlimitedBurst)
 		return
 	}
 	l.SetLimit(rate.Limit(bps))

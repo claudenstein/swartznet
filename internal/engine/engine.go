@@ -64,6 +64,12 @@ type Engine struct {
 	maxActiveDownloads int   // 0 = unlimited (default). See queue.go.
 	nextQueueOrder     int64 // monotonic counter assigned to each new Handle
 
+	// bgCtx is cancelled on Engine.Close so background goroutines
+	// launched from the engine can bail out promptly instead of
+	// racing with client shutdown.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+
 	mu       sync.Mutex
 	closed   bool
 	handles  map[metainfo.Hash]*Handle
@@ -392,8 +398,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// restarting the Client. Default: unlimited. We keep a
 	// reference on the Engine so the mutator methods can
 	// SetLimit/SetBurst at runtime.
-	ulLimiter := rate.NewLimiter(rate.Inf, 0)
-	dlLimiter := rate.NewLimiter(rate.Inf, 0)
+	//
+	// Burst must be positive even in "unlimited" mode because
+	// anacrolix's openNewConns path refuses to dial when the
+	// DownloadRateLimiter reports Tokens() <= 0. See ratelimit.go.
+	ulLimiter := rate.NewLimiter(rate.Inf, unlimitedBurst)
+	dlLimiter := rate.NewLimiter(rate.Inf, unlimitedBurst)
 	tc.UploadRateLimiter = ulLimiter
 	tc.DownloadRateLimiter = dlLimiter
 
@@ -538,6 +548,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		ulLimiter: ulLimiter,
 		dlLimiter: dlLimiter,
 	}
+	eng.bgCtx, eng.bgCancel = context.WithCancel(context.Background())
 	// Hand the peer tracker to the swarmSender so Query fan-out can
 	// find specific peers by address. The callbacks above and this
 	// sender share the same peerTracker instance.
@@ -1491,6 +1502,11 @@ func (e *Engine) Close() error {
 		return e.closeErr
 	}
 	e.closed = true
+	// Cancel engine-owned background goroutines so they don't
+	// race with client shutdown below.
+	if e.bgCancel != nil {
+		e.bgCancel()
+	}
 	if e.pipeline != nil {
 		// Stop the pipeline first so in-flight extracts finish before the
 		// underlying torrent.Client's storage shuts down underneath them.
