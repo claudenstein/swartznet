@@ -71,6 +71,15 @@ func LoadOrCreateManifest(path string) (*Manifest, error) {
 	if m.Entries == nil {
 		m.Entries = make(map[string]*ManifestEntry)
 	}
+	// Normalise: a hand-edited or truncated manifest can contain
+	// JSON null under a valid key, which decodes to a nil pointer.
+	// Drop those so the in-memory invariant "every key maps to a
+	// non-nil entry" holds for every subsequent method.
+	for k, v := range m.Entries {
+		if v == nil {
+			delete(m.Entries, k)
+		}
+	}
 	m.path = path
 	return m, nil
 }
@@ -114,18 +123,29 @@ func (m *Manifest) AddHit(keyword string, hit KeywordHit) (totalHits int, err er
 		return 0, errors.New("dhtindex: empty keyword")
 	}
 	entry, ok := m.Entries[keyword]
-	if !ok {
+	// A hand-edited or truncated on-disk manifest can decode to
+	// Entries[k] == nil (JSON null under a valid key). Treat that
+	// the same as "no entry" rather than nil-panic on access below.
+	if !ok || entry == nil {
 		entry = &ManifestEntry{}
 		m.Entries[keyword] = entry
 	}
-	// Replace any existing hit with the same infohash.
+	// Replace any existing hit with the same infohash. Fall
+	// through to the eviction loop afterwards — a replacement
+	// can be *larger* than what it displaced (longer name,
+	// richer metadata), so the entry can still end up past
+	// MaxValueBytes even without a net hit-count change.
+	replaced := false
 	for i, h := range entry.Hits {
 		if string(h.IH) == string(hit.IH) {
 			entry.Hits[i] = hit
-			return len(entry.Hits), nil
+			replaced = true
+			break
 		}
 	}
-	entry.Hits = append(entry.Hits, hit)
+	if !replaced {
+		entry.Hits = append(entry.Hits, hit)
+	}
 
 	// Eviction loop: drop the oldest hit while the encoded form
 	// would exceed the cap.
@@ -141,7 +161,7 @@ func (m *Manifest) RemoveHit(keyword string, infohash []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.Entries[keyword]
-	if !ok {
+	if !ok || entry == nil {
 		return
 	}
 	out := entry.Hits[:0]
@@ -161,6 +181,11 @@ func (m *Manifest) Snapshot() map[string]*ManifestEntry {
 	defer m.mu.Unlock()
 	out := make(map[string]*ManifestEntry, len(m.Entries))
 	for k, v := range m.Entries {
+		if v == nil {
+			// Skip null entries from a hand-edited or truncated
+			// on-disk manifest rather than nil-panic.
+			continue
+		}
 		hits := make([]KeywordHit, len(v.Hits))
 		copy(hits, v.Hits)
 		out[k] = &ManifestEntry{
@@ -180,7 +205,7 @@ func (m *Manifest) MarkPublished(keyword string, when time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.Entries[keyword]
-	if !ok {
+	if !ok || entry == nil {
 		return
 	}
 	entry.LastPublished = when
@@ -194,7 +219,7 @@ func (m *Manifest) MarkFailed(keyword string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.Entries[keyword]
-	if !ok {
+	if !ok || entry == nil {
 		return
 	}
 	if err != nil {
