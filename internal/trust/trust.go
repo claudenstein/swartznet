@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -81,6 +82,10 @@ func LoadOrCreate(path string) (*Store, error) {
 		if !validPubKeyHex(e.PubKeyHex) {
 			continue
 		}
+		// Normalise to lowercase on load so a hand-edited trust
+		// file with mixed-case hex can still be looked up via
+		// IsTrusted/Label (which also lowercase).
+		e.PubKeyHex = strings.ToLower(e.PubKeyHex)
 		s.entries[e.PubKeyHex] = e
 	}
 	return s, nil
@@ -88,40 +93,48 @@ func LoadOrCreate(path string) (*Store, error) {
 
 // Add marks a publisher as trusted. Idempotent; an existing
 // entry's label is overwritten. Returns an error for malformed
-// pubkeys. Persists to disk on success.
+// pubkeys. The hex is normalised to lowercase before storage so
+// IsTrusted/Label lookups always succeed regardless of caller
+// casing. Persists to disk on success.
 func (s *Store) Add(pubKeyHex, label string) error {
 	if !validPubKeyHex(pubKeyHex) {
 		return fmt.Errorf("trust: pubkey must be 64 hex characters, got %d", len(pubKeyHex))
 	}
+	key := strings.ToLower(pubKeyHex)
 	s.mu.Lock()
-	s.entries[pubKeyHex] = Entry{PubKeyHex: pubKeyHex, Label: label}
+	s.entries[key] = Entry{PubKeyHex: key, Label: label}
 	s.mu.Unlock()
 	return s.save()
 }
 
 // Remove deletes a publisher from the trust list. Idempotent.
+// Casing of the input is not significant.
 func (s *Store) Remove(pubKeyHex string) error {
+	key := strings.ToLower(pubKeyHex)
 	s.mu.Lock()
-	delete(s.entries, pubKeyHex)
+	delete(s.entries, key)
 	s.mu.Unlock()
 	return s.save()
 }
 
 // IsTrusted reports whether the given publisher pubkey is in the
 // trust list. Safe for hot-path use — only takes a read lock.
+// Casing of the input is not significant.
 func (s *Store) IsTrusted(pubKeyHex string) bool {
+	key := strings.ToLower(pubKeyHex)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.entries[pubKeyHex]
+	_, ok := s.entries[key]
 	return ok
 }
 
 // Label returns the stored label for a trusted pubkey, or empty
-// string if not trusted.
+// string if not trusted. Casing of the input is not significant.
 func (s *Store) Label(pubKeyHex string) string {
+	key := strings.ToLower(pubKeyHex)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if e, ok := s.entries[pubKeyHex]; ok {
+	if e, ok := s.entries[key]; ok {
 		return e.Label
 	}
 	return ""
