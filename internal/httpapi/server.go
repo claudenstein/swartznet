@@ -258,8 +258,18 @@ func (s *Server) Start() error {
 	}
 
 	srv := &http.Server{
-		Handler:     mux,
-		ReadTimeout: 5 * time.Second,
+		Handler: mux,
+		// Read/write timeouts bound the time a single client
+		// can tie up a handler goroutine. The daemon is
+		// localhost-only, but a stuck browser fetch or buggy
+		// reverse proxy otherwise holds a slot until the OS
+		// notices the socket is dead. WriteTimeout is generous
+		// enough to stream a 500-hit /search response.
+		ReadHeaderTimeout: 2 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 18, // 256 KiB
 	}
 	s.httpServer = srv
 	// Pass srv as a parameter so the goroutine does not race
