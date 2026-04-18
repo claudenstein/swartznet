@@ -101,7 +101,9 @@ func buildMetaInfoForFile(filePath string, payload []byte) (*metainfo.MetaInfo, 
 
 // atomicWrite writes data to path atomically via tempfile +
 // rename. Used by WriteCompanionFiles so a partial write never
-// corrupts the publisher's state.
+// corrupts the publisher's state. On any error — including a
+// failed Rename — the tempfile is removed rather than left
+// behind to accumulate on disk over repeated failed publishes.
 func atomicWrite(path string, data []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
@@ -117,5 +119,9 @@ func atomicWrite(path string, data []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }

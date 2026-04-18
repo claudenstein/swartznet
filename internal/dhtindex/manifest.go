@@ -103,6 +103,10 @@ func (m *Manifest) Save() error {
 		return fmt.Errorf("dhtindex: write manifest tmp: %w", err)
 	}
 	if err := os.Rename(tmp, m.path); err != nil {
+		// Clean up so repeated rename failures (e.g. EXDEV,
+		// ENOSPC) don't accumulate orphan *.tmp files next to
+		// the real manifest.
+		_ = os.Remove(tmp)
 		return fmt.Errorf("dhtindex: rename manifest: %w", err)
 	}
 	return nil

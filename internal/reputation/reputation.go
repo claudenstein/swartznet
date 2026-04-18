@@ -151,7 +151,13 @@ func (t *Tracker) Save() error {
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("reputation: write tracker: %w", err)
 	}
-	return os.Rename(tmp, t.path)
+	if err := os.Rename(tmp, t.path); err != nil {
+		// Clean up so repeated rename failures don't leave a
+		// growing collection of *.tmp files next to the tracker.
+		_ = os.Remove(tmp)
+		return fmt.Errorf("reputation: rename tracker: %w", err)
+	}
+	return nil
 }
 
 // RecordReturned increments the HitsReturned counter for the given

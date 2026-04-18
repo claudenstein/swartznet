@@ -113,9 +113,16 @@ func (b *BloomFilter) Save() error {
 		return err
 	}
 	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, b.path)
+	if err := os.Rename(tmp, b.path); err != nil {
+		// Clean up so repeated rename failures don't leave a
+		// growing collection of *.tmp files next to the filter.
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // Add records the given infohash as known-good. Subsequent Test
