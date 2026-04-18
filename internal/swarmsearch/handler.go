@@ -328,9 +328,10 @@ func (p *Protocol) sendReject(reply ReplyFunc, peerAddr string, txid uint32, cod
 	}
 }
 
-// Ensure LocalHit deduction matches the shape of indexer.SearchHit. The
-// function is unused at runtime; it exists so the compiler catches
-// drift if someone renames a field in indexer.SearchHit.
-func _localHitKeepalive(h LocalHit) string {
+// _ is a compile-time assertion that LocalHit still has the
+// three fields we reference when building wire-format responses.
+// If someone renames a field in indexer.SearchHit (mirrored by
+// LocalHit) this block fails to build — canary for schema drift.
+var _ = func(h LocalHit) string {
 	return fmt.Sprintf("%s:%d:%s", h.DocType, h.FileIndex, h.FilePath)
 }

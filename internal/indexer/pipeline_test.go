@@ -106,16 +106,28 @@ func TestPipelineSkipsBinary(t *testing.T) {
 
 	before, _ := idx.DocCount()
 
+	const binaryIH = "ffffffffffffffffffffffffffffffffffffffff"
 	p.Submit(indexer.FileInput{
-		InfoHash:   "ffffffffffffffffffffffffffffffffffffffff",
+		InfoHash:   binaryIH,
 		FileIndex:  0,
 		Path:       "movie.mkv",
 		Size:       2 * 1024 * 1024 * 1024, // 2 GiB
 		OpenReader: mockOpenReader("whatever"),
 	})
 
-	// Give the pipeline a moment to reject.
-	time.Sleep(150 * time.Millisecond)
+	// Poll the pipeline's per-infohash Stats until Processed==1,
+	// which tells us the dispatcher ran and classified the file.
+	// More robust than a fixed sleep on slow CI.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := p.Stats(binaryIH); s.Processed >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s := p.Stats(binaryIH); s.Processed != 1 || s.Skipped != 1 {
+		t.Fatalf("stats after binary submit: %+v, want Processed=1 Skipped=1", s)
+	}
 
 	after, _ := idx.DocCount()
 	if after != before {
@@ -146,20 +158,17 @@ func TestPipelineSubmitAfterStop(t *testing.T) {
 	// Fill the buffered input channel (cap=64). After Stop the worker
 	// goroutine has exited, so nothing drains the channel. Some sends
 	// may return false (stopCh wins the select race), so we keep
-	// sending until the buffer is truly saturated.
+	// sending until the buffer is truly saturated. The return value
+	// is intentionally ignored here — the point is to saturate the
+	// buffer, not to assert on each Submit.
 	for i := 0; i < 256; i++ {
-		ok := p.Submit(indexer.FileInput{
+		_ = p.Submit(indexer.FileInput{
 			InfoHash:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			FileIndex:  i,
 			Path:       "fill.txt",
 			Size:       1,
 			OpenReader: mockOpenReader("x"),
 		})
-		if !ok {
-			// stopCh won. The buffer might not be full yet, but at
-			// some point it will be. Keep going.
-			continue
-		}
 	}
 
 	// Now the buffer is full (64 successful sends out of 256 attempts

@@ -24,7 +24,6 @@ type fanoutSender struct {
 	mu    sync.Mutex
 	sent  []fanoutMsg
 	after map[string]func(p *swarmsearch.Protocol, peer string, q swarmsearch.Query)
-	fail  map[string]error
 }
 
 type fanoutMsg struct {
@@ -35,7 +34,6 @@ type fanoutMsg struct {
 func newFanoutSender() *fanoutSender {
 	return &fanoutSender{
 		after: make(map[string]func(p *swarmsearch.Protocol, peer string, q swarmsearch.Query)),
-		fail:  make(map[string]error),
 	}
 }
 
@@ -48,23 +46,12 @@ func (f *fanoutSender) setAfter(peer string, fn func(*swarmsearch.Protocol, stri
 	f.mu.Unlock()
 }
 
-// setFail sets the error to return for sends to a peer.
-func (f *fanoutSender) setFail(peer string, err error) {
-	f.mu.Lock()
-	f.fail[peer] = err
-	f.mu.Unlock()
-}
-
 func (f *fanoutSender) Send(peer string, payload []byte) error {
 	f.mu.Lock()
 	f.sent = append(f.sent, fanoutMsg{peer: peer, payload: bytes.Clone(payload)})
-	fail := f.fail[peer]
 	after := f.after[peer]
 	f.mu.Unlock()
 
-	if fail != nil {
-		return fail
-	}
 	if after != nil {
 		q, err := swarmsearch.DecodeQuery(payload)
 		if err == nil {

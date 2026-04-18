@@ -154,7 +154,7 @@ func (mp *MiniPeer) RecvExtendedPayload(timeout time.Duration) (int, []byte, err
 		if err != nil {
 			return 0, nil, err
 		}
-		if msg == nil || len(msg) < 2 {
+		if len(msg) < 2 {
 			continue
 		}
 		if msg[0] != 20 { // not extended
@@ -218,7 +218,7 @@ func (mp *MiniPeer) ltepHandshake() error {
 		if err != nil {
 			return fmt.Errorf("minipeer: recv LTEP hs: %w", err)
 		}
-		if msg == nil || len(msg) < 2 || msg[0] != 20 {
+		if len(msg) < 2 || msg[0] != 20 {
 			continue // not extended
 		}
 		if msg[1] != 0 {
