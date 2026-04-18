@@ -258,7 +258,11 @@ func (s *Server) Start() error {
 	}
 
 	srv := &http.Server{
-		Handler: mux,
+		// withMaxBodyBytes caps every incoming request body at
+		// maxRequestBody so a slow or malicious client cannot
+		// stream an unbounded JSON document into our json.Decoder.
+		// See bodylimit.go.
+		Handler: withMaxBodyBytes(mux, maxRequestBody),
 		// Read/write timeouts bound the time a single client
 		// can tie up a handler goroutine. The daemon is
 		// localhost-only, but a stuck browser fetch or buggy
