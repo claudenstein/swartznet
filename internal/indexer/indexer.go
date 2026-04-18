@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -369,9 +370,12 @@ func (i *Index) Stats() (Stats, error) {
 	return out, nil
 }
 
-// dirBytes sums the size of every regular file under root. Does
-// not recurse into symlinked directories. Returns 0 for a
-// missing or unreadable root so Stats() can degrade gracefully.
+// dirBytes sums the size of every regular file under root. Uses
+// filepath.Join so the path concat is Windows-safe, and skips
+// symlinks (os.DirEntry.IsDir returns false for symlinked
+// directories, so the recursion naturally avoids symlink loops).
+// Returns 0 for a missing or unreadable root so Stats() can
+// degrade gracefully.
 func dirBytes(root string) (int64, error) {
 	var total int64
 	entries, err := os.ReadDir(root)
@@ -380,7 +384,7 @@ func dirBytes(root string) (int64, error) {
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			sub, _ := dirBytes(root + "/" + e.Name())
+			sub, _ := dirBytes(filepath.Join(root, e.Name()))
 			total += sub
 			continue
 		}
