@@ -437,7 +437,18 @@ func (w *SubscriberWorker) Stop() {
 // startup, then re-syncs every interval until Stop is called.
 func (w *SubscriberWorker) run() {
 	defer w.wg.Done()
-	w.runOnce()
+	// A context tied to stopCh means an in-flight Sync gets
+	// cancelled the moment Stop is called. Without this, Stop
+	// could block for up to FetchTimeout (default 5 min) if the
+	// current Sync was mid-download.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-w.stopCh
+		cancel()
+	}()
+
+	w.runOnce(ctx)
 
 	tick := time.NewTicker(w.interval)
 	defer tick.Stop()
@@ -446,17 +457,18 @@ func (w *SubscriberWorker) run() {
 		case <-w.stopCh:
 			return
 		case <-tick.C:
-			w.runOnce()
+			w.runOnce(ctx)
 		case <-w.trigger:
-			w.runOnce()
+			w.runOnce(ctx)
 		}
 	}
 }
 
 // runOnce syncs every followed publisher. Errors on individual
 // publishers are recorded on the worker state; they do not
-// abort the loop.
-func (w *SubscriberWorker) runOnce() {
+// abort the loop. The caller-supplied ctx is threaded into every
+// Subscriber.Sync call so Stop can short-circuit the downloader.
+func (w *SubscriberWorker) runOnce(ctx context.Context) {
 	w.mu.Lock()
 	pubs := make([][32]byte, 0, len(w.follows))
 	for k := range w.follows {
@@ -464,7 +476,6 @@ func (w *SubscriberWorker) runOnce() {
 	}
 	w.mu.Unlock()
 
-	ctx := context.Background()
 	for _, pub := range pubs {
 		// Stop early if Stop was called between iterations.
 		select {
