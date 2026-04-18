@@ -105,8 +105,11 @@ func OpenWithLogger(path string, log *slog.Logger) (*Index, error) {
 }
 
 // indexDirExists reports whether path already holds a Bleve index.
+// Uses filepath.Join so the marker lookup works on Windows too
+// (anacrolix's Bleve backend creates the file with the host
+// separator, not a hard-coded "/").
 func indexDirExists(path string) bool {
-	_, err := os.Stat(path + "/index_meta.json")
+	_, err := os.Stat(filepath.Join(path, "index_meta.json"))
 	return err == nil
 }
 
