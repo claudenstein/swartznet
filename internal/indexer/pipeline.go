@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -140,7 +141,7 @@ func (p *Pipeline) handle(in FileInput) {
 		defer c.Close()
 	}
 
-	chunks, err := ex.Extract(r, p.maxFileBytes)
+	chunks, err := safeExtract(ex, r, p.maxFileBytes)
 	if err != nil {
 		p.log.Debug("pipeline.extract_skip",
 			"path", in.Path, "extractor", ex.Name(), "err", err)
@@ -179,4 +180,19 @@ func (p *Pipeline) handle(in FileInput) {
 		"chunks", len(chunks),
 		"ext", strings.ToLower(filepath.Ext(in.Path)),
 	)
+}
+
+// safeExtract runs ex.Extract with a panic recovery net. Extractors
+// handle adversarial input (torrent payloads from the network); a
+// single malformed file must not terminate the whole daemon. A
+// recovered panic is converted into an error, so the caller sees it
+// as an ordinary extract failure and the worker keeps running.
+func safeExtract(ex extractors.Extractor, r io.Reader, maxBytes int64) (chunks []extractors.Chunk, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			chunks = nil
+			err = fmt.Errorf("pipeline: extractor %q panicked: %v", ex.Name(), rec)
+		}
+	}()
+	return ex.Extract(r, maxBytes)
 }
