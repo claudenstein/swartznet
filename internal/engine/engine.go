@@ -991,6 +991,10 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 func (e *Engine) autoDownload(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
+	case <-e.bgCtx.Done():
+		// Engine is shutting down; no point flipping priorities
+		// on a client that's about to tear down anyway.
+		return
 	case <-time.After(5 * time.Minute):
 		return
 	}
@@ -1018,9 +1022,13 @@ func (e *Engine) autoConfirmOnComplete(h *Handle) {
 	complete := h.T.Complete().On()
 	select {
 	case <-complete:
+	case <-e.bgCtx.Done():
+		// Engine is shutting down; the bloom.Add would race
+		// with the save-on-close path.
+		return
 	case <-time.After(24 * time.Hour):
-		// Long timeout: better to leak the goroutine than to hang
-		// forever waiting on a torrent that never completes.
+		// Long timeout: better to return than to hang forever
+		// waiting on a torrent that never completes.
 		return
 	}
 
@@ -1100,6 +1108,10 @@ func (e *Engine) ingestFileEvents(h *Handle) {
 func (e *Engine) autoIndex(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
+	case <-e.bgCtx.Done():
+		// Engine is shutting down; bail out rather than touch
+		// an index that's about to be closed.
+		return
 	case <-time.After(5 * time.Minute):
 		e.log.Warn("indexer.autoindex.timeout", "info_hash", h.T.InfoHash().HexString())
 		return
