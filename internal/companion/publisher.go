@@ -128,10 +128,11 @@ type Publisher struct {
 	lastError      string
 	publishedCount int
 
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	trigger  chan struct{}
-	wg       sync.WaitGroup
+	startOnce sync.Once
+	stopOnce  sync.Once
+	stopCh    chan struct{}
+	trigger   chan struct{}
+	wg        sync.WaitGroup
 }
 
 // NewPublisher constructs a Publisher. Returns an error for
@@ -181,11 +182,13 @@ func NewPublisher(
 	}, nil
 }
 
-// Start launches the worker goroutine. Idempotent (a second
-// call is a no-op once the goroutine is running).
+// Start launches the worker goroutine. Idempotent — subsequent
+// calls are no-ops (guarded by a sync.Once).
 func (p *Publisher) Start() {
-	p.wg.Add(1)
-	go p.run()
+	p.startOnce.Do(func() {
+		p.wg.Add(1)
+		go p.run()
+	})
 }
 
 // Stop signals the worker to finish its current refresh and

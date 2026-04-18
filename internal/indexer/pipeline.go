@@ -28,9 +28,10 @@ type Pipeline struct {
 
 	input chan FileInput
 
-	wg       sync.WaitGroup
-	stopOnce sync.Once
-	stopCh   chan struct{}
+	wg        sync.WaitGroup
+	startOnce sync.Once
+	stopOnce  sync.Once
+	stopCh    chan struct{}
 }
 
 // FileInput describes a single completed file ready for extraction.
@@ -64,11 +65,13 @@ func NewPipeline(idx *Index, log *slog.Logger, maxFileBytes int64) *Pipeline {
 	}
 }
 
-// Start kicks off the worker goroutine. Safe to call exactly once per
-// Pipeline. Start itself returns immediately.
+// Start kicks off the worker goroutine. Idempotent — subsequent
+// calls are no-ops (guarded by a sync.Once). Returns immediately.
 func (p *Pipeline) Start() {
-	p.wg.Add(1)
-	go p.run()
+	p.startOnce.Do(func() {
+		p.wg.Add(1)
+		go p.run()
+	})
 }
 
 // Submit enqueues a file for extraction. If the pipeline's input channel

@@ -325,6 +325,7 @@ type SubscriberWorker struct {
 	follows   map[[32]byte]string // pubkey → human label
 	lastSync  map[[32]byte]SyncResult
 	stopCh    chan struct{}
+	startOnce sync.Once
 	stopOnce  sync.Once
 	wg        sync.WaitGroup
 	trigger   chan struct{}
@@ -416,10 +417,13 @@ func (w *SubscriberWorker) TotalRuns() int {
 	return w.totalRuns
 }
 
-// Start launches the worker goroutine. Idempotent.
+// Start launches the worker goroutine. Idempotent — subsequent
+// calls are no-ops (guarded by a sync.Once).
 func (w *SubscriberWorker) Start() {
-	w.wg.Add(1)
-	go w.run()
+	w.startOnce.Do(func() {
+		w.wg.Add(1)
+		go w.run()
+	})
 }
 
 // Stop signals the worker to finish its current sync pass and
