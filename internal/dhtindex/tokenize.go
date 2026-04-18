@@ -63,48 +63,7 @@ var extensionTokens = map[string]struct{}{
 // string you get an empty slice (not an error), and very long names
 // just produce more tokens that get capped.
 func Tokenize(name string) []string {
-	if name == "" {
-		return nil
-	}
-
-	var (
-		out  []string
-		seen = make(map[string]struct{})
-		buf  strings.Builder
-	)
-
-	flush := func() {
-		if buf.Len() == 0 {
-			return
-		}
-		tok := buf.String()
-		buf.Reset()
-		if len(tok) < MinTokenBytes {
-			return
-		}
-		if _, ok := stopWords[tok]; ok {
-			return
-		}
-		if _, ok := extensionTokens[tok]; ok {
-			return
-		}
-		if _, ok := seen[tok]; ok {
-			return
-		}
-		seen[tok] = struct{}{}
-		out = append(out, tok)
-	}
-
-	for _, r := range name {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			// Lowercase letters; digits pass through unchanged.
-			buf.WriteRune(unicode.ToLower(r))
-			continue
-		}
-		flush()
-	}
-	flush()
-
+	out := tokenizeUncapped(name)
 	if len(out) > MaxKeywordsPerTorrent {
 		out = out[:MaxKeywordsPerTorrent]
 	}
@@ -115,13 +74,17 @@ func Tokenize(name string) []string {
 // MaxKeywordsPerTorrent cap. Useful for tests that want to verify
 // the underlying tokenisation logic without worrying about the cap.
 func TokenizeAll(name string) []string {
+	return tokenizeUncapped(name)
+}
+
+// tokenizeUncapped is the core token-extraction loop shared by
+// Tokenize and TokenizeAll. It runs the full filter chain
+// (MinTokenBytes, stopWords, extensionTokens, dedup) but does
+// NOT apply the MaxKeywordsPerTorrent cap.
+func tokenizeUncapped(name string) []string {
 	if name == "" {
 		return nil
 	}
-	saved := MaxKeywordsPerTorrent
-	defer func() { /* immutable; just return whatever Tokenize gives */ _ = saved }()
-	// Re-implement without the cap rather than mutating the package
-	// constant (which would be a data race in tests).
 	var (
 		out  []string
 		seen = make(map[string]struct{})
@@ -150,6 +113,7 @@ func TokenizeAll(name string) []string {
 	}
 	for _, r := range name {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			// Lowercase letters; digits pass through unchanged.
 			buf.WriteRune(unicode.ToLower(r))
 			continue
 		}
