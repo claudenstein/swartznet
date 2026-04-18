@@ -22,6 +22,14 @@ import (
 // rebuild.
 var schemaSentinelKey = []byte("_swartznet_schema_version")
 
+// MaxSearchLimit is a defensive upper bound on Search.req.Limit.
+// 10 000 is an order of magnitude above the largest legitimate
+// caller (the httpapi /search cap is 500), so no realistic user
+// hits it — but it prevents a misbehaving internal caller from
+// pinning the index mutex while Bleve materialises a multi-
+// million-hit result.
+const MaxSearchLimit = 10_000
+
 // Index is SwartzNet's local full-text search index. It wraps a Bleve index
 // on disk and exposes a narrow, intention-revealing API to callers.
 //
@@ -639,6 +647,14 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 	}
 	if req.Limit <= 0 {
 		req.Limit = 20
+	}
+	// Defence-in-depth cap. The upstream layers already apply
+	// their own caps (httpapi 500, sn_search handler 100), but a
+	// direct caller (tests, a future internal API) shouldn't be
+	// able to ask Bleve to materialise an arbitrarily large
+	// result set and pin the entire index mutex while it does.
+	if req.Limit > MaxSearchLimit {
+		req.Limit = MaxSearchLimit
 	}
 
 	// Build the query: free-form text (req.Query) AND, if
