@@ -156,14 +156,18 @@ func (b *BloomFilter) PopulationCount() uint64 {
 }
 
 // EstimatedItems is a back-of-envelope estimate of how many distinct
-// items have been added to the filter, derived from PopulationCount.
-// Accurate when the filter is below ~50% saturation.
+// items have been added to the filter, derived from the population
+// count. Accurate when the filter is below ~50% saturation.
 func (b *BloomFilter) EstimatedItems() float64 {
 	b.mu.RLock()
+	defer b.mu.RUnlock()
 	m := float64(b.m)
 	k := float64(b.k)
-	b.mu.RUnlock()
-	x := float64(b.PopulationCount())
+	var pop uint64
+	for _, w := range b.bits {
+		pop += uint64(popcountUint64(w))
+	}
+	x := float64(pop)
 	if x >= m {
 		return math.Inf(1)
 	}
