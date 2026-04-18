@@ -61,34 +61,30 @@ func (p *Protocol) feelerOnce(ctx context.Context) {
 	if p.book == nil {
 		return
 	}
-	addrs := p.book.NewAddrs()
-	if len(addrs) == 0 {
+	// Early-out if there's nothing untried to probe. Query()
+	// itself would also skip the new-peer portion, but the
+	// early return avoids constructing the query + context
+	// when we know it can't promote anything.
+	if len(p.book.NewAddrs()) == 0 {
 		return
 	}
-	// Pick the first address (new table order is unspecified,
-	// which gives us pseudo-random selection for free; Bitcoin
-	// uses double-hashed bucket selection but we don't need
-	// that for the feeler because the feeler is a one-off
-	// probe, not a bucket-assignment decision).
-	target := addrs[0]
 
-	// Issue a lightweight query. The timeout is short because
-	// the feeler shouldn't block on slow peers.
+	// Issue a lightweight query. Query's selectTargets picks up
+	// to FeelerCount (2) new peers alongside every tried peer,
+	// so firing *any* query is enough to give untried peers a
+	// chance to respond and earn promotion. The feeler itself
+	// doesn't target a specific address — it just triggers the
+	// query that opens the promotion window.
+	//
+	// Timeout is short because the feeler shouldn't block on
+	// slow peers.
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	resp, err := p.Query(queryCtx, QueryRequest{
+	// The response is discarded on purpose: if any peer
+	// replied, Query's collect path already called Promote on
+	// it. We just care that the round-trip happened.
+	_, _ = p.Query(queryCtx, QueryRequest{
 		Q:       feelerQuery,
 		Timeout: 3 * time.Second,
 	})
-	if err != nil {
-		// Query error (no sender, no capable peers, etc.) is
-		// fine — the feeler will try again next tick.
-		return
-	}
-	// If ANY peer responded, the Promote call already happened
-	// inside Query's collect path. We don't need to do anything
-	// extra here — the feeler's job is just to TRIGGER the
-	// query that causes the promotion.
-	_ = resp
-	_ = target // documented for clarity
 }
