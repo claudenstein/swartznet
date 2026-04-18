@@ -152,6 +152,18 @@ func (p *Publisher) Submit(task PublishTask) {
 func (p *Publisher) run() {
 	defer p.wg.Done()
 
+	// A context tied to stopCh cancels any in-flight DHT put
+	// traversal the moment Stop is called. Without this, a slow
+	// put could hold the worker for the full PutTimeout
+	// (typically tens of seconds per keyword) after Stop
+	// closes stopCh.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-p.stopCh
+		cancel()
+	}()
+
 	tick := time.NewTicker(p.opts.RefreshInterval)
 	defer tick.Stop()
 
@@ -163,16 +175,16 @@ func (p *Publisher) run() {
 			if !ok {
 				return
 			}
-			p.handleTask(task)
+			p.handleTask(ctx, task)
 		case <-tick.C:
-			p.refreshAll()
+			p.refreshAll(ctx)
 		}
 	}
 }
 
 // handleTask tokenises the torrent name, updates the manifest for
 // each keyword, and triggers a per-keyword publish.
-func (p *Publisher) handleTask(task PublishTask) {
+func (p *Publisher) handleTask(ctx context.Context, task PublishTask) {
 	if len(task.InfoHash) != 20 {
 		p.log.Debug("dhtindex.publisher.bad_infohash", "len", len(task.InfoHash))
 		return
@@ -193,7 +205,7 @@ func (p *Publisher) handleTask(task PublishTask) {
 			p.log.Warn("dhtindex.publisher.add_hit_err", "kw", kw, "err", err)
 			continue
 		}
-		p.publishOne(kw)
+		p.publishOne(ctx, kw)
 	}
 	if err := p.manifest.Save(); err != nil {
 		p.log.Warn("dhtindex.publisher.save_err", "err", err)
@@ -210,7 +222,7 @@ func (p *Publisher) handleTask(task PublishTask) {
 // the mainline DHT when a client submits the same torrent multiple
 // times in quick succession, or when refreshAll() and a fresh
 // Submit() race for the same keyword.
-func (p *Publisher) publishOne(keyword string) {
+func (p *Publisher) publishOne(parent context.Context, keyword string) {
 	snap := p.manifest.Snapshot()
 	entry, ok := snap[keyword]
 	if !ok {
@@ -234,7 +246,7 @@ func (p *Publisher) publishOne(keyword string) {
 		return
 	}
 	value := KeywordValue{Hits: entry.Hits}
-	ctx, cancel := context.WithTimeout(context.Background(), p.opts.PutTimeout)
+	ctx, cancel := context.WithTimeout(parent, p.opts.PutTimeout)
 	defer cancel()
 	if err := p.put.Put(ctx, salt, value); err != nil {
 		p.log.Warn("dhtindex.publisher.put_err",
@@ -248,8 +260,10 @@ func (p *Publisher) publishOne(keyword string) {
 }
 
 // refreshAll re-publishes every entry in the manifest. Called from
-// the refresh ticker.
-func (p *Publisher) refreshAll() {
+// the refresh ticker. The caller-supplied parent ctx is threaded
+// into every publishOne so Stop can short-circuit the current
+// put rather than wait for its own timeout.
+func (p *Publisher) refreshAll(parent context.Context) {
 	snap := p.manifest.Snapshot()
 	for keyword := range snap {
 		select {
@@ -257,7 +271,7 @@ func (p *Publisher) refreshAll() {
 			return
 		default:
 		}
-		p.publishOne(keyword)
+		p.publishOne(parent, keyword)
 	}
 	if err := p.manifest.Save(); err != nil {
 		p.log.Warn("dhtindex.publisher.save_err_after_refresh", "err", err)
