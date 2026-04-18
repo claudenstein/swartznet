@@ -138,7 +138,7 @@ func run(log *slog.Logger) error {
 	log.Info("put.start", "keyword", keyword)
 	putStart := time.Now()
 	if err := putter.Put(putCtx, salt, value); err != nil {
-		return fmt.Errorf("Put: %w", err)
+		return fmt.Errorf("put: %w", err)
 	}
 	log.Info("put.ok", "elapsed", time.Since(putStart).String())
 
@@ -154,16 +154,16 @@ func run(log *slog.Logger) error {
 	getStart := time.Now()
 	got, err := getter.Get(getCtx, pk32, salt)
 	if err != nil {
-		return fmt.Errorf("Get: %w", err)
+		return fmt.Errorf("get: %w", err)
 	}
 	log.Info("get.ok",
 		"elapsed", time.Since(getStart).String(),
 		"hits", len(got.Hits))
 	if len(got.Hits) != 1 {
-		return fmt.Errorf("Get returned %d hits, want 1", len(got.Hits))
+		return fmt.Errorf("get returned %d hits, want 1", len(got.Hits))
 	}
 	if got.Hits[0].N != "smoke test" {
-		return fmt.Errorf("Get returned name %q, want 'smoke test'", got.Hits[0].N)
+		return fmt.Errorf("get returned name %q, want 'smoke test'", got.Hits[0].N)
 	}
 
 	// Optional: stress phase. Publishes *stressN synthetic

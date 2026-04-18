@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -140,22 +139,29 @@ func TestPublisherFailedPutsAreRecorded(t *testing.T) {
 		InfoHash: bytes.Repeat([]byte{0x01}, 20),
 		Name:     "linux distribution",
 	})
-	// Wait for the worker to attempt the put.
-	time.Sleep(200 * time.Millisecond)
-
-	status := p.Status()
-	if status.TotalKeywords == 0 {
-		t.Fatal("expected at least one keyword in manifest")
-	}
+	// Poll for the worker to attempt the put and record the error
+	// rather than relying on a fixed sleep.
+	deadline := time.Now().Add(2 * time.Second)
 	var sawError bool
-	for _, ks := range status.LastPublishes {
-		if ks.LastError == "simulated put failure" && ks.PublishCount == 0 {
-			sawError = true
+	var lastStatus dhtindex.PublisherStatus
+	for time.Now().Before(deadline) {
+		lastStatus = p.Status()
+		for _, ks := range lastStatus.LastPublishes {
+			if ks.LastError == "simulated put failure" && ks.PublishCount == 0 {
+				sawError = true
+				break
+			}
+		}
+		if sawError {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if lastStatus.TotalKeywords == 0 {
+		t.Fatal("expected at least one keyword in manifest")
 	}
 	if !sawError {
-		t.Errorf("no failed entry in status: %+v", status.LastPublishes)
+		t.Errorf("no failed entry in status: %+v", lastStatus.LastPublishes)
 	}
 }
 
@@ -195,9 +201,18 @@ func TestPublisherMinPutIntervalThrottles(t *testing.T) {
 
 	// Second submission for the same keyword must NOT trigger
 	// another put (throttle active) even though it should still
-	// update the manifest's hit data.
+	// update the manifest's hit data. Submit, wait for the
+	// manifest to reflect the new seeders, then confirm the put
+	// count is unchanged.
 	p.Submit(dhtindex.PublishTask{InfoHash: ih, Name: "ubuntu", Seeders: 42})
-	time.Sleep(200 * time.Millisecond)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := mf.Snapshot()["ubuntu"]
+		if snap != nil && len(snap.Hits) > 0 && snap.Hits[0].S == 42 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	after := len(rec.snapshot())
 	if after != first {
@@ -221,9 +236,22 @@ func TestPublisherSecondAddUpdatesExistingHit(t *testing.T) {
 
 	ih := bytes.Repeat([]byte{0xcc}, 20)
 	p.Submit(dhtindex.PublishTask{InfoHash: ih, Name: "ubuntu lts"})
-	time.Sleep(150 * time.Millisecond)
+	// Wait for the first round of puts (one per tokenised keyword).
+	waitForPuts := func(atLeast int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if len(rec.snapshot()) >= atLeast {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %d puts; got %d", atLeast, len(rec.snapshot()))
+	}
+	waitForPuts(1)
+	firstRound := len(rec.snapshot())
 	p.Submit(dhtindex.PublishTask{InfoHash: ih, Name: "ubuntu lts", Seeders: 999})
-	time.Sleep(150 * time.Millisecond)
+	waitForPuts(firstRound + 1)
 
 	// The manifest should still hold a single hit for "ubuntu", with
 	// the higher seeder count from the second submission.
@@ -307,11 +335,9 @@ func TestPublisherDropsTaskOnFullQueue(t *testing.T) {
 	close(released)
 	p.Stop()
 	// We can't assert exact counts because the order of select
-	// cases is nondeterministic, but the test passes if Stop
-	// completes within a reasonable time without deadlocking.
-	if !strings.HasPrefix("ok", "ok") { // tautology to silence linters
-		t.Fail()
-	}
+	// cases is nondeterministic. The test passes if Stop
+	// completes without deadlocking — reaching this line is
+	// the success signal.
 }
 
 // putterFunc is a function adapter for the Putter interface, used

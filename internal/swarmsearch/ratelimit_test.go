@@ -40,9 +40,13 @@ func TestRateLimiterRefillsOverTime(t *testing.T) {
 		QueriesPerSecond: 100, // 10ms per token
 		Burst:            2,
 	})
-	// Drain burst.
-	if !rl.Allow("peer:1") || !rl.Allow("peer:1") {
-		t.Fatal("burst drain failed")
+	// Drain burst (two separate calls so the intent is unambiguous;
+	// the previous combined `||` form tripped staticcheck SA4000).
+	if !rl.Allow("peer:1") {
+		t.Fatal("burst drain: first Allow should succeed")
+	}
+	if !rl.Allow("peer:1") {
+		t.Fatal("burst drain: second Allow should succeed")
 	}
 	if rl.Allow("peer:1") {
 		t.Fatal("third query should be blocked")

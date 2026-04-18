@@ -66,7 +66,6 @@ func Tokenize(name string) []string {
 	if name == "" {
 		return nil
 	}
-	runes := []rune(name)
 
 	var (
 		out  []string
@@ -96,7 +95,7 @@ func Tokenize(name string) []string {
 		out = append(out, tok)
 	}
 
-	for _, r := range runes {
+	for _, r := range name {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			// Lowercase letters; digits pass through unchanged.
 			buf.WriteRune(unicode.ToLower(r))

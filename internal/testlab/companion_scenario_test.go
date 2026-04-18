@@ -147,12 +147,16 @@ func TestScenarioCompanionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("publisher: HandleByInfoHash(%x): %v", companionIH[:8], err)
 	}
-	pubHandle.T.VerifyData()
-	// Give the verify a moment to complete before the
-	// subscriber tries to download.
-	time.Sleep(200 * time.Millisecond)
-	// Sanity: publisher should now report the torrent as
-	// fully complete.
+	// 10 s is generous for a single-piece ~300-byte file but
+	// accommodates a heavily loaded CI machine. VerifyDataContext
+	// replaces the deprecated VerifyData call.
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := pubHandle.T.VerifyDataContext(verifyCtx); err != nil {
+		t.Logf("warning: VerifyDataContext: %v", err)
+	}
+	verifyCancel()
+	// Sanity: publisher should now report the torrent as fully
+	// complete before the subscriber tries to download.
 	if bc := pubHandle.T.BytesCompleted(); bc == 0 {
 		t.Logf("warning: publisher BytesCompleted=0 after VerifyData; may race")
 	}

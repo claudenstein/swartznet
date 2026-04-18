@@ -35,12 +35,6 @@ func (*DOCXExtractor) Name() string { return "docx" }
 // even very long documents.
 const docxMaxInputBytes = 256 * 1024 * 1024
 
-// docxNamespace is the WordprocessingML namespace prefix used by
-// .docx body markup. We compare against the local name only so
-// the namespace prefix the document uses ("w" by default but not
-// guaranteed) does not matter.
-const docxNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-
 // Extract implements Extractor.
 func (e *DOCXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err error) {
 	if maxBytes <= 0 || maxBytes > docxMaxInputBytes {
