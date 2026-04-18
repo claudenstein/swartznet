@@ -252,9 +252,20 @@ func (p *Publisher) Status() PublisherStatus {
 func (p *Publisher) run() {
 	defer p.wg.Done()
 
+	// A context tied to stopCh means an in-flight Put traversal
+	// gets cancelled the moment Stop is called. Without this,
+	// Stop could block for up to PutTimeout (default 30s) if
+	// the current refresh was in the DHT put phase.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-p.stopCh
+		cancel()
+	}()
+
 	// Run an initial refresh as soon as the worker starts so
 	// the GUI does not have to wait an hour to see anything.
-	p.refreshOnce()
+	p.refreshOnce(ctx)
 
 	tick := time.NewTicker(p.opts.Interval)
 	defer tick.Stop()
@@ -263,9 +274,9 @@ func (p *Publisher) run() {
 		case <-p.stopCh:
 			return
 		case <-tick.C:
-			p.refreshOnce()
+			p.refreshOnce(ctx)
 		case <-p.trigger:
-			p.refreshOnce()
+			p.refreshOnce(ctx)
 		}
 	}
 }
@@ -273,8 +284,9 @@ func (p *Publisher) run() {
 // refreshOnce runs the full publish pipeline once: build →
 // write → seed → put pointer. Failures at any step are
 // recorded on the publisher state and logged but never
-// escalated.
-func (p *Publisher) refreshOnce() {
+// escalated. The caller-supplied parent ctx is threaded into
+// the DHT put so Stop can short-circuit a slow traversal.
+func (p *Publisher) refreshOnce(parent context.Context) {
 	idx, err := BuildFromIndex(p.idx, p.pubkeyHex, p.opts.Build)
 	if err != nil {
 		p.recordFailure(fmt.Errorf("build: %w", err))
@@ -301,7 +313,7 @@ func (p *Publisher) refreshOnce() {
 	}
 
 	infoHash := mi.HashInfoBytes()
-	ctx, cancel := context.WithTimeout(context.Background(), p.opts.PutTimeout)
+	ctx, cancel := context.WithTimeout(parent, p.opts.PutTimeout)
 	defer cancel()
 	if err := p.putter.PutInfohashPointer(ctx, []byte(SaltContentIndex), infoHash); err != nil {
 		p.recordFailure(fmt.Errorf("put pointer: %w", err))
