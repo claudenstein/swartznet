@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/swartznet/swartznet/internal/dhtindex"
@@ -18,6 +19,12 @@ import (
 	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
+
+// maxSearchLimit caps a single /search request's hit count. The
+// index, every responding swarm peer, and every DHT indexer are
+// asked for up to this many hits; beyond a few hundred the
+// result set is rarely useful and the memory cost grows linearly.
+const maxSearchLimit = 500
 
 // TorrentController is the narrow interface the HTTP API needs
 // from the engine for the M10 GUI download controls. The engine
@@ -394,6 +401,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Limit <= 0 {
 		req.Limit = 50
+	}
+	// Cap limit so a single malicious/curious client can't ask the
+	// index (or every swarm peer) for millions of hits at once.
+	if req.Limit > maxSearchLimit {
+		req.Limit = maxSearchLimit
 	}
 
 	resp := SearchResponse{Local: LocalResult{Hits: []LocalHit{}}}
@@ -1090,10 +1102,25 @@ func (s *Server) handleSetCapabilities(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HealthzVersion is overridden by the swartznet binary at build
-// time so /healthz can report the running version. Defaults to a
-// dev placeholder when the field is not set.
-var HealthzVersion = ""
+// healthzVersion is set by the swartznet binary at startup so
+// /healthz can report the running version. Stored atomically
+// because the HTTP handler reads it from a server goroutine while
+// callers (and tests) write from another.
+var healthzVersion atomic.Pointer[string]
+
+// HealthzVersion returns the version string reported by /healthz.
+func HealthzVersion() string {
+	if p := healthzVersion.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// SetHealthzVersion updates the version string reported by /healthz.
+// Safe to call from any goroutine.
+func SetHealthzVersion(v string) {
+	healthzVersion.Store(&v)
+}
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1101,5 +1128,5 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 		OK      bool   `json:"ok"`
 		Version string `json:"version,omitempty"`
 	}
-	_ = json.NewEncoder(w).Encode(healthzBody{OK: true, Version: HealthzVersion})
+	_ = json.NewEncoder(w).Encode(healthzBody{OK: true, Version: HealthzVersion()})
 }

@@ -121,7 +121,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 
 	// --- HTTP API ---
 	if opts.APIAddr != "" {
-		httpapi.HealthzVersion = opts.Version
+		httpapi.SetHealthzVersion(opts.Version)
 		api := httpapi.NewWithOptions(opts.APIAddr, opts.Log, httpapi.Options{
 			Index:     d.Index,
 			Swarm:     eng.SwarmSearch(),
