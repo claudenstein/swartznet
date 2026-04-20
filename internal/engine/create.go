@@ -120,15 +120,17 @@ func (e *Engine) CreateTorrent(opts CreateTorrentOptions) (*metainfo.MetaInfo, e
 	info := metainfo.Info{
 		PieceLength: pieceLen,
 	}
-	if opts.Name != "" {
-		info.Name = opts.Name
-	}
 	if opts.Private {
 		info.Private = &opts.Private
 	}
 
 	if err := info.BuildFromFilePath(opts.Root); err != nil {
 		return nil, fmt.Errorf("build info: %w", err)
+	}
+	// BuildFromFilePath sets info.Name to filepath.Base(opts.Root);
+	// apply our override after so opts.Name actually takes effect.
+	if opts.Name != "" {
+		info.Name = opts.Name
 	}
 
 	infoBytes, err := bencode.Marshal(info)

@@ -17,6 +17,15 @@ engagement from actual users of the v0.x prereleases.
 
 ### Fixed
 
+  - **`CreateTorrentOptions.Name` override silently ignored**
+    (`internal/engine/create.go`): the documented "Name overrides
+    info.name" behaviour did not take effect because the override
+    was applied before `info.BuildFromFilePath`, which then
+    overwrote `info.Name` with `filepath.Base(opts.Root)`. The
+    override is now applied after `BuildFromFilePath`, matching
+    the documented contract. Tests in
+    `internal/engine/create_options_test.go` pin the new
+    behaviour.
   - **Newly-created torrents stuck at 0% progress**
     (`internal/engine/engine.go`): when the Create Torrent
     flow (Fyne GUI or `swartznet create --seed`) built a
