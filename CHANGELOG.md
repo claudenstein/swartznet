@@ -15,6 +15,95 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Fixed
+
+  - **Newly-created torrents stuck at 0% progress**
+    (`internal/engine/engine.go`): when the Create Torrent
+    flow (Fyne GUI or `swartznet create --seed`) built a
+    torrent from local content and handed it straight to the
+    engine, the download progress bar stayed at 0% forever.
+    anacrolix/torrent does not verify existing on-disk pieces
+    eagerly — it waits for a peer request to trigger a read,
+    and a brand-new infohash with no other seeders in the
+    swarm generates no peer requests. `AddTorrentMetaInfo`
+    now kicks off `t.VerifyData()` in a background goroutine,
+    so the piece-state subscription fires as each local
+    piece is rehashed and both the download progress bar
+    *and* the new indexing progress bar advance the moment
+    the torrent appears in the GUI. Applies to the companion
+    publisher path too, which seeds a freshly-written JSON
+    index via the same code path.
+
+### Changed
+
+  - **Create Torrent dialog (Fyne)** — the **Torrent name**
+    field now auto-populates with the basename of the chosen
+    file or folder as soon as you browse to it, so the field
+    is obviously editable rather than an empty afterthought.
+    The label also spells out that this becomes the
+    top-level folder name downloaders see, and the
+    placeholder reads "Torrent display name — edit to
+    rename". User-typed edits survive re-browsing; only the
+    auto-fill from a previous browse is overwritten.
+
+### Added
+
+  - **Per-torrent indexing progress bar** (Web UI + API):
+    the extraction pipeline
+    (`internal/indexer/pipeline.go`) now keeps atomic
+    per-infohash counters of every file it has processed,
+    partitioned into `extracted` / `skipped` / `failed`, and
+    exposes them via `Pipeline.Stats(infohash)`. The engine's
+    `TorrentSnapshot` carries the counts through as
+    `IndexedFiles` + `IndexExtracted`; the `/torrents` HTTP
+    response surfaces them as `indexed_files` and
+    `index_extracted`. The Downloads tab renders a second,
+    thinner bar under each torrent card that advances from 0
+    to the torrent's file count with a live "🔍 indexed N /
+    M (X%)" label, so users can watch the pipeline chew
+    through huge text-heavy corpora (e.g. a 450,000-file
+    Project Gutenberg mirror where extraction runs orders of
+    magnitude longer than the download itself) and tell at a
+    glance that it's still making forward progress. One new
+    test, `TestPipelineStatsCounters`.
+
+  - **Session persistence**
+    (`internal/engine/session.go`): the engine now records every
+    open torrent in `<DataDir>/session.json` and writes a copy of
+    each `.torrent` file to `<DataDir>/torrents/<infohash>.torrent`
+    so the user's download list survives daemon restarts. Magnet
+    adds are recorded with their original URI; once metadata
+    arrives the magnet entry is upgraded to a file entry so future
+    restarts skip the ut_metadata round trip. Per-torrent
+    `paused`, `indexing`, and `queue_order` are part of the
+    manifest and survive restart. `engine.RestoreSession` is
+    invoked from `daemon.New` right after engine init so the GUI
+    sees the previous list the moment the window opens. Two new
+    integration tests (`TestSessionRoundTrip`,
+    `TestSessionRemoveDeletesCopy`).
+
+    Fixes the "all torrents disappear after a GUI restart" bug.
+
+  - **ZIM extractor** (`internal/indexer/extractors/zim.go`):
+    SwartzNet now indexes the article text inside OpenZIM
+    files — the format Kiwix ships for offline Wikipedia,
+    Project Gutenberg, Stack Exchange, and similar corpora.
+    Uses random-access I/O (the engine's anacrolix file
+    reader satisfies `io.ReaderAt`) so a 70 GiB ZIM doesn't
+    have to be slurped into RAM. Handles uncompressed
+    (cluster type 1) and zstd (type 5) clusters; XZ/LZMA2
+    (type 4, pre-2021 ZIMs) is detected and skipped with a
+    clean error. Bounded at 5,000 articles and 32 MiB of
+    cumulative emitted text per file by default. HTML
+    articles go through the existing `extractHTMLText`
+    helper so block-level paragraph boundaries survive into
+    the chunker. Five new tests including a synthesized
+    in-memory ZIM with an uncompressed single-cluster
+    layout. **Total extractors: 19.**
+
+  - New dep: `github.com/klauspost/compress` (BSD-3-Clause)
+    for zstd cluster decompression.
+
 ## v0.7.0 — 2026-04-13
 
 **Headline: search by publisher.** Every torrent indexed since

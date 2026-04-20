@@ -13,18 +13,27 @@ quick-start.
   Companion / Settings), file selection, per-torrent indexing
   control, bandwidth limits, queue management, troubleshooting.
 
-## I want to integrate SwartzNet or port `sn_search` to another client
+## I want to integrate SwartzNet or implement a SwartzNet protocol in another client
+
+These three documents are the protocol specs. Each is a
+self-contained, BEP-style specification — read them
+end-to-end and produce a wire-compatible peer in any
+language. The reference implementation lives in this repo.
 
 - **[06-bep-sn_search-draft.md](06-bep-sn_search-draft.md)** —
-  BEP-style specification of the peer-wire `sn_search` extension
-  (the Layer-S wire format). Anyone reimplementing the extension
-  in another client should be able to read this document end-to-
-  end and produce a wire-compatible peer.
+  Layer-S, the peer-wire `sn_search` extension (LTEP). Defines
+  the message envelope, capability bitfield (services bits),
+  query/result/reject/peer_announce semantics, and rate limits.
 - **[07-bep-dht-keyword-index-draft.md](07-bep-dht-keyword-index-draft.md)** —
-  matching draft spec for the Layer-D BEP-44 mutable-item keyword
-  index: how publishers key items by pubkey + salt, how lookups
-  fan out, how reputation filtering affects which indexers a
-  node queries.
+  Layer-D, the BEP-44 mutable-item keyword index. Defines the
+  per-publisher salt convention, the bencoded `v` schema, the
+  shard-by-suffix overflow path, and key-rotation semantics.
+- **[11-signing-protocol.md](11-signing-protocol.md)** —
+  Publisher-signed `.torrent` files. Defines the optional
+  top-level metainfo fields (`snet.pubkey`, `snet.sig`),
+  the domain-prefixed signature payload, and the verification
+  algorithm. Wire-compatible with every existing BitTorrent
+  client.
 
 ## I want to understand the architecture
 

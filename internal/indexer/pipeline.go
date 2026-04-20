@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/swartznet/swartznet/internal/indexer/extractors"
@@ -33,6 +34,39 @@ type Pipeline struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 	stopCh    chan struct{}
+
+	// counters tracks per-infohash extraction progress. Keys are
+	// lowercased hex infohashes, values are *ihCounters. Populated
+	// lazily on first Submit for a given infohash.
+	counters sync.Map
+}
+
+// ihCounters is the set of atomic tallies kept for a single torrent.
+// Processed advances past every file the pipeline has finished with,
+// whether it produced chunks, was skipped by dispatch, or errored.
+type ihCounters struct {
+	processed atomic.Int64
+	extracted atomic.Int64
+	skipped   atomic.Int64
+	failed    atomic.Int64
+}
+
+// PipelineStats is a snapshot of the extraction counters for one
+// torrent. Zero-valued when the infohash has never been submitted.
+type PipelineStats struct {
+	// Processed is the total count of files the pipeline has
+	// finished handling. Equals Extracted + Skipped + Failed.
+	Processed int64
+	// Extracted is the count of files that yielded at least one
+	// content chunk (the useful work).
+	Extracted int64
+	// Skipped is the count of files where no extractor matched
+	// or extraction returned an empty chunk list. Normal for
+	// images, videos, archives, etc.
+	Skipped int64
+	// Failed is the count of files where the extractor returned
+	// an error or the index-write failed for every chunk.
+	Failed int64
 }
 
 // FileInput describes a single completed file ready for extraction.
@@ -117,17 +151,19 @@ func (p *Pipeline) run() {
 
 // handle runs dispatch + extraction + indexing for a single input.
 // Errors are logged and otherwise swallowed; one bad file must not stop
-// the pipeline.
+// the pipeline. Updates the per-infohash counters exactly once per call
+// so the progress bar advances whether or not this file had any text.
 func (p *Pipeline) handle(in FileInput) {
+	counters := p.countersFor(in.InfoHash)
+	defer counters.processed.Add(1)
+
 	candidate := extractors.Candidate{
 		Path: in.Path,
 		Size: in.Size,
 	}
 	ex, mime := extractors.Dispatch(candidate)
 	if ex == nil {
-		// No extractor claimed this file. That is the normal case for
-		// videos, images, archives, etc. We silently skip them for
-		// M2.2a; later milestones may want a metrics counter.
+		counters.skipped.Add(1)
 		return
 	}
 
@@ -135,6 +171,7 @@ func (p *Pipeline) handle(in FileInput) {
 	if err != nil {
 		p.log.Warn("pipeline.open_failed",
 			"path", in.Path, "info_hash", in.InfoHash, "err", err)
+		counters.failed.Add(1)
 		return
 	}
 	if c, ok := r.(io.Closer); ok {
@@ -145,12 +182,15 @@ func (p *Pipeline) handle(in FileInput) {
 	if err != nil {
 		p.log.Debug("pipeline.extract_skip",
 			"path", in.Path, "extractor", ex.Name(), "err", err)
+		counters.skipped.Add(1)
 		return
 	}
 	if len(chunks) == 0 {
+		counters.skipped.Add(1)
 		return
 	}
 
+	writeErrors := 0
 	for ci, chunk := range chunks {
 		doc := ContentDoc{
 			InfoHash:   strings.ToLower(in.InfoHash),
@@ -169,8 +209,15 @@ func (p *Pipeline) handle(in FileInput) {
 				"chunk", ci,
 				"err", err,
 			)
+			writeErrors++
 			continue
 		}
+	}
+
+	if writeErrors == len(chunks) {
+		counters.failed.Add(1)
+	} else {
+		counters.extracted.Add(1)
 	}
 
 	p.log.Info("pipeline.extracted",
@@ -180,6 +227,38 @@ func (p *Pipeline) handle(in FileInput) {
 		"chunks", len(chunks),
 		"ext", strings.ToLower(filepath.Ext(in.Path)),
 	)
+}
+
+// countersFor returns the (lazily-created) counters for one infohash.
+// Normalises the key to lowercase so callers can pass either form.
+func (p *Pipeline) countersFor(infohash string) *ihCounters {
+	key := strings.ToLower(infohash)
+	if v, ok := p.counters.Load(key); ok {
+		return v.(*ihCounters)
+	}
+	fresh := &ihCounters{}
+	actual, _ := p.counters.LoadOrStore(key, fresh)
+	return actual.(*ihCounters)
+}
+
+// Stats returns a point-in-time snapshot of the extraction counters
+// for one torrent. Safe to call from any goroutine; cheap enough to
+// invoke from a polling HTTP handler once per torrent per poll tick.
+// Returns a zero-valued struct for an infohash the pipeline has
+// never seen.
+func (p *Pipeline) Stats(infohash string) PipelineStats {
+	key := strings.ToLower(infohash)
+	v, ok := p.counters.Load(key)
+	if !ok {
+		return PipelineStats{}
+	}
+	c := v.(*ihCounters)
+	return PipelineStats{
+		Processed: c.processed.Load(),
+		Extracted: c.extracted.Load(),
+		Skipped:   c.skipped.Load(),
+		Failed:    c.failed.Load(),
+	}
 }
 
 // safeExtract runs ex.Extract with a panic recovery net. Extractors

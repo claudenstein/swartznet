@@ -4,7 +4,7 @@
 |---|---|
 | Title | Distributed Text Search Extension (`sn_search`) |
 | Version | 1 |
-| Last-Modified | 2026-04-10 |
+| Last-Modified | 2026-04-13 |
 | Author | The SwartzNet Authors |
 | Status | Draft |
 | Type | Standards Track |
@@ -99,35 +99,42 @@ LTEP handshake message (BEP-10) when they wish to receive
 
 ### Capability advertisement
 
-Implementations MAY include the following top-level keys in
-their LTEP handshake dictionary:
+Capabilities are announced in a dedicated **`peer_announce`**
+message (msg_type 3, see §Message types) sent once per
+connection direction immediately after the LTEP handshake. The
+message carries a 64-bit `services` bitfield in which each bit
+indicates support for one optional sub-feature, and a `v`
+integer identifying the protocol version. This is the BIP-9
+"services bits" pattern from Bitcoin Core's peer protocol:
+**unknown bits MUST be ignored, never rejected**, so adding
+new features is structurally non-breaking.
 
-| Key | Type | Meaning |
+Bit assignments (from `internal/swarmsearch/services.go`):
+
+| Bit | Name | Meaning |
 |---|---|---|
-| `sn_search_v` | int | Highest protocol version supported. This document defines version 1. |
-| `sn_search_cap` | string | Compact capability descriptor (see below). |
+| 0 | `BitShareLocal` | Answers queries against the full local index. |
+| 1 | `BitShareSwarm` | Answers queries only for torrents the responder is currently in the swarm of. Mutually exclusive with bit 0 in practice. |
+| 2 | `BitFileHits` | Returns per-file path matches in addition to torrent-name matches. |
+| 3 | `BitContentHits` | Returns content-level matches (extracted-text snippets). Implies a local content extractor pipeline. |
+| 4 | `BitLayerDPublisher` | Publishes keyword → infohash entries to the BEP-44 DHT (`07-bep-dht-keyword-index-draft.md`). |
+| 5 | `BitCompanionPublisher` | Publishes F3 companion content-index torrents (publisher side of `M11` companion-index protocol). |
+| 6 | `BitCompanionSubscriber` | Subscribes to one or more companion publishers and ingests their content index. |
+| 7 | `BitSnippetHighlight` | Returns Bleve highlight fragments wrapped in `<mark>...</mark>` on content hits. |
+| 8 | `BitRegtest` | The peer is running in deterministic regtest mode. Loud bit so accidental cross-connections from a regtest harness to mainnet are obvious. |
+| 9–63 | reserved | Future features. Always allocate the next available bit. |
 
-The capability string is four 2-character fields packed
-together: `L<level>F<level>C<level>P<level>` where:
+A peer that does not send a `peer_announce` message before its
+first query is treated as "services unknown" (zero mask) by
+the responder. Such a peer is still queried normally; its
+results just cannot be filtered against advertised
+capabilities. The responder MUST NOT refuse to answer a query
+solely because the initiator never announced.
 
-- **L**: how much of the local index this peer will share.
-  - `L0` = nothing (pure leecher of search)
-  - `L1` = torrents in the current swarm only
-  - `L2` = the whole local index
-- **F**: file-list match support.
-  - `F0` = torrent-name hits only
-  - `F1` = file-list hits
-- **C**: content-level match support (requires text extraction).
-  - `C0` = no content hits
-  - `C1` = content-level hits
-- **P**: DHT publishing support (the companion Layer-D
-  BEP-44 keyword index).
-  - `P0` = does not publish
-  - `P1` = publishes
-
-A peer MAY query a peer for capabilities the responder
-explicitly disables. The responder MUST then reply with a
-reject message of code 2 (`unsupported scope`).
+Querying a peer for a sub-feature whose bit is clear MAY
+result in a reject of code 2 (`unsupported scope`), or in the
+responder silently downgrading the query to its supported
+subset — implementations MAY choose either policy.
 
 ### Message envelope
 
@@ -243,22 +250,35 @@ Defined reject codes:
 
 ```
 {
-  "msg_type": 3,
-  "peers": [
-    {
-      "ip":   <4 or 16 bytes, big-endian>,
-      "port": <u16>,
-      "cap":  "L1F1C0P0",
-      "pk":   <32-byte ed25519 publisher pubkey, optional>
-    }
-  ]
+  "msg_type":  3,
+  "v":         <int, this peer's ProtocolVersion>,
+  "services":  <int, this peer's ServiceBits as a uint64>
 }
 ```
 
-`peer_announce` is the gossip primitive used to spread known
-search-capable peers across the swarm. Implementations SHOULD
-limit `peer_announce` to at most one message per connection
-per 10 minutes and at most 20 peer entries per message.
+`peer_announce` is the per-direction announcement of a peer's
+own protocol version and capability bitfield. Each side of the
+TCP connection sends exactly one `peer_announce` immediately
+after observing the remote's LTEP handshake — initiator-to-
+responder AND responder-to-initiator. Subsequent capability
+changes (e.g. user toggling a setting at runtime) MAY trigger
+a fresh `peer_announce` on the same connection; implementations
+SHOULD rate-limit such re-announces.
+
+The `services` integer encodes the bits documented in
+"Capability advertisement" above. A receiver MUST mask off only
+the bits it understands (bits ≥ the highest defined bit in its
+own build), MUST NOT raise an error for unknown bits, and MUST
+treat the absence of a `peer_announce` as `services = 0` rather
+than as a protocol error.
+
+Earlier draft revisions of this document specified
+`peer_announce` as a peer-discovery gossip primitive carrying
+IP/port/cap/pk lists for *other* search-capable peers. That
+schema was retired during M15b in favour of the per-connection
+self-announcement above; peer discovery is now handled by the
+ambient swarm itself (see `internal/swarmsearch/feeler.go`
+and `peerbook.go` for the current implementation).
 
 ### Rate limits
 
@@ -274,6 +294,25 @@ Suggested defaults:
 Implementations MAY override these for trusted peers (e.g.
 peers whose pubkey appears in the local known-good list).
 
+### Result merging and the LRU hit cache
+
+When a query fans out to N peers and several of them return
+the same popular torrent, the merge step needs to deduplicate
+by infohash and accumulate per-source attribution. Reference
+implementations SHOULD maintain a bounded LRU cache of
+recently-seen `MergedHit` records keyed by infohash so the
+merge can skip redundant metadata comparison for hits already
+in the cache and just increment the source count. The
+SwartzNet reference implements this in
+`internal/swarmsearch/hitcache.go` (default 4096 entries).
+
+This is purely a local performance optimisation — the wire
+format does not change, and a correct implementation that does
+no merge-time caching is fully interoperable. A future v1.1
+profile may add SipHash-keyed compact result encoding (BIP-152
+style) that exploits the same cache as its source-of-truth
+state.
+
 ### Backwards compatibility
 
 A peer that does not advertise `sn_search` in its `m`
@@ -284,27 +323,40 @@ guarantee that a vanilla BitTorrent peer can connect to an
 `sn_search`-aware peer with no observable difference in
 behaviour.
 
-The `sn_search_v` and `sn_search_cap` keys are top-level keys
-on the LTEP handshake dictionary. Vanilla clients will see
-unknown keys and ignore them per BEP-10's general unknown-
-field policy.
+A capability bit unknown to the receiver MUST be treated as
+"feature not present" and ignored. This is the structural
+property that makes the protocol additively extensible
+forever, modeled on Bitcoin Core's services field.
 
 ## Reference Implementation
 
 A complete reference implementation in Go ships in the
 SwartzNet client at `internal/swarmsearch/`:
 
-- `protocol.go` — peer-state tracking and capability flags.
+- `protocol.go` — per-peer state, LTEP handshake observation,
+  per-direction `peer_announce` emission.
+- `services.go` — `ServiceBits` bitfield with named constants
+  for every defined feature plus helpers (`Has`, `With`,
+  `Without`, `DefaultServices`).
 - `wire.go` — message encode / decode (uses
   `github.com/anacrolix/torrent/bencode`).
-- `handler.go` — server-side query dispatch and reject paths.
+- `handler.go` — server-side query dispatch, capability gate,
+  and reject paths.
 - `query.go` — outbound `Query()` fan-out with txid routing
   and merge-by-infohash.
+- `hitcache.go` — bounded LRU of MergedHits used by the merge
+  step.
+- `ratelimit.go` — per-peer inbound query rate limiter.
+- `misbehavior.go` — defence-in-depth misbehavior-score
+  tracker; peers exceeding threshold are demoted/dropped.
+- `peerbook.go` + `feeler.go` — opportunistic discovery of
+  search-capable peers in the ambient swarm.
 
-The reference implementation has 18 unit tests covering
-encode/decode round-trip, capability discovery, inbound query
-handling against a faked local index, and outbound fan-out
-with mocked senders. All tests run under `go test -race`.
+The reference implementation has ~40 unit tests covering
+encode/decode round-trip, capability bit handling, inbound
+query handling against a faked local index, outbound fan-out
+with mocked senders, hit-cache LRU semantics, and rate
+limiting. All tests run under `go test -race`.
 
 ## Security Considerations
 

@@ -107,6 +107,8 @@ func (c *controllerAdapter) TorrentSnapshots() []httpapi.TorrentSnapshot {
 			Paused:           s.Paused,
 			Status:           s.Status,
 			Indexing:         s.Indexing,
+			IndexedFiles:     s.IndexedFiles,
+			IndexExtracted:   s.IndexExtracted,
 			Queued:           s.Queued,
 			DownloadRate:     s.DownloadRate,
 			UploadRate:       s.UploadRate,

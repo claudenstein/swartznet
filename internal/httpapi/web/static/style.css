@@ -385,6 +385,32 @@ button:disabled {
   transition: width 0.4s ease-out;
 }
 
+.indexing-bar {
+  position: relative;
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 0.2rem 0 0.35rem 0;
+}
+
+.indexing-bar-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, var(--warn), var(--good));
+  border-radius: 2px;
+  transition: width 0.4s ease-out;
+}
+
+.indexing-meta {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  margin: -0.15rem 0 0.15rem 0;
+}
+
 .download-meta {
   font-size: 0.82rem;
   color: var(--text-dim);

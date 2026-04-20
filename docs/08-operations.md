@@ -20,14 +20,24 @@ contents of that directory after a working install:
 
 ```
 ~/.local/share/swartznet/
-├── identity.key            ← M4a ed25519 publisher keypair, mode 0600
-├── publisher.json          ← M4d per-keyword publish manifest (JSON)
-├── reputation.json         ← M5b per-pubkey reputation tracker (JSON)
-├── known-good.bloom        ← M5a Bloom filter of confirmed infohashes
-├── data/                   ← downloaded torrent files
+├── identity.key                ← ed25519 publisher keypair, mode 0600
+├── publisher.json              ← per-keyword DHT publish manifest (JSON)
+├── reputation.json             ← per-pubkey reputation tracker (JSON)
+├── seeds.json                  ← curated indexer-seed list (JSON), optional
+├── known-good.bloom            ← Bloom filter of confirmed infohashes
+├── trust.json                  ← publisher trust list (JSON, v0.5+)
+├── companion-follows.json      ← followed companion publishers (JSON)
+├── companion/                  ← F3 companion publisher artefacts
+│   ├── current.json.gz         ← serialised local index snapshot
+│   └── current.torrent         ← torrent wrapping the snapshot
+├── data/                       ← downloaded torrent files
+│   ├── session.json            ← open-torrents manifest (re-added on startup)
+│   ├── torrents/               ← .torrent file copies for session restore
+│   │   ├── <infohash>.torrent
+│   │   └── …
 │   ├── ubuntu-24.04-amd64.iso
 │   └── …
-└── index/                  ← Bleve full-text index directory
+└── index/                      ← Bleve full-text index directory
     ├── index_meta.json
     └── store/…
 ```
@@ -40,10 +50,15 @@ setting `XDG_DATA_HOME` to a different root.
 
 | File | Why | Recoverable if lost? |
 |---|---|---|
-| `identity.key` | Your publisher pubkey. Lose it and every previously-published Layer-D entry will eventually expire and be unattributable to you. | No — generate a new one and start over. |
+| `identity.key` | Your publisher pubkey. The same key signs Layer-D entries (`07-bep-dht-keyword-index-draft.md`) AND the `.torrent` files you mint with `--sign` (`11-signing-protocol.md`). Lose it and you lose your portable publisher identity. | No — generate a new one and start over. |
+| `trust.json` | Your publisher trust list. Each entry causes torrents signed by that pubkey to be auto-confirmed and surfaced as trusted. | Yes — re-add the pubkeys via `swartznet trust add`. |
 | `reputation.json` | The history that informs your indexer-quality scores. | Yes, slowly — counters rebuild as you query. |
 | `known-good.bloom` | Your downloaded-and-confirmed infohashes; drives the Bloom-hit boost in lookups. | Partly — auto-confirm rebuilds it as you re-download. |
 | `publisher.json` | The list of keywords you have published and their hits. | Yes — re-published from your local index on next add. |
+| `companion/` | The serialised local-index snapshot the F3 companion publisher seeds. | Yes — regenerated on next companion publish cycle. |
+| `companion-follows.json` | Publishers you subscribe to. | Yes — re-add via the GUI or the HTTP API. |
+| `data/session.json` | The list of open torrents and their state (paused / indexing / queue order). Re-added on next daemon start. | Yes — every Add/Remove/Pause/Resume/SetIndexing call rewrites it. |
+| `data/torrents/` | Per-torrent `.torrent` file copies used by session restore (preserves signing fields). | Yes — magnet adds re-fetch metadata over the swarm; file adds with a missing copy fall back to magnet URI. |
 | `data/` | The downloaded content itself. | Only if the torrents are still on the swarm. |
 | `index/` | The Bleve full-text index over downloaded content. | Yes — the indexer rebuilds it as torrents are re-added. |
 
@@ -109,6 +124,9 @@ swartznet search --swarm --dht "ubuntu 24.04"
 # Local-only search (does not need a running daemon)
 swartznet search "ubuntu 24.04"
 
+# Restrict to torrents minted by one specific publisher
+swartznet search --signed-by <64-char-hex-pubkey> "release notes"
+
 # Snapshot of local index, swarm peers, DHT publisher, Bloom + reputation
 swartznet status
 
@@ -121,6 +139,23 @@ swartznet confirm <40-char-hex-infohash>
 
 # Mark a hit as spam — demotes every indexer that returned it
 swartznet flag <40-char-hex-infohash>
+
+# Create a new .torrent file, signed by the local identity
+swartznet create ./release-build -o release.torrent --sign \
+  --tracker "udp://tracker.opentrackr.org:1337/announce" \
+  --comment "Release v2.0"
+
+# Toggle indexing for a single torrent (operates against the running daemon)
+swartznet index <infohash> off
+
+# List or change per-file priorities in a multi-file torrent
+swartznet files <infohash>
+swartznet files <infohash> 4 high
+
+# Manage the publisher trust list (offline; no daemon required)
+swartznet trust list
+swartznet trust add <64-char-hex-pubkey> "Alice's release key"
+swartznet trust remove <64-char-hex-pubkey>
 ```
 
 ## Backwards compatibility
@@ -415,7 +450,7 @@ connection, no daemon restart required. A limit of 500 KiB/s
 roughly equals 4 Mbit/s, the typical cap mentioned in
 BitTorrent community etiquette ("share-ratio-friendly").
 
-HTTP equivalents (once a future release exposes them):
+HTTP equivalents (live since v0.6.0):
 
 ```
 POST /config/rate-limit
@@ -425,7 +460,9 @@ GET  /config/rate-limit
 
 Current state can be read via
 `Engine.UploadLimitBytesPerSec()` /
-`DownloadLimitBytesPerSec()` — zero means unlimited.
+`DownloadLimitBytesPerSec()` — zero means unlimited. The web
+UI Settings tab and the native GUI Settings tab share the same
+endpoints.
 
 ### Per-torrent indexing control
 
@@ -451,6 +488,23 @@ Two ways to opt a torrent out:
 The **global** `--no-index` flag on `swartznet add` is a stronger
 switch: it prevents the Bleve index from being opened at all, so
 no torrent — past, present, or future — contributes anything.
+
+#### Watching indexing progress
+
+For torrents with lots of small files (e.g. a Project Gutenberg
+or Stack Exchange mirror in the hundreds-of-thousands range),
+downloading finishes long before extraction does; the pipeline
+reads each file, runs its format-specific extractor, and
+commits chunks to Bleve one file at a time. The Web UI's
+Downloads tab renders a second, thinner progress bar under
+each torrent whose indexing is enabled, with a "🔍 indexed N /
+M (X%)" label. The counter advances for every file the
+pipeline has finished, including files it skipped (no
+matching extractor — images, videos, archives) so the bar
+always reaches 100% once the queue is drained. The underlying
+counts are also available programmatically on every
+`/torrents` poll: `indexed_files` (all processed) and
+`index_extracted` (subset that produced chunks).
 
 ### Building the GUI
 
@@ -496,10 +550,196 @@ and by default also binds the HTTP API on `localhost:7654`, so you
 can run `swartznet search --swarm "ubuntu"` in another terminal
 against the same instance.
 
+## Publisher signing (v0.4.0+)
+
+SwartzNet can sign the `.torrent` files it mints with the
+node's persistent ed25519 identity. The signature binds the
+publisher's pubkey to the torrent's infohash, so any other
+SwartzNet client can verify, at add time, "this metainfo was
+minted by the holder of pubkey X". Vanilla BitTorrent clients
+ignore the signing fields and treat the file as any other
+`.torrent`.
+
+The full wire format and verification algorithm live in
+[`11-signing-protocol.md`](11-signing-protocol.md).
+
+### Signing a torrent
+
+CLI:
+
+```
+swartznet create ./release-build -o release.torrent --sign
+```
+
+`--sign` loads the identity at `--identity <path>` (default:
+`~/.local/share/swartznet/identity.key`) and adds
+`snet.pubkey` + `snet.sig` as optional top-level fields in the
+metainfo dictionary. The infohash is unchanged — every other
+client sees a normal `.torrent`. The CLI prints the signing
+pubkey so you can confirm it matches what you intended.
+
+GUI: the Create Torrent dialog (Downloads tab → Create
+Torrent button) has a "Sign with my ed25519 identity"
+checkbox enabled by default. When checked, the resulting
+`.torrent` is signed with the daemon's identity.
+
+### Verifying a torrent
+
+When a `.torrent` file is added (CLI `swartznet add foo.torrent`
+or GUI "Add .torrent" button), the engine attempts to verify
+any signing fields it finds and stores the resulting pubkey
+on the handle. `Handle.SignedBy()` returns the 64-char hex
+pubkey or the empty string for unsigned/failed-verify.
+
+Magnet adds (`xt=urn:btih:...`) cannot be verified at add
+time because the metainfo bytes are not yet available; the
+verification happens once ut_metadata fetch completes — but
+the engine does not currently re-run verification at that
+point, so magnet-added torrents always show `signed_by =""`
+even when the underlying `.torrent` is signed. Adding via the
+`.torrent` file path is the only path that captures the
+signature today.
+
+The native GUI also ships a "Verify signature..." dialog (right-
+click any torrent in Downloads) that displays the full pubkey,
+trust status, and the signed infohash.
+
+## Publisher trust list (v0.5.0+)
+
+Trust is a strictly local concept: every SwartzNet node
+maintains its own JSON-backed allowlist of ed25519 pubkeys
+whose signed `.torrent` files get implicit trust. Trusted
+torrents are auto-confirmed to the known-good Bloom filter
+the moment metadata arrives — no waiting for the download to
+complete — and surfaced with a gold star in UIs that render
+trust state.
+
+The trust list lives at `~/.local/share/swartznet/trust.json`
+(override with the `TrustPath` config field). The file is a
+JSON array of `{"pubkey":"...","label":"..."}` objects;
+mutations are atomic (tempfile + rename).
+
+### Managing the list
+
+CLI (works offline; does not need a running daemon):
+
+```
+swartznet trust list
+swartznet trust add <pubkey> [<label>]
+swartznet trust remove <pubkey>
+swartznet trust list --json   # for scripts
+```
+
+GUI: Right-click any signed torrent in the Downloads tab and
+choose "Trust this publisher" / "Revoke trust for this
+publisher". The "Verify signature..." dialog shows current
+trust status before you decide.
+
+### What "trusted" actually does
+
+For a torrent whose `signed_by` matches a trust-list entry:
+
+1. **Auto-confirm to known-good.** As soon as metadata
+   arrives, the infohash is added to the Bloom filter the
+   reputation system uses to boost lookup ranking. You don't
+   have to wait for the download to complete (and you don't
+   have to manually `swartznet confirm`).
+2. **`TrustedPublisher: true`** on the torrent snapshot,
+   which the GUI renders as a gold ★ prefix in the Downloads
+   "Signed" column and the web UI shows in the Status tab's
+   "trusted" counter.
+3. **Future:** trusted-publisher search results will get a
+   gold-star badge in search hits (deferred to a release
+   after v0.7 because today's `SearchHit` does not yet carry
+   the trust flag — see CHANGELOG).
+
+Trust is not transitive, not chained, and not protocol-level:
+it's a local UI/UX hint backed by the cryptographic
+guarantee that the signature is valid. Whether to trust a
+specific pubkey is your call.
+
+## Search by publisher (v0.7.0+)
+
+Once your local index contains torrents from multiple signed
+publishers, you can restrict search to a single publisher by
+passing their pubkey. The filter applies to Layer L only —
+the swarm and DHT layers don't carry signed metadata yet.
+
+CLI:
+
+```
+swartznet search --signed-by <64-char-hex-pubkey> "release notes"
+swartznet search --signed-by <pubkey> --limit 50 --json "kernel"
+```
+
+HTTP:
+
+```
+POST /search
+  {"q": "release notes",
+   "signed_by": "<64-char-hex-pubkey>"}
+```
+
+Web UI: the Search panel has a "publisher" text input next
+to the search options. Paste a 64-char hex pubkey to filter,
+or click the `✓ <prefix>` badge on any signed hit to pivot —
+the badge populates the publisher input and re-runs the
+search, giving you a one-click "everything else by this
+publisher" workflow.
+
+The filter is implemented in `internal/indexer/indexer.go` as
+a Bleve term-match conjunction on the `signed_by` keyword
+field (added to schema v3). An empty or absent filter
+returns all hits as usual.
+
+## Content extractors
+
+When a file finishes downloading, the engine dispatches it to
+an extractor based on MIME type / file extension. The
+extracted text is chunked and added as Bleve content
+documents, so a search like `"chapter 7"` finds the EPUB it
+came from even if "chapter 7" never appears in the torrent
+name or file path.
+
+Nineteen extractors ship today (all pure-Go, no CGo):
+
+| Format | Extractor | Surfaces |
+|---|---|---|
+| Plaintext / source code / HTML / JSON / XML / Markdown | `plaintext.go` | full text |
+| Subtitles (SRT, VTT, ASS, SSA) | `subtitle.go` | dialog text only (timestamps stripped) |
+| Archive contents listing (ZIP, TAR, TAR.GZ, TGZ) | `archive.go` | sorted file-name listing inside the archive |
+| PDF | `pdf.go` | extracted text via `ledongthuc/pdf` |
+| EPUB | `epub.go` | XHTML body text |
+| DOCX | `docx.go` | `<w:t>` text runs |
+| ODT | `odt.go` | `<text:p>` / `<text:h>` / `<text:span>` |
+| RTF | `rtf.go` | text after stripping control words and groups |
+| FB2 (FictionBook 2) | `fb2.go` | body paragraphs and titles |
+| PPTX | `pptx.go` | every `<a:t>` in slide order |
+| ODP | `odp.go` | text from LibreOffice Impress |
+| MOBI / AZW / AZW3 | `mobi.go` | full title + EXTH metadata |
+| ID3 (MP3 tags) | `id3.go` | TIT2/TPE1/TALB/TDRC/TCON/TRCK/TPUB/COMM/USLT |
+| EXIF (JPEG metadata) | `exif.go` | camera make/model/software/artist/copyright/date/GPS |
+| FLAC | `flac.go` | VORBIS_COMMENT block |
+| OGG (Vorbis / Opus) | `ogg.go` | comment packet (re-uses FLAC parser) |
+| MKV / WebM | `mkv.go` | EBML walker for Info / Tracks / Chapters / Tags |
+| MP4 / M4A / M4B / M4V | `mp4.go` | iTunes-style atom set under `moov/udta/meta/ilst` |
+| ZIM (OpenZIM / Kiwix) | `zim.go` | per-article HTML text from the cluster store; uncompressed + zstd; 5K-article / 32 MiB cap |
+
+To add a new extractor: implement the `Extractor` interface
+from `internal/indexer/extractors/extractor.go`, register it
+via `extractors.Register(impl, claimsFn)` in an `init()`
+block, add the file extension to `extTypes` if the stdlib
+mime table doesn't know about it, and ship tests that
+synthesize the format in-memory (the existing extractors do
+this).
+
 ## Where to file issues
 
 For now, the project lives at
 <https://github.com/claudenstein/swartznet>. Issues are
 welcome. Pull requests with new extractors, additional
 language stop-word lists, or implementations of the draft
-BEPs in other clients are even more welcome.
+BEPs (see [`06-bep-sn_search-draft.md`](06-bep-sn_search-draft.md),
+[`07-bep-dht-keyword-index-draft.md`](07-bep-dht-keyword-index-draft.md),
+and [`11-signing-protocol.md`](11-signing-protocol.md)) in
+other clients are even more welcome.

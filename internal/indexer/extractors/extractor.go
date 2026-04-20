@@ -190,4 +190,5 @@ var extTypes = map[string]string{
 	".m4a":      "audio/mp4",
 	".m4b":      "audio/mp4",
 	".m4v":      "video/mp4",
+	".zim":      "application/x-zim",
 }

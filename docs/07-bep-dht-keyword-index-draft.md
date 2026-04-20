@@ -4,7 +4,7 @@
 |---|---|
 | Title | DHT Keyword Index via BEP-44 Mutable Items |
 | Version | 1 |
-| Last-Modified | 2026-04-10 |
+| Last-Modified | 2026-04-13 |
 | Author | The SwartzNet Authors |
 | Status | Draft |
 | Type | Standards Track |
@@ -156,11 +156,10 @@ dictionary matching this shape:
 
 ```
 v = {
-  "ts":   <int, unix timestamp at which the snapshot was generated>,
+  "ts":     <int, unix timestamp at which the snapshot was generated>,
   "hits": [
     {
       "ih":  <20-byte SHA-1 infohash>,
-      "ih2": <32-byte SHA-256 infohash>,    ; OPTIONAL, BEP-52 hybrid
       "n":   "short torrent name",          ; OPTIONAL
       "s":   <int, seeders last seen>,      ; OPTIONAL
       "f":   <int, file count>,             ; OPTIONAL
@@ -168,7 +167,8 @@ v = {
     },
     ...
   ],
-  "more": <int, 1 if shards 1+ exist, 0 otherwise>   ; OPTIONAL, defaults to 0
+  "more":    <int, 1 if shards 1+ exist, 0 otherwise>  ; OPTIONAL, defaults to 0
+  "next_pk": <32-byte ed25519 public key>              ; OPTIONAL, key-rotation pointer
 }
 ```
 
@@ -176,10 +176,29 @@ The encoded form of `v` MUST be ≤ 1000 bytes (the BEP-44
 hard cap). Implementations MUST reject larger payloads at
 publish time and MUST shard.
 
-Field names use the same short tags as the M3 sn_search wire
-format so a single Go struct can serve both transports. This
-is convention, not requirement; future versions MAY add
-additional optional keys.
+Field names use the same short tags as the sn_search wire
+format so a single Go struct can serve both transports.
+
+`next_pk`, when present, points to the publisher's "next"
+ed25519 public key in a key-rotation chain. Subscribers that
+already trust the current publisher SHOULD migrate their
+trust to `next_pk` because the field rides the current key's
+mandatory BEP-44 signature — only the holder of the current
+private key can publish a `next_pk`. v1 reference
+implementations include the field on every wire message but
+do NOT rotate keys (the field is always empty in v1 puts).
+The rotation logic is scheduled for v1.1; freezing the wire
+shape now means subscribers don't need a format bump to
+start interpreting it later.
+
+Earlier draft revisions also defined an optional `ih2` field
+(32-byte SHA-256 infohash for BEP-52 hybrid torrents). It
+was removed from the v1 schema because the reference
+publisher and subscriber do not yet handle hybrid torrents
+end-to-end and including the field on the wire without
+populating it would only waste bytes against the 1000-byte
+cap. A future v1.1 profile MAY reintroduce it under the same
+tag once hybrid handling is wired through.
 
 ### Signing
 

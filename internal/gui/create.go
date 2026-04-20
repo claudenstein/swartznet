@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -55,12 +56,37 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 	rootEntry := widget.NewEntry()
 	rootEntry.SetPlaceHolder("/path/to/file-or-folder")
 
+	nameEntry := widget.NewEntry()
+	nameEntry.SetPlaceHolder("Torrent display name — edit to rename")
+
+	// autofillName pre-populates the Name field with the basename
+	// of the chosen root. The user can then edit it to anything
+	// they like; we only overwrite when the Name is still empty or
+	// still matches the previous auto-fill so a user-edited name
+	// survives re-browsing. BitTorrent's info.name becomes the
+	// visible torrent name AND the containing folder name on
+	// downloaders, so making it obviously editable avoids users
+	// getting stuck with the raw on-disk folder name.
+	var lastAutofill string
+	autofillName := func(rootPath string) {
+		base := filepath.Base(strings.TrimSpace(rootPath))
+		if base == "" || base == "." || base == "/" {
+			return
+		}
+		if nameEntry.Text == "" || nameEntry.Text == lastAutofill {
+			nameEntry.SetText(base)
+			lastAutofill = base
+		}
+	}
+
 	browseFileBtn := widget.NewButton("Choose File...", func() {
 		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
 			if err != nil || r == nil {
 				return
 			}
-			rootEntry.SetText(r.URI().Path())
+			p := r.URI().Path()
+			rootEntry.SetText(p)
+			autofillName(p)
 			r.Close()
 		}, win)
 		fd.Show()
@@ -70,16 +96,16 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 			if err != nil || lu == nil {
 				return
 			}
-			rootEntry.SetText(lu.Path())
+			p := lu.Path()
+			rootEntry.SetText(p)
+			autofillName(p)
 		}, win)
 		fd.Show()
 	})
+	rootEntry.OnChanged = func(s string) { autofillName(s) }
 	rootRow := container.NewBorder(nil, nil, nil,
 		container.NewHBox(browseFileBtn, browseFolderBtn),
 		rootEntry)
-
-	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("Leave empty to use the basename")
 
 	pieceSelect := widget.NewSelect(pieceLengthLabels(), nil)
 	pieceSelect.SetSelected("Auto")
@@ -130,7 +156,7 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 		widget.NewCard("Source", "", container.NewVBox(
 			widget.NewLabel("Root (file or folder to share)"),
 			rootRow,
-			widget.NewLabel("Name (optional)"),
+			widget.NewLabel("Torrent name (becomes the top-level folder for downloaders)"),
 			nameEntry,
 		)),
 		widget.NewCard("Pieces & Metadata", "", container.NewVBox(

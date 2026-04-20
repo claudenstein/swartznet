@@ -76,22 +76,35 @@ This tiering is the most important design decision in the entire project. It con
 │  internal/daemon  (shared startup: engine + indexer + companion + httpapi)│
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Local HTTP API  (localhost only, loopback bind)                         │
-│  - POST /search    POST /torrent          POST /confirm    POST /flag    │
-│  - GET  /torrents  POST /torrents/*/{pause,resume,indexing}              │
-│  - DELETE /torrents/*                                                    │
-│  - GET/POST /capabilities    GET /status  GET /index/stats   GET /healthz│
+│  - POST /search {q, signed_by?, swarm?, dht?, highlight?}                │
+│  - POST /torrent  POST /confirm  POST /flag  GET /torrents               │
+│  - POST /torrents/{ih}/{pause,resume,indexing}                           │
+│  - GET  /torrents/{ih}/files   POST /torrents/{ih}/files/{i}/priority    │
+│  - DELETE /torrents/{ih}                                                 │
+│  - GET/POST /config/rate-limit   GET/POST /config/queue                  │
+│  - GET/POST /capabilities   GET /status  GET /index/stats   GET /healthz │
 │  - GET/POST /companion {refresh,follow,unfollow}                         │
 ├──────────┬──────────────────────┬────────────────┬───────────────────────┤
 │ Local    │ Remote (peer-wire)   │ Remote (DHT)   │ Companion-index       │
 │ Index    │ sn_search over LTEP  │ BEP-44 keyword │ layer (BEP-46 style   │
-│ (Bleve)  │                      │ items          │  pointer torrents)    │
+│ (Bleve)  │ + ServiceBits        │ items          │  pointer torrents)    │
+│ schema=3 │ + LRU hit cache      │                │                       │
 ├──────────┴──────────────────────┴────────────────┴───────────────────────┤
+│  Cryptographic identity & trust                                          │
+│  - internal/identity  long-lived ed25519 keypair (mode 0600)             │
+│  - internal/signing   .torrent metainfo signing (snet.pubkey, snet.sig)  │
+│  - internal/trust     JSON-persisted publisher allowlist                 │
+│  - internal/reputation per-pubkey Bayesian score + known-good Bloom      │
+├──────────────────────────────────────────────────────────────────────────┤
 │  Ingestion Pipeline   (per-torrent opt-in via Engine.SetTorrentIndexing) │
 │  - Piece verify hook  →  file reassembly  →  text extractor  →  Bleve    │
-│  - Torrent add hook   →  metadata summary  →  DHT publish queue          │
+│  - Torrent add hook   →  metadata summary  →  signed_by  →  DHT publish  │
+│  - 18 pure-Go extractors (text, doc, ebook, archive, audio, video, EXIF) │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Torrent creation   (engine.CreateTorrent / CreateTorrentFile)           │
 │  - Wraps metainfo.Info.BuildFromFilePath + bencode + atomic file write   │
+│  - Optional .torrent signing via internal/signing (CreateTorrentOptions  │
+│    .SignWith ed25519.PrivateKey)                                         │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  BitTorrent Engine: anacrolix/torrent                                    │
 │  - BEP-3 peer wire, BEP-5 DHT, BEP-9 ut_metadata,                        │
@@ -124,9 +137,25 @@ SwartzNet can build new `.torrent` files from local content via `Engine.CreateTo
   - Root (file or folder), auto-detected as single-file or multi-file.
   - Piece length (Auto / 64 KiB / 256 KiB / 1 MiB / 2 MiB / 4 MiB / 8 MiB / 16 MiB) — Auto uses `metainfo.ChoosePieceLength`.
   - Trackers (one per line), webseeds (BEP-19), comment, private flag (BEP-27), output path.
+  - Optional "Sign with my ed25519 identity" which calls `internal/signing.SignBytes` on the marshaled metainfo, adding `snet.pubkey` and `snet.sig` as optional top-level fields. The infohash is unchanged so the torrent stays in the same swarm as its unsigned twin.
   - Optional "start seeding immediately" which adds the MetaInfo to the engine and begins seeding from the same Root.
 
 Piece hashing is synchronous I/O. The GUI runs it in a background goroutine and shows a "Hashing pieces..." modal with `ProgressBarInfinite` until completion — minutes for 100+ GiB, seconds for small folders.
+
+### Publisher signing and trust (v0.4.0–v0.5.0)
+
+Every SwartzNet node owns a long-lived ed25519 keypair (`internal/identity`, file at `~/.local/share/swartznet/identity.key`, mode 0600). The same keypair signs Layer-D BEP-44 mutable items AND the optional `.torrent` signing fields documented in [`docs/11-signing-protocol.md`](11-signing-protocol.md):
+
+  - **Signing** is opt-in per-torrent at creation time; verification is automatic at add time for torrents added by `.torrent` file path. Magnet adds get `signed_by = ""` because the metainfo bytes are not yet available when the engine first sees the infohash.
+  - **Trust** is a strictly local concept managed by `internal/trust`: a JSON-persisted allowlist of pubkeys whose signed torrents the node treats as implicitly trusted. Trusted-publisher torrents are auto-confirmed to the known-good Bloom filter the moment metadata arrives — bypassing the "wait for download completion" path the reputation system normally uses.
+
+Trust is surfaced on `TorrentSnapshot.TrustedPublisher` and the `GET /torrents` JSON. CLI: `swartznet trust list/add/remove`. GUI: right-click "Trust this publisher" / "Verify signature..." dialogs.
+
+### Search by publisher (v0.7.0)
+
+The Bleve schema (v3) persists `signed_by` on every TorrentDoc — the 64-char hex pubkey of the `.torrent` signer or empty for unsigned torrents. `SearchRequest.SignedBy` filters by exact match (Bleve term query) and conjuncts with the user's free-text query. Empty filter behaves as before.
+
+The filter is Layer-L only today: the swarm and DHT layers do not yet carry signed metadata. CLI: `swartznet search --signed-by <pubkey>`. HTTP: `POST /search {"q":"...","signed_by":"..."}`. Web UI: dedicated "publisher" input plus clickable badges on signed hits that pivot the search to "everything else by this publisher".
 
 ---
 

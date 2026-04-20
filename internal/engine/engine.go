@@ -1,17 +1,20 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	pp "github.com/anacrolix/torrent/peer_protocol"
 	"golang.org/x/time/rate"
@@ -64,9 +67,16 @@ type Engine struct {
 	maxActiveDownloads int   // 0 = unlimited (default). See queue.go.
 	nextQueueOrder     int64 // monotonic counter assigned to each new Handle
 
+	// sess persists the list of open torrents and their state
+	// (paused / indexing / queue order) to <DataDir>/session.json
+	// so a daemon restart re-adds every torrent. Always non-nil
+	// after engine.New, but its persistence path is empty when
+	// cfg.DataDir is empty (in-memory-only mode for tests).
+	sess *session
+
 	// bgCtx is cancelled on Engine.Close so background goroutines
-	// launched from the engine can bail out promptly instead of
-	// racing with client shutdown.
+	// launched from the engine (e.g. the post-add VerifyData rehash)
+	// can bail out promptly instead of racing with client shutdown.
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
 
@@ -627,6 +637,21 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		}
 	}
 
+	// Load the on-disk session manifest so RestoreSession (called
+	// by daemon.New right after we return) can re-add every torrent
+	// the user had open last time. A missing file is normal — fresh
+	// installs start with no torrents. Corrupt manifests are logged
+	// and treated as empty; we never fail engine.New over session.
+	sess, err := loadSession(cfg.DataDir)
+	if err != nil {
+		log.Warn("engine.session_load_err", "err", err)
+		sess = &session{entries: make(map[string]sessionEntry)}
+	}
+	eng.sess = sess
+	if n := len(sess.list()); n > 0 {
+		log.Info("engine.session_loaded", "path", sess.path, "entries", n)
+	}
+
 	// Load (or create) the persistent identity, then start a DHT
 	// publisher backed by it. Failures here are non-fatal: a node
 	// without an identity / publisher still works for download +
@@ -774,20 +799,28 @@ func (e *Engine) AddMagnetURI(uri string) (infohash string, err error) {
 // Handle.Close to avoid blocking anacrolix's internal publisher.
 func (e *Engine) AddMagnet(uri string) (*Handle, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.closed {
+		e.mu.Unlock()
 		return nil, errors.New("engine: closed")
 	}
 	t, err := e.client.AddMagnet(uri)
 	if err != nil {
+		e.mu.Unlock()
 		return nil, fmt.Errorf("engine: add magnet: %w", err)
 	}
-	return e.registerLocked(t), nil
+	h := e.registerLocked(t)
+	e.mu.Unlock()
+	e.persistAdd(h, "magnet", uri, "")
+	return h, nil
 }
 
 // AddTorrentFile loads a .torrent file from disk and adds it to the swarm.
 func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
-	mi, err := metainfo.LoadFromFile(path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("engine: read .torrent: %w", err)
+	}
+	mi, err := metainfo.Load(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("engine: load .torrent: %w", err)
 	}
@@ -798,7 +831,7 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 	// in the log so the user sees why their signed torrent
 	// didn't show a verified publisher.
 	var signedBy string
-	if sig, verr := signing.VerifyFile(path); verr == nil {
+	if sig, verr := signing.VerifyBytes(raw); verr == nil {
 		signedBy = sig.PubKeyHex()
 		e.log.Info("engine.torrent_signature_verified",
 			"path", path,
@@ -812,18 +845,30 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.closed {
+		e.mu.Unlock()
 		return nil, errors.New("engine: closed")
 	}
 	t, err := e.client.AddTorrent(mi)
 	if err != nil {
+		e.mu.Unlock()
 		return nil, fmt.Errorf("engine: add torrent: %w", err)
 	}
 	h := e.registerLocked(t)
 	if signedBy != "" {
 		h.signedBy = signedBy
 	}
+	e.mu.Unlock()
+
+	// Persist a copy of the original .torrent so RestoreSession
+	// can re-add by file even if the user later moves or deletes
+	// the source path. Preserves snet.* signing fields.
+	ihHex := h.T.InfoHash().HexString()
+	tname, werr := e.sess.writeTorrentCopy(ihHex, raw)
+	if werr != nil {
+		e.log.Warn("engine.session_torrent_copy_err", "err", werr)
+	}
+	e.persistAdd(h, "file", "", tname)
 	return h, nil
 }
 
@@ -838,12 +883,15 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 // torrent given only the infohash from a BEP-46 pointer.
 func (e *Engine) AddInfoHash(infoHash [20]byte) (*Handle, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.closed {
+		e.mu.Unlock()
 		return nil, errors.New("engine: closed")
 	}
 	t, _ := e.client.AddTorrentInfoHash(metainfo.Hash(infoHash))
-	return e.registerLocked(t), nil
+	h := e.registerLocked(t)
+	e.mu.Unlock()
+	e.persistAdd(h, "infohash", "", "")
+	return h, nil
 }
 
 // FetchCompanionTorrent satisfies companion.CompanionFetcher. It
@@ -931,15 +979,37 @@ func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
 		return nil, errors.New("engine: nil metainfo")
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.closed {
+		e.mu.Unlock()
 		return nil, errors.New("engine: closed")
 	}
 	t, err := e.client.AddTorrent(mi)
 	if err != nil {
+		e.mu.Unlock()
 		return nil, fmt.Errorf("engine: add torrent metainfo: %w", err)
 	}
-	return e.registerLocked(t), nil
+	h := e.registerLocked(t)
+	e.mu.Unlock()
+	// Every caller of AddTorrentMetaInfo is seeding freshly-written
+	// content: the create-torrent flow hashed the user's local
+	// files moments ago, and the companion publisher just wrote a
+	// gzipped JSON index next to the data dir. In both cases the
+	// pieces are already on disk, but anacrolix does not verify
+	// them eagerly — it waits for a peer request before touching
+	// storage. With no peers yet (brand-new infohash), that wait
+	// is forever and the download progress bar stays at 0% until
+	// someone else joins the swarm. Kick off VerifyData in the
+	// background so the bar reflects the real state within the
+	// time it takes to rehash the local copy; piece-complete
+	// events fire as each piece passes, which feeds the file
+	// tracker and the indexer pipeline the same way a real
+	// download would.
+	go func() {
+		if err := t.VerifyDataContext(e.bgCtx); err != nil && e.bgCtx.Err() == nil {
+			e.log.Debug("engine.verify_data_err", "err", err)
+		}
+	}()
+	return h, nil
 }
 
 // registerLocked adds a torrent handle to the tracking map and starts its
@@ -967,7 +1037,226 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 	go e.autoIndex(h)
 	go e.ingestFileEvents(h)
 	go e.autoConfirmOnComplete(h)
+	go e.upgradeMagnetSession(h)
 	return h
+}
+
+// persistAdd records a freshly-added torrent in the on-disk session
+// manifest. Called by AddMagnet/AddTorrentFile/AddInfoHash after the
+// engine lock has been released.
+func (e *Engine) persistAdd(h *Handle, addedVia, magnetURI, torrentFile string) {
+	if e.sess == nil {
+		return
+	}
+	h.queueMu.Lock()
+	qo := h.queueOrder
+	h.queueMu.Unlock()
+	h.indexMu.Lock()
+	indexing := h.indexing
+	h.indexMu.Unlock()
+	h.pausedMu.Lock()
+	paused := h.paused
+	h.pausedMu.Unlock()
+	ih := h.T.InfoHash().HexString()
+	if err := e.sess.update(ih, func(entry *sessionEntry) {
+		entry.AddedVia = addedVia
+		// Only overwrite source fields when supplied so an
+		// upgradeMagnetSession that fires after persistAdd doesn't
+		// clobber the file copy with empty strings.
+		if magnetURI != "" {
+			entry.MagnetURI = magnetURI
+		}
+		if torrentFile != "" {
+			entry.TorrentFile = torrentFile
+		}
+		entry.Indexing = indexing
+		entry.Paused = paused
+		entry.QueueOrder = qo
+		if h.signedBy != "" {
+			entry.SignedBy = h.signedBy
+		}
+	}); err != nil {
+		e.log.Warn("engine.session_update_err", "err", err)
+	}
+}
+
+// persistState updates only the mutable state fields (paused,
+// indexing) for an existing entry. Called by Pause/Resume/SetIndexing.
+func (e *Engine) persistState(h *Handle) {
+	if e.sess == nil {
+		return
+	}
+	h.pausedMu.Lock()
+	paused := h.paused
+	h.pausedMu.Unlock()
+	h.indexMu.Lock()
+	indexing := h.indexing
+	h.indexMu.Unlock()
+	h.queueMu.Lock()
+	qo := h.queueOrder
+	h.queueMu.Unlock()
+	ih := h.T.InfoHash().HexString()
+	if err := e.sess.update(ih, func(entry *sessionEntry) {
+		entry.Paused = paused
+		entry.Indexing = indexing
+		entry.QueueOrder = qo
+	}); err != nil {
+		e.log.Warn("engine.session_update_err", "err", err)
+	}
+}
+
+// upgradeMagnetSession waits for metadata to arrive on a magnet-
+// added torrent, then dumps the in-memory metainfo to the
+// torrents/ dir and upgrades the session entry to AddedVia="file".
+// On the next restart the engine can re-add by file directly,
+// skipping the ut_metadata fetch round trip.
+//
+// No-op for already-file entries, sessionless engines, and
+// torrents whose metadata never arrives.
+func (e *Engine) upgradeMagnetSession(h *Handle) {
+	if e.sess == nil {
+		return
+	}
+	select {
+	case <-h.T.GotInfo():
+	case <-time.After(10 * time.Minute):
+		return
+	}
+	ih := h.T.InfoHash().HexString()
+	e.sess.mu.Lock()
+	entry, ok := e.sess.entries[ih]
+	already := ok && entry.TorrentFile != ""
+	e.sess.mu.Unlock()
+	if already {
+		return
+	}
+	mi := h.T.Metainfo()
+	miBytes, err := bencode.Marshal(mi)
+	if err != nil {
+		e.log.Warn("engine.session_metainfo_marshal_err", "info_hash", ih, "err", err)
+		return
+	}
+	tname, err := e.sess.writeTorrentCopy(ih, miBytes)
+	if err != nil {
+		e.log.Warn("engine.session_torrent_copy_err", "info_hash", ih, "err", err)
+		return
+	}
+	if err := e.sess.update(ih, func(entry *sessionEntry) {
+		entry.TorrentFile = tname
+		// Keep AddedVia as "magnet" or "infohash" — the next restore
+		// will prefer TorrentFile if set, but the original AddedVia
+		// is kept for posterity / debugging.
+	}); err != nil {
+		e.log.Warn("engine.session_update_err", "err", err)
+	}
+}
+
+// RestoreSession re-adds every torrent recorded in the on-disk
+// session manifest. Called by daemon.New right after engine.New
+// returns so the GUI/web UI sees the user's last torrent list
+// the moment they reopen the app. Order is preserved by saving
+// and restoring queue_order; missing/corrupt .torrent file copies
+// are retried via the saved magnet URI when available.
+//
+// Errors per-entry are logged at warn level and skipped — a single
+// bad row in the manifest must not block restoring the rest.
+func (e *Engine) RestoreSession() error {
+	if e.sess == nil {
+		return nil
+	}
+	entries := e.sess.list()
+	if len(entries) == 0 {
+		return nil
+	}
+	for _, entry := range entries {
+		if err := e.restoreEntry(entry); err != nil {
+			e.log.Warn("engine.session_restore_failed",
+				"info_hash", entry.InfoHash,
+				"added_via", entry.AddedVia,
+				"err", err,
+			)
+			continue
+		}
+		e.log.Info("engine.session_restored",
+			"info_hash", entry.InfoHash,
+			"via", entry.AddedVia,
+			"paused", entry.Paused,
+			"indexing", entry.Indexing,
+		)
+	}
+	return nil
+}
+
+// restoreEntry re-adds a single session entry to the engine,
+// preferring the on-disk .torrent copy when present, falling back
+// to the magnet URI, then the bare infohash.
+func (e *Engine) restoreEntry(entry sessionEntry) error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return errors.New("engine: closed")
+	}
+	var (
+		t   *torrent.Torrent
+		err error
+	)
+	switch {
+	case entry.TorrentFile != "" && e.sess.torrentsDir != "":
+		path := filepath.Join(e.sess.torrentsDir, entry.TorrentFile)
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			err = rerr
+			break
+		}
+		mi, lerr := metainfo.Load(bytes.NewReader(raw))
+		if lerr != nil {
+			err = lerr
+			break
+		}
+		t, err = e.client.AddTorrent(mi)
+	case entry.MagnetURI != "":
+		t, err = e.client.AddMagnet(entry.MagnetURI)
+	default:
+		var ih metainfo.Hash
+		if perr := ih.FromHexString(entry.InfoHash); perr != nil {
+			err = perr
+			break
+		}
+		t, _ = e.client.AddTorrentInfoHash(ih)
+	}
+	if err != nil {
+		e.mu.Unlock()
+		return err
+	}
+	if t == nil {
+		e.mu.Unlock()
+		return errors.New("engine: nil torrent after add")
+	}
+	h := e.registerLocked(t)
+	if entry.SignedBy != "" {
+		h.signedBy = entry.SignedBy
+	}
+	if entry.QueueOrder > e.nextQueueOrder {
+		e.nextQueueOrder = entry.QueueOrder
+	}
+	e.mu.Unlock()
+
+	// Apply paused / indexing state without re-persisting (the
+	// session entry is already on disk in the desired shape).
+	h.indexMu.Lock()
+	h.indexing = entry.Indexing
+	h.indexMu.Unlock()
+	if entry.Paused {
+		h.pausedMu.Lock()
+		h.paused = true
+		h.pausedMu.Unlock()
+		h.T.DisallowDataDownload()
+		h.T.DisallowDataUpload()
+	}
+	h.queueMu.Lock()
+	h.queueOrder = entry.QueueOrder
+	h.queueMu.Unlock()
+	return nil
 }
 
 // autoDownload waits for a torrent's metadata to arrive and then
@@ -991,10 +1280,6 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 func (e *Engine) autoDownload(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
-	case <-e.bgCtx.Done():
-		// Engine is shutting down; no point flipping priorities
-		// on a client that's about to tear down anyway.
-		return
 	case <-time.After(5 * time.Minute):
 		return
 	}
@@ -1022,13 +1307,9 @@ func (e *Engine) autoConfirmOnComplete(h *Handle) {
 	complete := h.T.Complete().On()
 	select {
 	case <-complete:
-	case <-e.bgCtx.Done():
-		// Engine is shutting down; the bloom.Add would race
-		// with the save-on-close path.
-		return
 	case <-time.After(24 * time.Hour):
-		// Long timeout: better to return than to hang forever
-		// waiting on a torrent that never completes.
+		// Long timeout: better to leak the goroutine than to hang
+		// forever waiting on a torrent that never completes.
 		return
 	}
 
@@ -1108,10 +1389,6 @@ func (e *Engine) ingestFileEvents(h *Handle) {
 func (e *Engine) autoIndex(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
-	case <-e.bgCtx.Done():
-		// Engine is shutting down; bail out rather than touch
-		// an index that's about to be closed.
-		return
 	case <-time.After(5 * time.Minute):
 		e.log.Warn("indexer.autoindex.timeout", "info_hash", h.T.InfoHash().HexString())
 		return
@@ -1253,6 +1530,16 @@ type TorrentSnapshot struct {
 	// if Engine.SetIndex(nil), Indexing may still be true but
 	// will have no effect.
 	Indexing bool
+	// IndexedFiles is the count of files the extraction pipeline
+	// has finished handling for this torrent — includes extracted,
+	// skipped (no matching extractor), and failed files. Advances
+	// from 0 toward Files as the pipeline chews through completed
+	// files; powers the GUI's per-torrent indexing progress bar.
+	IndexedFiles int64
+	// IndexExtracted is the subset of IndexedFiles that produced
+	// at least one content chunk. Useful for gauging how much of
+	// a large multimedia-heavy torrent is actually text.
+	IndexExtracted int64
 	// Queued is true when this torrent is waiting for a download
 	// slot under the Engine.MaxActiveDownloads cap. Queued
 	// torrents keep their metadata+indexing but do not download
@@ -1284,6 +1571,9 @@ type TorrentSnapshot struct {
 // anacrolix Stats() call.
 func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
 	handles := e.Torrents()
+	e.mu.Lock()
+	pipe := e.pipeline
+	e.mu.Unlock()
 	out := make([]TorrentSnapshot, 0, len(handles))
 	for _, h := range handles {
 		s := snapshotOf(h)
@@ -1292,6 +1582,11 @@ func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
 		// this second-pass fill-in keeps the helper pure).
 		if s.SignedBy != "" && e.trust != nil && e.trust.IsTrusted(s.SignedBy) {
 			s.TrustedPublisher = true
+		}
+		if pipe != nil {
+			ps := pipe.Stats(s.InfoHash)
+			s.IndexedFiles = ps.Processed
+			s.IndexExtracted = ps.Extracted
 		}
 		out = append(out, s)
 	}
@@ -1409,6 +1704,7 @@ func (e *Engine) PauseTorrent(infoHashHex string) error {
 	h.T.DisallowDataDownload()
 	h.T.DisallowDataUpload()
 	e.log.Info("engine.torrent_paused", "info_hash", infoHashHex)
+	e.persistState(h)
 	// Pause frees a download slot — promote the next queued
 	// torrent, if any.
 	go e.promoteQueuedLocked()
@@ -1432,6 +1728,7 @@ func (e *Engine) ResumeTorrent(infoHashHex string) error {
 	h.T.AllowDataDownload()
 	h.T.AllowDataUpload()
 	e.log.Info("engine.torrent_resumed", "info_hash", infoHashHex)
+	e.persistState(h)
 	return nil
 }
 
@@ -1456,6 +1753,7 @@ func (e *Engine) SetTorrentIndexing(infoHashHex string, enabled bool) error {
 	h.indexing = enabled
 	h.indexMu.Unlock()
 	e.log.Info("engine.torrent_indexing_set", "info_hash", infoHashHex, "enabled", enabled)
+	e.persistState(h)
 	return nil
 }
 
@@ -1480,6 +1778,9 @@ func (e *Engine) RemoveTorrent(infoHashHex string) error {
 	e.mu.Lock()
 	delete(e.handles, h.T.InfoHash())
 	e.mu.Unlock()
+	if e.sess != nil {
+		_ = e.sess.remove(h.T.InfoHash().HexString())
+	}
 	e.log.Info("engine.torrent_removed", "info_hash", infoHashHex)
 	// Removing an active torrent frees a download slot — promote
 	// the next queued torrent if any.
@@ -1514,8 +1815,8 @@ func (e *Engine) Close() error {
 		return e.closeErr
 	}
 	e.closed = true
-	// Cancel engine-owned background goroutines so they don't
-	// race with client shutdown below.
+	// Cancel engine-owned background goroutines (VerifyData rehash
+	// etc.) so they don't race with client shutdown below.
 	if e.bgCancel != nil {
 		e.bgCancel()
 	}

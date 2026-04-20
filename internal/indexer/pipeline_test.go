@@ -189,6 +189,82 @@ func TestPipelineSubmitAfterStop(t *testing.T) {
 	}
 }
 
+// TestPipelineStatsCounters verifies the per-infohash progress counters
+// that power the GUI's indexing progress bar. A text file should land in
+// Extracted, a binary file (no matching extractor) in Skipped, and both
+// should advance Processed. A distinct infohash must stay at zero.
+func TestPipelineStatsCounters(t *testing.T) {
+	t.Parallel()
+
+	idx, err := indexer.Open(filepath.Join(t.TempDir(), "index.bleve"))
+	if err != nil {
+		t.Fatalf("Open index: %v", err)
+	}
+	defer idx.Close()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := indexer.NewPipeline(idx, log, 0)
+	p.Start()
+	defer p.Stop()
+
+	const ih = "cccccccccccccccccccccccccccccccccccccccc"
+	const other = "dddddddddddddddddddddddddddddddddddddddd"
+
+	// Unknown infohash — zero-valued snapshot.
+	if ps := p.Stats("nonesuch"); ps.Processed != 0 || ps.Extracted != 0 {
+		t.Errorf("Stats(nonesuch) = %+v, want zero-valued", ps)
+	}
+
+	// One text file and one binary file, same torrent.
+	p.Submit(indexer.FileInput{
+		InfoHash:   ih,
+		FileIndex:  0,
+		Path:       "notes.txt",
+		Size:       42,
+		OpenReader: mockOpenReader("progress bar demo content"),
+	})
+	p.Submit(indexer.FileInput{
+		InfoHash:   ih,
+		FileIndex:  1,
+		Path:       "clip.mkv",
+		Size:       1 << 30,
+		OpenReader: mockOpenReader("binary junk"),
+	})
+
+	// Poll until both files have been processed (async worker).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats(ih).Processed >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	ps := p.Stats(ih)
+	if ps.Processed != 2 {
+		t.Errorf("Processed = %d, want 2", ps.Processed)
+	}
+	if ps.Extracted != 1 {
+		t.Errorf("Extracted = %d, want 1", ps.Extracted)
+	}
+	if ps.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", ps.Skipped)
+	}
+	if ps.Failed != 0 {
+		t.Errorf("Failed = %d, want 0", ps.Failed)
+	}
+
+	// Counters are partitioned by infohash.
+	if other := p.Stats(other); other.Processed != 0 {
+		t.Errorf("Stats(other).Processed = %d, want 0", other.Processed)
+	}
+
+	// Case-insensitive lookup — caller may pass uppercase hex.
+	if upper := p.Stats("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"); upper.Processed != 2 {
+		t.Errorf("uppercase Stats.Processed = %d, want 2", upper.Processed)
+	}
+}
+
 // TestIndexContentAndDelete exercises the direct IndexContent /
 // DeleteContentForTorrent path without the pipeline.
 func TestIndexContentAndDelete(t *testing.T) {

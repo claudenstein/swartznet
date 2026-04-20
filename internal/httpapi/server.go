@@ -20,12 +20,6 @@ import (
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
-// maxSearchLimit caps a single /search request's hit count. The
-// index, every responding swarm peer, and every DHT indexer are
-// asked for up to this many hits; beyond a few hundred the
-// result set is rarely useful and the memory cost grows linearly.
-const maxSearchLimit = 500
-
 // TorrentController is the narrow interface the HTTP API needs
 // from the engine for the M10 GUI download controls. The engine
 // satisfies it via direct methods on *engine.Engine.
@@ -101,6 +95,8 @@ type TorrentSnapshot struct {
 	Paused           bool    `json:"paused"`
 	Status           string  `json:"status"`
 	Indexing         bool    `json:"indexing"`
+	IndexedFiles     int64   `json:"indexed_files,omitempty"`
+	IndexExtracted   int64   `json:"index_extracted,omitempty"`
 	Queued           bool    `json:"queued"`
 	DownloadRate     int64   `json:"download_rate"`
 	UploadRate       int64   `json:"upload_rate"`
@@ -122,6 +118,12 @@ type TorrentAdder interface {
 	// asynchronously in the background.
 	AddMagnetURI(uri string) (infohash string, err error)
 }
+
+// maxSearchLimit caps a single /search request's hit count. The
+// index, every responding swarm peer, and every DHT indexer are
+// asked for up to this many hits; beyond a few hundred the
+// result set is rarely useful and the memory cost grows linearly.
+const maxSearchLimit = 500
 
 // Server is the HTTP entry point into a running SwartzNet instance.
 // Construct with New, call Start once, and Stop to tear down

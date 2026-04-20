@@ -597,6 +597,34 @@
     bar.appendChild(fill);
     card.appendChild(bar);
 
+    // Indexing progress bar — only when the torrent feeds the
+    // index AND we already know its file count (post-metadata).
+    // Advances from 0 toward t.files as the extraction pipeline
+    // chews through completed files. Useful signal for big
+    // text-heavy torrents (e.g. a 450k-file Gutenberg mirror)
+    // where indexing can take orders of magnitude longer than
+    // the download itself.
+    if (t.indexing && t.files > 0) {
+      const indexed = t.indexed_files || 0;
+      const frac = Math.min(1, indexed / t.files);
+      const ibar = elt('div', { class: 'indexing-bar' });
+      const ifill = elt('div', { class: 'indexing-bar-fill' });
+      ifill.style.width = (frac * 100).toFixed(1) + '%';
+      ibar.appendChild(ifill);
+      card.appendChild(ibar);
+
+      const imeta = elt('div', { class: 'indexing-meta' });
+      const extracted = t.index_extracted || 0;
+      let label = '🔍 indexed ' + indexed.toLocaleString() +
+                  ' / ' + t.files.toLocaleString() +
+                  ' (' + (frac * 100).toFixed(1) + '%)';
+      if (extracted > 0 && extracted !== indexed) {
+        label += ' · ' + extracted.toLocaleString() + ' with text';
+      }
+      imeta.textContent = label;
+      card.appendChild(imeta);
+    }
+
     // Meta line.
     const meta = elt('div', { class: 'download-meta' });
     if (t.size > 0) {

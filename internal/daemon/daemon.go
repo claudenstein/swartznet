@@ -119,6 +119,13 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		}
 	}
 
+	// --- Session restore ---
+	// Re-add every torrent recorded in the on-disk session manifest so
+	// the user sees their previous list when reopening the GUI/web UI.
+	// Failures per-entry are logged at warn level inside the engine and
+	// must not block daemon startup, so we ignore the returned error.
+	_ = eng.RestoreSession()
+
 	// --- HTTP API ---
 	if opts.APIAddr != "" {
 		httpapi.SetHealthzVersion(opts.Version)
