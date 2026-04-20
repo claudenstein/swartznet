@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"log/slog"
@@ -92,5 +93,51 @@ func TestPipelineHandleOpenReaderError(t *testing.T) {
 	st := p.Stats(ih)
 	if st.Failed != 1 {
 		t.Errorf("Failed = %d, want 1 for OpenReader error", st.Failed)
+	}
+}
+
+// closingReader wraps a bytes.Reader with a Close method so the
+// pipeline's `r.(io.Closer); ok` type-assertion fires the
+// defer-Close branch.
+type closingReader struct {
+	*bytes.Reader
+	closed bool
+}
+
+func (c *closingReader) Close() error {
+	c.closed = true
+	return nil
+}
+
+// TestPipelineHandleClosesReader covers the
+// `r.(io.Closer); ok → defer c.Close()` branch. Submit a .txt
+// file whose OpenReader returns a *closingReader; assert that
+// after pipeline.handle ran, Close has been called on it.
+func TestPipelineHandleClosesReader(t *testing.T) {
+	t.Parallel()
+	idx, err := Open(filepath.Join(t.TempDir(), "p3.bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+
+	p := NewPipeline(idx, slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	p.Start()
+	defer p.Stop()
+
+	const ih = "cccccccccccccccccccccccccccccccccccccccc"
+	cr := &closingReader{Reader: bytes.NewReader([]byte("the quick brown fox jumps"))}
+	if !p.Submit(FileInput{
+		InfoHash:   ih,
+		Path:       "blob.txt",
+		Size:       int64(cr.Len()),
+		OpenReader: func() (io.Reader, error) { return cr, nil },
+	}) {
+		t.Fatal("Submit returned false")
+	}
+	pollPipelineProcessed(t, p, ih)
+
+	if !cr.closed {
+		t.Errorf("OpenReader's *closingReader.Close was never invoked")
 	}
 }
