@@ -58,9 +58,9 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
 | 8.1-C | `ut_pex` passthrough; our LTEP keys ignored | WEAK | `TestProtocolOnRemoteHandshakeIncapable` covers handshake side only |
 | 8.2-A | We never send `sn_search` to Transmission-only swarm | COVERED | `protocol_test.go:79`, `on_remote_handshake_test.go:62` |
 | 8.2-B | Same as 8.2-A for libtorrent 2.x | COVERED | same tests |
-| 8.3-A | Vanilla DHT `ping` → reply | **MISSING** | none |
-| 8.3-B | Vanilla DHT `get_peers` → reply + token | **MISSING** | none |
-| 8.3-C | Vanilla DHT `announce_peer` → stored | **MISSING** | none |
+| 8.3-A | Vanilla DHT `ping` → reply | COVERED | `engine/dht_wirecompat_test.go` (2026-04-20) |
+| 8.3-B | Vanilla DHT `get_peers` → reply + token | COVERED | same; required `peer_store.InMemory` wiring (`engine.go:407`) |
+| 8.3-C | Vanilla DHT `announce_peer` → stored | COVERED | same |
 | 8.3-D | Vanilla BEP-44 `get`/`put` of our keyword item | WEAK | `layerd_test.go:42` only exercises publisher→our-lookup |
 | 8.4-A | Both peers `sn_search` — queries/results flow | COVERED | `cluster_test.go:80`, `minipeer_scenario_test.go:36` |
 | 8.4-B | C1→C0 content scope → reject code 2 | **MISSING** | `wire.go:24` constant defined, never asserted |
@@ -108,4 +108,14 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
   parallel workstream). That test **currently fails** on 8.3-B and 8.3-C: the
   engine's DHT server omits a `Token` field in `get_peers` replies, blocking
   vanilla `announce_peer`. Real SwartzNet bug — fix deferred to next iteration.
+- **2026-04-20 23:55** — Workstream 3 (wire-compat DHT KRPC) complete.
+  Root-caused the `get_peers`-without-Token bug flagged in the prior entry:
+  anacrolix `dht.Server` only fills `r.Token` in get_peers replies when
+  `ServerConfig.PeerStore` is non-nil (`server.go` in the dht/v2 library).
+  The engine left `PeerStore` nil, so every reply was Token-free — breaking
+  BEP-5's canonical get_peers → announce_peer sequence for any vanilla
+  client. Fix: install `peer_store.InMemory` via `ConfigureAnacrolixDhtServer`
+  (`engine.go:407-424`). `TestDHTWireCompatVanillaKRPC` now passes for all
+  three subtests (ping / get_peers / announce_peer). Wire-compat matrix
+  rows 8.3-A/B/C move from MISSING to COVERED.
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/dht/v2"
+	peer_store "github.com/anacrolix/dht/v2/peer-store"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
@@ -402,6 +403,25 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	tc.NoDHT = cfg.DisableDHT
 	if cfg.HTTPUserAgent != "" {
 		tc.HTTPUserAgent = cfg.HTTPUserAgent
+	}
+
+	// Give the embedded DHT server a PeerStore. Without one, the
+	// anacrolix server refuses to issue write tokens in its
+	// get_peers replies (server.go: it only fills r.Token when
+	// config.PeerStore is non-nil). That breaks BEP-5 compliance —
+	// any vanilla client doing the canonical get_peers →
+	// announce_peer sequence stalls on the second hop because our
+	// reply had no Token to echo back.
+	//
+	// We plug in peer_store.InMemory, the library's default. This
+	// is the shared instance the DHT hands to every call path,
+	// which means vanilla announce_peer queries correctly
+	// populate our local per-infohash peer table too.
+	peerStore := &peer_store.InMemory{}
+	tc.ConfigureAnacrolixDhtServer = func(sc *dht.ServerConfig) {
+		if sc.PeerStore == nil {
+			sc.PeerStore = peerStore
+		}
 	}
 
 	// Install mutable rate limiters so Engine.SetUploadLimit /
