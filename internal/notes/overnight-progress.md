@@ -261,3 +261,30 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
   No code changes made this iteration; investigation confirmed the fix is
   present and suite is green (`go test ./... -count=1 -short` all pass).
 
+- **2026-04-21** — Session close-out. `-race` regression surfaced in the PEX
+  scenario added in workstream 6: `vtA.KnownSwarm()` iterates the torrent's
+  google/btree peer collections without taking the client lock, so the
+  poll-loop raced with the PEX read-loop mutating those btrees. Switched the
+  assertion to `vtA.Stats().TotalPeers > 1` (Stats takes the rLock in
+  `torrent.go:2443`). In this topology — no DHT, no tracker, only the engine
+  in the initial `PeerInfo` — `TotalPeers > 1` uniquely implies a delivered
+  ut_pex frame, so the semantic claim is preserved. Full `-race ./...` clean.
+
+  **Session totals (2026-04-20 → 2026-04-21 on
+  `overnight/test-harness-2026-04-20`):**
+  - Wire-compat matrix: 3 MISSING + 4 WEAK → **0 MISSING + 0 WEAK** (all 13
+    rows COVERED, 100%).
+  - Real bugs fixed: **(1)** DHT `get_peers` replies had no Token because
+    `ServerConfig.PeerStore` was nil — breaking vanilla BEP-5
+    get_peers→announce_peer (`7bacc78`); **(2)** `Handle.FileEvents()` shared
+    a single channel between CLI display and indexer, randomly dropping
+    file-complete events and plateauing ingest at 11–13 of 15 files
+    (`9d1e019`).
+  - Test infrastructure added: multi-peer loopback driver
+    (`scripts/test-multi-peer.sh`), Layer-B netem scenarios s2–s4 +
+    `scripts/run-testbed.sh`, DHT KRPC vanilla test, BEP-44 vanilla getter
+    test, scope-reject + piece-download + metadata + gossip-pubkey + PEX/LTEP
+    scenario tests.
+  - Schema additions: `PeerAnnounce.Pubkey` (`pk` field per spec §5.2.4),
+    `Protocol.SetPublisherPubkey` / `SetIndexerSink` for gossip feed-through.
+  - Binaries rebuilt; `-short` and `-race` suites both clean at session end.
