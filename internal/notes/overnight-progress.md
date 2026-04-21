@@ -64,7 +64,7 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
 | 8.3-D | Vanilla BEP-44 `get`/`put` of our keyword item | COVERED | `dhtindex/vanilla_bep44_test.go:TestVanillaBEP44GetterReadsOurItem` |
 | 8.4-A | Both peers `sn_search` — queries/results flow | COVERED | `cluster_test.go:80`, `minipeer_scenario_test.go:36` |
 | 8.4-B | C1→C0 content scope → reject code 2 | COVERED | `swarmsearch/scope_reject_test.go:TestHandleQueryScopeRejectC0` (dispatch-level) + `testlab/scope_reject_scenario_test.go:TestScenarioScopeRejectC0OverWire` (full wire) |
-| 8.4-C | Gossip-discovered pubkey auto-added after handshake | WEAK | announce/multi-indexer paths tested, not the link |
+| 8.4-C | Gossip-discovered pubkey auto-added after handshake | COVERED | `swarmsearch/gossip_pubkey_test.go` (dispatch + sink) + `testlab/gossip_pubkey_scenario_test.go` (2-node cluster, cross-delivery + Publisher=0 negative case) |
 | 8.4-D | `sn_search_v: 1` ignores unknown fields from v2 | COVERED | `minipeer_adversarial_test.go:107` |
 
 ### Top 5 gaps to close (ranked)
@@ -138,4 +138,30 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
     getput validates the BEP-44 ed25519 signature internally. Retrieved
     KeywordValue decoded correctly: correct infohash, name, seeders. Green.
     No bugs surfaced — BEP-44 wire format was already correct.
+- **2026-04-20** — Workstream 5 (row 8.4-C: gossip-discovered pubkey) complete.
+  Closed the last wire-compat gap and surfaced a real schema hole: the
+  `PeerAnnounce` struct carried only `services`/`v`; spec §5.2.4 defines a
+  `pk` field, but the struct was missing it. Fixing the schema was a
+  strict-superset change (empty tag, no wire breakage for old peers).
+  - **Schema:** `PeerAnnounce` now has `Pubkey []byte \`bencode:"pk,omitempty"\``;
+    `PeerState` gained `PublisherPubkey [32]byte`.
+  - **Protocol:** `Protocol.SetPublisherPubkey` feeds the engine's identity
+    into outbound announces, and `Protocol.SetIndexerSink` registers a
+    callback that fires whenever an inbound announce carries a 32-byte
+    pk. The outbound announce only includes `pk` when `caps.Publisher==1`
+    — pure subscribers must not pollute peers' indexer sets.
+  - **Engine:** `startPublisher` now calls `swarm.SetPublisherPubkey` +
+    `swarm.SetIndexerSink(&gossipIndexerSink{lookup: e.lookup})` after
+    self-adding to `lookup.AddIndexer`. A gossip-learned pubkey is
+    labelled `"gossip:<peer_addr>"` so ops logs trace origin.
+  - **Tests:** `swarmsearch/gossip_pubkey_test.go` covers the sink call
+    (happy path), wrong-length pk rejection, and the missing-pk
+    backwards-compat path. `testlab/gossip_pubkey_scenario_test.go` spins
+    a 2-node testlab cluster with both nodes Publisher=1 and verifies
+    each node's recording sink receives the OTHER node's pubkey after a
+    WireMesh + WaitAllHandshaked. A second scenario (Publisher=0 on one
+    side) verifies the publisher sink sees nothing from a non-publisher.
+    Both green on first run.
+  - All tests pass: `go test -short ./...` clean and `go test -race
+    ./internal/{swarmsearch,testlab,engine,daemon,dhtindex,...}` clean.
 

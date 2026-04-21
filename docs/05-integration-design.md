@@ -595,7 +595,7 @@ The last row is the most important: **there is no distinction between "our" DHT 
 |---|---|
 | Both advertise `sn_search` in LTEP handshake | Search channel is negotiated; queries and results flow. |
 | One has `C1` (content search), the other `C0` | Queries with `scope: "c"` from the C1 client to the C0 client return `reject code: 2`. Name/filelist queries work normally. |
-| Both run the DHT publisher | Both add each other's pubkeys to their gossip-discovered indexer set after first `lt_search` handshake. |
+| Both run the DHT publisher | Both add each other's pubkeys to their gossip-discovered indexer set after first `lt_search` handshake. *Implemented: the LTEP `peer_announce` frame carries a `pk` field (32-byte ed25519) when the sender has `caps.Publisher == 1`. The receiver stashes it on its `PeerState.PublisherPubkey` and forwards it to an `IndexerSink` attached to `*dhtindex.Lookup`, so subsequent `search --dht` fan-outs auto-include the peer. Non-publishers (`Publisher == 0`) suppress `pk` — pure subscribers cannot pollute the indexer set.* |
 | One has `sn_search_v: 1`, the other `sn_search_v: 2` (future) | The `v: 1` client ignores fields it doesn't understand in messages from the `v: 2` client (bencode's dict-based schema gives us forward compatibility for free). |
 
 ---

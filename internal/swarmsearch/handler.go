@@ -128,16 +128,39 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_peer_announce")
 			return
 		}
+		// Wire-compat §8.4-C: if the peer gossiped a 32-byte
+		// publisher pubkey, stash it on their PeerState AND
+		// forward it to any attached IndexerSink so the DHT
+		// lookup layer picks it up for future fan-out.
+		var (
+			gotPubkey [32]byte
+			havePk    bool
+			sink      IndexerSink
+		)
+		if len(pa.Pubkey) == 32 {
+			copy(gotPubkey[:], pa.Pubkey)
+			havePk = true
+		}
 		p.mu.Lock()
 		if ps, ok := p.peers[peerAddr]; ok {
 			ps.Services = ServiceBits(pa.Services)
 			ps.Version = pa.Version
+			if havePk {
+				ps.PublisherPubkey = gotPubkey
+			}
 		}
+		sink = p.indexerSink
 		p.mu.Unlock()
+		if havePk && sink != nil {
+			// Label the indexer with the peer's address so ops
+			// logs can tell where the pubkey came from.
+			sink.NoteGossipIndexer(gotPubkey, "gossip:"+peerAddr)
+		}
 		p.log.Info("swarmsearch.rx_peer_announce",
 			"peer", peerAddr,
 			"version", pa.Version,
 			"services", pa.Services,
+			"pk_gossiped", havePk,
 		)
 	default:
 		p.log.Debug("swarmsearch.unknown_msg_type",

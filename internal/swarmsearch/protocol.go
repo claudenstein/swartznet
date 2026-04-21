@@ -76,6 +76,11 @@ type PeerState struct {
 	// the peer hasn't sent one (old clients or the announce
 	// hasn't arrived yet). Unknown bits must be ignored.
 	Services ServiceBits
+	// PublisherPubkey is the peer's 32-byte ed25519 Layer-D
+	// publisher identity, learned from the `pk` field of its
+	// PeerAnnounce. Zeroed when the peer hasn't announced a
+	// pubkey (either isn't a Publisher or an older client).
+	PublisherPubkey [32]byte
 }
 
 // Protocol is the central state for the sn_search extension. A single
@@ -125,6 +130,29 @@ type Protocol struct {
 	// want that to block peer-state updates.
 	pendingMu sync.RWMutex
 	pending   map[uint32]*pendingQuery
+
+	// publisherPubkey is this node's own 32-byte ed25519 Layer-D
+	// publisher key, if any. Only included in outbound
+	// PeerAnnounce frames when non-zero AND caps.Publisher == 1.
+	publisherPubkey []byte
+
+	// indexerSink is the sink that receives gossip-discovered
+	// publisher pubkeys. Nil when the engine isn't running its
+	// own publisher (nothing to merge into). Closes wire-compat
+	// §8.4-C.
+	indexerSink IndexerSink
+}
+
+// IndexerSink is the narrow interface the Protocol uses to
+// register a gossip-discovered Layer-D publisher pubkey. The
+// engine implements it with a closure over *dhtindex.Lookup so
+// new pubkeys learned from peer_announce auto-join the fan-out
+// set of the next DHT keyword GET.
+//
+// Implementations must be safe for concurrent calls from the
+// sn_search read-loop goroutines.
+type IndexerSink interface {
+	NoteGossipIndexer(pubkey [32]byte, label string)
 }
 
 // New constructs a Protocol with default capabilities, the
@@ -195,6 +223,30 @@ func (p *Protocol) Capabilities() Capabilities {
 func (p *Protocol) SetCapabilities(c Capabilities) {
 	p.mu.Lock()
 	p.caps = c
+	p.mu.Unlock()
+}
+
+// SetPublisherPubkey attaches this node's Layer-D publisher
+// pubkey to the Protocol so outbound PeerAnnounce frames can
+// carry it (`pk` field, wire-compat §8.4-C). Passing nil or a
+// wrong-sized slice clears the field. Safe for concurrent use.
+func (p *Protocol) SetPublisherPubkey(pk []byte) {
+	p.mu.Lock()
+	if len(pk) == 32 {
+		p.publisherPubkey = append([]byte(nil), pk...)
+	} else {
+		p.publisherPubkey = nil
+	}
+	p.mu.Unlock()
+}
+
+// SetIndexerSink attaches a sink that receives gossip-discovered
+// publisher pubkeys pulled from inbound PeerAnnounce frames. Pass
+// nil to disable gossip-side registration (the peer's pubkey is
+// still stored on its PeerState).
+func (p *Protocol) SetIndexerSink(sink IndexerSink) {
+	p.mu.Lock()
+	p.indexerSink = sink
 	p.mu.Unlock()
 }
 
@@ -312,13 +364,28 @@ func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessag
 		// client lock and OnRemoteHandshake runs from the read
 		// loop (same deadlock as the sn_search query reply
 		// path fixed in M14a).
+		//
+		// Wire-compat §8.4-C: when we're running the Layer-D
+		// publisher (caps.Publisher == 1) we also gossip our
+		// pubkey in `pk` so the remote can auto-register us as a
+		// DHT keyword indexer after a single handshake.
 		p.mu.RLock()
 		sender := p.sender
+		pubkey := p.publisherPubkey
+		pubOn := p.caps.Publisher > 0
+		services := ServicesFromCapabilities(p.caps) |
+			(DefaultServices() &^ BitLayerDPublisher)
+		if pubOn {
+			services = services.With(BitLayerDPublisher)
+		}
 		p.mu.RUnlock()
 		if sender != nil {
 			pa := PeerAnnounce{
 				Version:  ProtocolVersion,
-				Services: uint64(DefaultServices()),
+				Services: uint64(services),
+			}
+			if pubOn && len(pubkey) == 32 {
+				pa.Pubkey = append([]byte(nil), pubkey...)
 			}
 			payload, err := EncodePeerAnnounce(pa)
 			if err == nil {

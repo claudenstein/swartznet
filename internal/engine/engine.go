@@ -788,7 +788,28 @@ func (e *Engine) startPublisher() error {
 	if e.cfg.MinIndexerScore > 0 {
 		e.lookup.SetMinIndexerScore(e.cfg.MinIndexerScore)
 	}
+
+	// Wire-compat §8.4-C: hand our publisher identity to the
+	// sn_search protocol so outbound PeerAnnounce frames carry
+	// `pk`, and install a sink that feeds gossip-discovered
+	// pubkeys back into the lookup's known-indexer set.
+	e.swarm.SetPublisherPubkey(e.identity.PublicKey)
+	e.swarm.SetIndexerSink(&gossipIndexerSink{lookup: e.lookup})
 	return nil
+}
+
+// gossipIndexerSink adapts *dhtindex.Lookup to the
+// swarmsearch.IndexerSink interface. NoteGossipIndexer is a
+// plain AddIndexer (idempotent: re-adds update the label only).
+type gossipIndexerSink struct {
+	lookup *dhtindex.Lookup
+}
+
+func (s *gossipIndexerSink) NoteGossipIndexer(pubkey [32]byte, label string) {
+	if s == nil || s.lookup == nil {
+		return
+	}
+	s.lookup.AddIndexer(pubkey, label)
 }
 
 // dhtServer fishes the *dht.Server out of the anacrolix Client by

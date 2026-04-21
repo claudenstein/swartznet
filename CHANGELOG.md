@@ -32,6 +32,36 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **Gossip-discovered publisher pubkeys across `sn_search`
+    handshakes** (wire-compat matrix row 8.4-C, closes the last
+    `WEAK` cell in the §8 matrix): nodes running the Layer-D
+    publisher (`caps.Publisher == 1`) now gossip their 32-byte
+    ed25519 identity in the `pk` field of every outbound
+    `PeerAnnounce`. Receivers stash it on the peer's
+    `PeerState.PublisherPubkey` and forward it to an attached
+    `IndexerSink`, so the next `search --dht` fan-out automatically
+    covers peers learned through peer-wire handshakes without a
+    separate registration round-trip. Non-publishers (the default
+    `caps.Publisher == 0`) suppress `pk`, so pure subscribers can
+    never pollute a peer's indexer set. The engine wires a default
+    sink into `*dhtindex.Lookup` (`engine.go:startPublisher`).
+    Coverage: `internal/swarmsearch/gossip_pubkey_test.go` (unit,
+    including wrong-length and missing-pk negative paths) and
+    `internal/testlab/gossip_pubkey_scenario_test.go` (two-node
+    cluster proves bidirectional delivery and subscriber-side
+    suppression).
+
+  - **Full-round-trip vanilla BEP-44 wire-compat test**
+    (`internal/dhtindex/vanilla_bep44_test.go`): complements the
+    signature-math-only `vanilla_bep44_wirecompat_test.go` with a
+    two-server loopback DHT scenario. SwartzNet's `AnacrolixPutter`
+    publishes a keyword entry, a plain `anacrolix/dht/v2` server
+    issues `getput.Get` against the BEP-44 target, and the
+    retrieved value decodes as a valid `KeywordValue`.
+    Signature verification runs inside the anacrolix get path, so
+    a passing test proves our BEP-44 items are
+    bit-compatible with any stock client.
+
   - **Vanilla-client wire-compat scenarios**
     (`internal/testlab/vanilla_download_scenario_test.go`,
     `internal/testlab/vanilla_peer_scenario_test.go`,
