@@ -215,3 +215,49 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
   end-to-end torrent transfer. Real-content transfer testing is deferred to
   a future workstream that injects a fixture `.torrent` file.
 
+- **2026-04-20** — Workstream 7 (`indexed_files` plateau investigation) complete.
+  **Verdict: real bug, already fixed.**
+
+  The gap flagged in the 23:26 entry ("indexed_files sometimes plateaus at
+  11–13 of 15") was a real defect, not a metrics-definition mismatch.
+
+  **Root cause (from commit 9d1e019):** `Handle.FileEvents()` originally
+  returned a *single* buffered channel. Both `Engine.ingestFileEvents` (the
+  extraction pipeline feeder) and `swartznet add`'s `progressLoop` (the
+  CLI display) called `FileEvents()` and read from the same channel. Go's
+  single-receiver semantics split each event to whichever goroutine happened
+  to `select` first — so a random fraction of file-complete events never
+  reached the indexer. With 15 files, the split typically delivered 11–13 to
+  the pipeline and 2–4 to the display, producing the observed plateau.
+
+  **The counter itself is correct.** `indexed_files` maps to
+  `Pipeline.Stats(ih).Processed`, which advances for every file the pipeline
+  finishes — extracted, skipped, *or* failed. Binary files like `.mobi`/`.epub`
+  that produce zero chunks still increment `indexed_files` (via the
+  `counters.skipped.Add(1)` path in `pipeline.handle`). The pipeline
+  semantics and the wait-loop in `scripts/test-multi-peer.sh` are both right.
+  The only broken piece was the event delivery.
+
+  **Fix (already shipped in 9d1e019):** `fileTracker` now maintains a
+  per-subscriber slice of buffered channels and fans every event out to all
+  of them (`dispatch` with per-subscriber drop-on-full). `Handle.SubscribeFileEvents()`
+  makes the per-call subscription contract explicit. The CLI's `progressLoop`
+  and `Engine.ingestFileEvents` each take their own independent subscription,
+  so display and pipeline progress can no longer cannibalise each other.
+
+  **Regression tests (also in 9d1e019):**
+  - `internal/engine/file_tracker_dispatch_test.go` — two-subscriber fan-out,
+    late-Subscribe-after-close, duplicate-suppress, full-channel drop.
+  - `internal/testlab/file_events_fanout_scenario_test.go` — real seed→leech
+    pair with a 12-file torrent plus a parallel side consumer; asserts
+    `IndexedFiles == Files` with both consumers running.
+
+  **Documentation status:** `docs/08-operations.md` §"Indexing progress bar"
+  already explains that `indexed_files` counts all processed files (extracted +
+  skipped), and `index_extracted` counts only the subset that yielded text.
+  `scripts/test-multi-peer.sh` comment at line 324–326 accurately describes
+  the same semantics. No doc changes needed.
+
+  No code changes made this iteration; investigation confirmed the fix is
+  present and suite is green (`go test ./... -count=1 -short` all pass).
+
