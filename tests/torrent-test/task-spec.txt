@@ -1,0 +1,49 @@
+# Torrent Testing Deep Dive
+
+## Objective
+Deeply test torrent creation, seeding, and downloading with multiple simultaneous clients.
+
+## Test Data (already copied to source/)
+15 files, 485KB total from 3 Gutenberg books:
+- q-science/38755/ (~157KB, .mobi .epub .txt .html.zip .info)
+- h-social-sciences/62157/ (~164KB, same file types)
+- d-world-history/62152/ (~165KB, same file types)
+
+## Directory Structure
+/test/torrent-test/
+├── source/          (test data with preserved directory structure)
+├── seeder/          (creates and seeds the torrent)
+├── peer1/           (downloads torrent client 1)
+├── peer2/           (downloads torrent client 2)
+├── peer3/           (downloads torrent client 3)
+└── results/         (test output and analysis)
+
+## Requirements
+
+### 1. Torrent Creation
+- Copy test data to source/ preserving directory structure
+- Create torrent file from source/
+- Start seeder in seeder/ directory
+- Record magnet link
+
+### 2. Multi-Peer Testing
+- Run 3 peer clients simultaneously
+- All download from same magnet link
+- Track: download speeds, completion times, connections
+
+### 3. Data Integrity
+- Verify all peers have identical files
+- SHA256 checksums across original + peers
+- File count and size verification
+
+### 4. Search Testing
+- Search across downloaded content
+- Find specific text patterns in .txt files
+- Test binary file search (in .epub/.mobi)
+- Compare search results between peers
+
+### 5. Report Results
+- Performance metrics
+- Integrity verification results
+- Search test results
+- Observations and issues
