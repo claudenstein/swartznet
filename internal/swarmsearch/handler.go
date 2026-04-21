@@ -131,7 +131,11 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 		// Wire-compat §8.4-C: if the peer gossiped a 32-byte
 		// publisher pubkey, stash it on their PeerState AND
 		// forward it to any attached IndexerSink so the DHT
-		// lookup layer picks it up for future fan-out.
+		// lookup layer picks it up for future fan-out. The
+		// all-zero pubkey is rejected because it cannot
+		// correspond to a real ed25519 identity — accepting it
+		// would let a misbehaving peer silently add a useless
+		// key to the indexer fan-out set on every reconnect.
 		var (
 			gotPubkey [32]byte
 			havePk    bool
@@ -139,7 +143,9 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 		)
 		if len(pa.Pubkey) == 32 {
 			copy(gotPubkey[:], pa.Pubkey)
-			havePk = true
+			if gotPubkey != ([32]byte{}) {
+				havePk = true
+			}
 		}
 		p.mu.Lock()
 		if ps, ok := p.peers[peerAddr]; ok {

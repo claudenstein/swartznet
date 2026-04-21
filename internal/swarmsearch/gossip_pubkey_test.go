@@ -184,3 +184,54 @@ func TestPeerAnnounceNoPubkeyNoSinkCall(t *testing.T) {
 		t.Errorf("sink got %d entries for missing pk, want 0", len(entries))
 	}
 }
+
+// TestPeerAnnounceZeroPubkeyRejected ensures the all-zero pubkey is
+// silently dropped at the gossip-sink boundary. A 32-byte zero
+// pubkey cannot correspond to a real ed25519 identity, but the
+// type system can't reject it — letting it through would let a
+// misbehaving peer quietly grow every receiver's indexer fan-out
+// set by a useless entry on each reconnect. PeerState must stay
+// clean too (no stashed zero-key).
+func TestPeerAnnounceZeroPubkeyRejected(t *testing.T) {
+	t.Parallel()
+	p := swarmsearch.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sink := &recordingSink{}
+	p.SetIndexerSink(sink)
+
+	const peer = "198.51.100.7:6881"
+	p.OnRemoteHandshake(peer, &pp.ExtendedHandshakeMessage{
+		M: map[pp.ExtensionName]pp.ExtensionNumber{
+			swarmsearch.ExtensionName: 11,
+		},
+	})
+
+	zero := make([]byte, 32) // all-zero 32-byte key
+	body, err := swarmsearch.EncodePeerAnnounce(swarmsearch.PeerAnnounce{
+		Version:  swarmsearch.ProtocolVersion,
+		Services: uint64(swarmsearch.BitShareLocal),
+		Pubkey:   zero,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.HandleMessage(peer, body, nil)
+
+	if entries := sink.snapshot(); len(entries) != 0 {
+		t.Errorf("sink got %d entries for zero-pk, want 0", len(entries))
+	}
+	// PeerState must still reflect the Services/Version from the
+	// rest of the announce, but the PublisherPubkey must remain
+	// the zero value (i.e. never explicitly stored).
+	for _, ps := range p.KnownPeers() {
+		if ps.Addr != peer {
+			continue
+		}
+		if ps.PublisherPubkey != ([32]byte{}) {
+			t.Errorf("PublisherPubkey = %x, want all-zero (not stashed)", ps.PublisherPubkey)
+		}
+		if ps.Services != swarmsearch.BitShareLocal {
+			t.Errorf("Services = %v, want %v (non-pk fields still processed)",
+				ps.Services, swarmsearch.BitShareLocal)
+		}
+	}
+}

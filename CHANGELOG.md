@@ -79,6 +79,19 @@ engagement from actual users of the v0.x prereleases.
 
 ### Fixed
 
+  - **`sn_search` gossip accepted the all-zero 32-byte pubkey**
+    (`internal/swarmsearch/handler.go`): the 8.4-C gossip path
+    treated any 32-byte `pk` as a valid publisher identity, so a
+    misbehaving peer advertising `pk = 0x00…00` would silently add
+    a useless entry to every receiver's `Lookup.Indexers()` set on
+    each reconnect, wasting the next DHT keyword GET fan-out on a
+    key that cannot correspond to a real ed25519 identity. The
+    handler now rejects the zero value at the sink boundary while
+    still processing the rest of the `PeerAnnounce` fields
+    (`Services`, `Version`). Regression coverage:
+    `TestPeerAnnounceZeroPubkeyRejected` in
+    `internal/swarmsearch/gossip_pubkey_test.go`.
+
   - **Ingest pipeline silently dropped files when two goroutines
     read `Handle.FileEvents()`** (`internal/engine/file_tracker.go`,
     `internal/engine/engine.go`, `cmd/swartznet/cmd_add.go`): the
