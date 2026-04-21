@@ -17,6 +17,24 @@ engagement from actual users of the v0.x prereleases.
 
 ### Fixed
 
+  - **`swartznet add` daemon silently tearing down the HTTP API
+    on malformed magnets** (`internal/engine/engine.go`): when
+    the CLI was invoked with a magnet whose v1 infohash decoded
+    to all-zero bytes (a common foot-gun in smoke tests and
+    tooling glue), anacrolix/torrent's `AddTorrentOpt` panicked
+    via `panicif.Zero`. The CLI's deferred `daemon.Close`
+    unwound the stack, tearing down the HTTP API listener
+    seconds after it started — from the outside the daemon
+    stayed alive but the web UI, `status`, and `search --swarm`
+    all got "connection refused". `Engine.AddMagnet` now parses
+    the magnet URI itself via `metainfo.ParseMagnetUri`, rejects
+    zero-infohash and malformed URIs with a descriptive error,
+    and never lets the anacrolix panic fire. Regression tests
+    live in `internal/engine/add_magnet_invalid_test.go` and
+    `internal/daemon/http_reachability_test.go` (the latter
+    boots a full `daemon.Daemon` and asserts `/healthz` stays
+    reachable for a few seconds of idle lifetime, which the
+    previous test suite never covered).
   - **`CreateTorrentOptions.Name` override silently ignored**
     (`internal/engine/create.go`): the documented "Name overrides
     info.name" behaviour did not take effect because the override
