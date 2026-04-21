@@ -53,17 +53,17 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
 
 | Case | Description | Status | Evidence |
 |---|---|---|---|
-| 8.1-A | Vanilla qBittorrent receives pieces from us | WEAK | no explicit assertion |
-| 8.1-B | BEP-9 `ut_metadata` served to vanilla peer | WEAK | `internal/swarmsearch/protocol_test.go:84` sets up vanilla peer; no BEP-9 fetch assertion |
+| 8.1-A | Vanilla qBittorrent receives pieces from us | COVERED | `testlab/vanilla_download_scenario_test.go:TestScenarioVanillaClientPieceAndMetadata/8.1-A_piece_download_completes` |
+| 8.1-B | BEP-9 `ut_metadata` served to vanilla peer | COVERED | `testlab/vanilla_download_scenario_test.go:TestScenarioVanillaClientPieceAndMetadata/8.1-B_metadata_via_bep9` |
 | 8.1-C | `ut_pex` passthrough; our LTEP keys ignored | WEAK | `TestProtocolOnRemoteHandshakeIncapable` covers handshake side only |
 | 8.2-A | We never send `sn_search` to Transmission-only swarm | COVERED | `protocol_test.go:79`, `on_remote_handshake_test.go:62` |
 | 8.2-B | Same as 8.2-A for libtorrent 2.x | COVERED | same tests |
 | 8.3-A | Vanilla DHT `ping` → reply | COVERED | `engine/dht_wirecompat_test.go` (2026-04-20) |
 | 8.3-B | Vanilla DHT `get_peers` → reply + token | COVERED | same; required `peer_store.InMemory` wiring (`engine.go:407`) |
 | 8.3-C | Vanilla DHT `announce_peer` → stored | COVERED | same |
-| 8.3-D | Vanilla BEP-44 `get`/`put` of our keyword item | WEAK | `layerd_test.go:42` only exercises publisher→our-lookup |
+| 8.3-D | Vanilla BEP-44 `get`/`put` of our keyword item | COVERED | `dhtindex/vanilla_bep44_test.go:TestVanillaBEP44GetterReadsOurItem` |
 | 8.4-A | Both peers `sn_search` — queries/results flow | COVERED | `cluster_test.go:80`, `minipeer_scenario_test.go:36` |
-| 8.4-B | C1→C0 content scope → reject code 2 | **MISSING** | `wire.go:24` constant defined, never asserted |
+| 8.4-B | C1→C0 content scope → reject code 2 | COVERED | `swarmsearch/scope_reject_test.go:TestHandleQueryScopeRejectC0` (dispatch-level) + `testlab/scope_reject_scenario_test.go:TestScenarioScopeRejectC0OverWire` (full wire) |
 | 8.4-C | Gossip-discovered pubkey auto-added after handshake | WEAK | announce/multi-indexer paths tested, not the link |
 | 8.4-D | `sn_search_v: 1` ignores unknown fields from v2 | COVERED | `minipeer_adversarial_test.go:107` |
 
@@ -118,4 +118,24 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
   (`engine.go:407-424`). `TestDHTWireCompatVanillaKRPC` now passes for all
   three subtests (ping / get_peers / announce_peer). Wire-compat matrix
   rows 8.3-A/B/C move from MISSING to COVERED.
+- **2026-04-20** — Workstream 4 (rows 8.1-A, 8.1-B, 8.3-D, 8.4-B) complete.
+  Four new test files added; no bugs surfaced.
+  - **8.4-B** (`testlab/scope_reject_scenario_test.go:TestScenarioScopeRejectC0OverWire`):
+    Full over-the-wire MiniPeer scenario. A C0 engine receives a scope "c"
+    query from a MiniPeer; asserts Reject frame code=2 returned and hit
+    cache not polluted. Complements the existing unit-level
+    `swarmsearch/scope_reject_test.go` which exercises the dispatch path in
+    isolation. Both green.
+  - **8.1-A + 8.1-B** (`testlab/vanilla_download_scenario_test.go:TestScenarioVanillaClientPieceAndMetadata`):
+    Uses a real `anacrolix/torrent.Client` (no sn_search in its LTEP
+    handshake) as the vanilla peer. 8.1-B sub-test: client adds magnet,
+    receives info dict via BEP-9 ut_metadata, GotInfo() fires. 8.1-A
+    sub-test: client downloads all pieces and bytes are verified sha256.
+    Both sub-tests green on first run.
+  - **8.3-D** (`dhtindex/vanilla_bep44_test.go:TestVanillaBEP44GetterReadsOurItem`):
+    Two loopback dht.Server instances; SwartzNet's AnacrolixPutter publishes
+    a keyword entry; vanilla server calls getput.Get for the same target.
+    getput validates the BEP-44 ed25519 signature internally. Retrieved
+    KeywordValue decoded correctly: correct infohash, name, seeders. Green.
+    No bugs surfaced — BEP-44 wire format was already correct.
 
