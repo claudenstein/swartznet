@@ -8,74 +8,144 @@ sockets, but a controlled environment.
 
 ## Prerequisites
 
-- Docker + docker-compose v2
-- Go 1.24+ (to build the binary)
-- Linux host with kernel ≥4.x (tc/netem support)
+- Docker Engine + docker compose v2 (tested with v2.40.3)
+- Go 1.24+ (to build the binary — only needed if no pre-built binary exists)
+- Linux host with kernel ≥4.x (tc/netem support for network emulation)
+- **Your user must be in the `docker` group:**
+  ```bash
+  sudo usermod -aG docker $USER
+  newgrp docker          # activate without logging out, or log out/in
+  docker ps              # verify: should not say "permission denied"
+  ```
 
-## Quick start
+> **Port conflicts:** the scenarios use fixed ports 17654, 17655, and 17656
+> on localhost. Stop any other process using those ports before running.
+
+## Quick start — driver script (recommended)
 
 ```bash
-# 1. Build the static binary for the testbed.
+# Run all four scenarios sequentially (builds binary if needed):
+scripts/run-testbed.sh all
+
+# Run a single scenario:
+scripts/run-testbed.sh s1    # healthy baseline, no netem
+scripts/run-testbed.sh s2    # lossy: 5% loss + 150ms RTT
+scripts/run-testbed.sh s3    # mobile-4G: 40ms+20ms jitter, 10Mbit
+scripts/run-testbed.sh s4    # home-DSL: 20ms+5ms jitter, 25Mbit
+```
+
+The driver script:
+1. Checks `docker compose version` and `docker info` (fails with a clear message if absent or inaccessible).
+2. Builds `dist/swartznet-testbed-linux-amd64` if absent or if any Go source is newer.
+3. Starts `docker compose up --build -d` with the right `NETEM_PROFILE`, waits for all three containers to reach "running" state (up to 120 s).
+4. Runs the scenario assertion script and captures its exit code.
+5. Runs `docker compose down -v` via an EXIT trap — even on failure.
+6. Writes per-run output to `testbed/results/<scenario>-<timestamp>.log`.
+7. Prints a scoreboard at the end.
+
+## Manual operation
+
+```bash
+# 1. Build the static binary:
 scripts/build-release.sh testbed
+# Or directly:
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+  -trimpath -ldflags "-s -w -X main.Version=testbed" \
+  -o dist/swartznet-testbed-linux-amd64 ./cmd/swartznet
 
-# 2. Spin up the 3-node cluster.
-docker-compose -f testbed/docker-compose.yml up --build
+# 2. Spin up a scenario (example: lossy):
+NETEM_PROFILE=/netem/lossy.sh \
+  docker compose -f testbed/docker-compose.yml up --build -d
 
-# 3. In another terminal, run the scenario script.
-testbed/scenarios/s1-healthy-search.sh
+# 3. Run the scenario assertion (in another terminal):
+testbed/scenarios/s2-lossy-search.sh
+
+# 4. Tear down:
+docker compose -f testbed/docker-compose.yml down -v
 ```
 
 ## Network emulation profiles
 
-Pass `NETEM_PROFILE` to apply tc-netem rules on each container:
+Each profile applies `tc qdisc add dev eth0 root netem ...` inside the
+container at startup via `testbed/entrypoint.sh`. Containers need
+`CAP_NET_ADMIN` (already declared in `docker-compose.yml`).
 
-```bash
-# Home DSL: 25 Mbit down, 40ms RTT
-NETEM_PROFILE=/netem/home-dsl.sh docker-compose up --build
-
-# Mobile 4G: 10 Mbit, 80ms RTT with jitter
-NETEM_PROFILE=/netem/mobile-4g.sh docker-compose up --build
-
-# Lossy: 5% packet loss, 150ms RTT
-NETEM_PROFILE=/netem/lossy.sh docker-compose up --build
-
-# LAN: 1 Gbit, 1ms RTT (the happy-path baseline)
-NETEM_PROFILE=/netem/lan.sh docker-compose up --build
-```
-
-Containers need `CAP_NET_ADMIN` for tc (already declared in
-docker-compose.yml).
+| Profile | File | Delay | Loss | Bandwidth |
+|---|---|---|---|---|
+| None (baseline) | — | — | — | unlimited |
+| LAN | `netem/lan.sh` | 0.5 ms | 0 | 1 Gbit |
+| Home DSL | `netem/home-dsl.sh` | 20ms ±5ms | 0 | 25 Mbit |
+| Mobile 4G | `netem/mobile-4g.sh` | 40ms ±20ms | 0 | 10 Mbit |
+| Lossy | `netem/lossy.sh` | 75ms | 5% | 20 Mbit |
 
 ## Node layout
 
 | Container | Hostname | API port | Role |
 |---|---|---|---|
-| sn-seed-1 | seed-1 | localhost:17654 | Seeds torrent `0xaa...` |
-| sn-seed-2 | seed-2 | localhost:17655 | Seeds torrent `0xbb...` |
-| sn-leech-1 | leech-1 | localhost:17656 | Starts empty, discovers content via Layer S |
+| sn-seed-1 | seed-1 | localhost:17654 | Seeds torrent 0xaaaa… |
+| sn-seed-2 | seed-2 | localhost:17655 | Seeds torrent 0xbbbb… |
+| sn-leech-1 | leech-1 | localhost:17656 | Starts with same magnet as seed-1 |
 
-All nodes run with `--regtest --no-dht` so publisher/companion
-timings are accelerated and no real mainline DHT is contacted.
+All nodes run with `--regtest --no-dht` so publisher/companion timings
+are accelerated and no real mainline DHT traffic is generated.
+
+> **Known limitation:** the current `docker-compose.yml` uses placeholder
+> infohashes (0xaaaa…/0xbbbb…) with no real content. The `swartznet add`
+> command creates the torrent entry immediately (visible on `GET /torrents`)
+> but the metadata fetch and piece download never complete because there are
+> no real peers on the swarm for those hashes. The Layer-B scenarios test
+> that the daemon's HTTP API layer, torrent lifecycle, and network stack
+> function correctly under each netem profile — not end-to-end content
+> transfer. A future workstream will add a fixture `.torrent` file with
+> real content seeded between containers.
 
 ## Scenario scripts
 
-| Script | What it tests |
-|---|---|
-| `s1-healthy-search.sh` | Basic health + status + torrents on all 3 nodes |
+| Script | Netem profile | What it tests |
+|---|---|---|
+| `s1-healthy-search.sh` | none | Health, status, torrents on all 3 nodes |
+| `s2-lossy-search.sh` | lossy (5% loss) | Same under 5% packet loss + 150ms RTT |
+| `s3-mobile-4g-search.sh` | mobile-4G | Same under 40ms+20ms jitter, 10Mbit |
+| `s4-home-dsl-search.sh` | home-DSL | Health/status/torrents + /search endpoint |
+
+Each script is standalone: it assumes `docker compose up` is already running
+with the correct `NETEM_PROFILE` and just runs assertions against the three
+well-known ports. Exit 0 = all pass, 1 = any failure.
+
+## Reading testbed/results/
+
+Each run writes to `testbed/results/<scenario>-<YYYYMMDD-HHMMSS>.log`:
+
+```
+=== run-testbed: scenario=s2 ts=20260420-231500 ===
+    netem=/netem/lossy.sh
+
+[docker compose up output]
+[docker wait output]
+=== S2: lossy-network 3-node search scenario ===
+PASS: http://localhost:17654 healthz (lossy profile)
+PASS: http://localhost:17655 healthz (lossy profile)
+...
+=== S2: all checks passed (lossy profile) ===
+[docker compose down output]
+```
+
+If a scenario fails, the log ends with a `FAIL:` line and a non-zero exit.
+Docker container logs are printed during teardown for post-mortem analysis:
+```bash
+docker compose -f testbed/docker-compose.yml logs
+```
 
 ## Architecture
 
-See the "Proposed layered testbed" section in the
-[testbed architecture proposal](../docs/05-integration-design.md)
-and the [Bitcoin Core lessons](../docs/10-bitcoin-lessons.md) for
-the rationale behind the layer split:
+See the "Proposed layered testbed" section in
+[docs/05-integration-design.md](../docs/05-integration-design.md) and
+[docs/10-bitcoin-lessons.md](../docs/10-bitcoin-lessons.md) for the
+rationale behind the layer split:
 
 - **Layer A** (`internal/testlab`): in-process, fast, CI-friendly.
   Catches peer-wire bugs, concurrency races, and handler logic.
-- **Layer B** (this directory): multi-container, real network
-  conditions. Catches timeout tuning, NAT issues, process-level
-  failures.
-- **Layer C** (future): k8s + Chaos Mesh, 50-200 nodes, fault
-  injection.
-- **Layer D** (`cmd/dht-smoke`): live mainnet measurement. Not
-  automatable for CI.
+- **Layer B** (this directory): multi-container, real network conditions.
+  Catches timeout tuning, NAT issues, process-level failures.
+- **Layer C** (future): k8s + Chaos Mesh, 50-200 nodes, fault injection.
+- **Layer D** (`cmd/dht-smoke`): live mainnet measurement. Not automatable for CI.

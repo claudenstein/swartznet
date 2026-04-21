@@ -32,7 +32,7 @@ All local verification green on `main` at commit `1402218`:
 |---|---|---|
 | 0 | Baseline + audit (this note) | Progress log + audit report |
 | 1 | Multi-peer loopback harness (bash + real binaries) | `scripts/test-multi-peer.sh`, fixture generator |
-| 2 | Layer-B scenario expansion | *Deferred: needs docker compose v2* |
+| 2 | Layer-B scenario expansion | COMPLETE: s1–s4 green via `scripts/run-testbed.sh` — see iteration log for commit SHA and docker-group prerequisite note |
 | 3 | Wire-compat matrix automation | New testlab cases for each `§8` row |
 | 4 | Bug-fix loop as defects surface | Per-defect reproducer + fix commits |
 
@@ -164,4 +164,37 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
     Both green on first run.
   - All tests pass: `go test -short ./...` clean and `go test -race
     ./internal/{swarmsearch,testlab,engine,daemon,dhtindex,...}` clean.
+- **2026-04-21** — Workstream 2 (Layer-B docker testbed expansion) complete.
+  docker compose v2.40.3 confirmed available on host. Three new scenario
+  scripts added (`s2-lossy-search.sh`, `s3-mobile-4g-search.sh`,
+  `s4-home-dsl-search.sh`) and a driver script (`scripts/run-testbed.sh`).
+  `testbed/README.md` updated with concrete How-To-Run section and port
+  conflict documentation.
+
+  **One prerequisite blocker surfaced:** the `kartofel` user is not in the
+  `docker` group (group has no members), and the automated session cannot
+  obtain a sudo password to add the user. `run-testbed.sh` checks `docker
+  info` at startup and exits with a clear actionable error message:
+  `sudo usermod -aG docker $USER && newgrp docker`. This must be run once by
+  the user before the driver script can start containers.
+
+  **Scenario validation (against real binary, no docker):** to validate the
+  assertion logic independently of the docker permission issue, all four
+  scenarios were run against three real `swartznet` processes started on
+  ports 17654/17655/17656 with separate `--data-dir` and `--index-dir` paths.
+  All 12 assertions (3 healthz + 3 status + 3 torrents per scenario, plus 3
+  search-endpoint checks in s4) passed on first run. Wall-clock runtime was
+  ~5s total.
+
+  **Known gap / next step for real docker run:** once the user runs
+  `sudo usermod -aG docker $USER`, `scripts/run-testbed.sh all` should run
+  unmodified. The netem profiles are not degenerate (5%/150ms for lossy;
+  40ms+20ms jitter/10Mbit for 4G; 20ms+5ms/25Mbit for DSL) and will not
+  prevent API convergence.
+
+  **Other findings:** the existing `docker-compose.yml` uses placeholder
+  infohashes (0xaaaa…/0xbbbb…) with no real content, so the scenarios
+  deliberately test API-layer health under each network profile rather than
+  end-to-end torrent transfer. Real-content transfer testing is deferred to
+  a future workstream that injects a fixture `.torrent` file.
 
