@@ -32,6 +32,25 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **Layer-B testbed now transfers real content** (closes the
+    "placeholder infohash" gap documented in the previous
+    `testbed/README.md:92-100`): `testbed/fixture/` carries a
+    small deterministic multi-file fixture
+    (`content/testbed-fixture-book/`, ~3 KiB total) plus a
+    pre-generated `.torrent` with a committed infohash
+    (`c4405d27af8462e3d5e03c30c542f66e170fe4f8`). The Dockerfile
+    copies `testbed/fixture/` into `/fixture/`; the entrypoint
+    honours a new `ROLE` env var to pre-populate `/data` with the
+    content on seed containers, so anacrolix's piece-verify pass
+    marks the torrent complete on startup with zero network.
+    The leech's magnet URI carries `x.pe=seed-1:42069&x.pe=seed-2:42069`
+    peer-address hints (BEP-9) so it bootstraps without DHT or
+    trackers. A new scenario
+    `testbed/scenarios/s5-piece-transfer.sh` asserts the leech
+    reaches `progress=1.0` within 90 s and its on-disk bytes
+    match the fixture SHA-256 byte-for-byte; `s4-home-dsl-search.sh`
+    now asserts the seeds actually return hits for the fixture
+    marker `aethergram` (no more structural-only search check).
   - **Gossip-discovered publisher pubkeys across `sn_search`
     handshakes** (wire-compat matrix row 8.4-C, closes the last
     `WEAK` cell in the §8 matrix): nodes running the Layer-D

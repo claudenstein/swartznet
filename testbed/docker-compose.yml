@@ -16,14 +16,23 @@
 # All nodes run in --regtest mode so publisher/companion timings
 # are accelerated. No real mainline DHT is contacted.
 #
+# Topology:
+#   seed-1, seed-2  — ROLE=seed, pre-populated with
+#                     /fixture/content and started with
+#                     `swartznet add /fixture/fixture.torrent`.
+#                     Both hold identical content so the leech
+#                     has two sources.
+#   leech-1         — ROLE=leech, starts empty, receives the
+#                     same magnet URI with an `x.pe=` peer hint
+#                     pointing at seed-1 so it can bootstrap
+#                     without DHT or trackers.
+#
 # The network "swartznet" is a Docker bridge. Nodes discover
 # each other by hostname (seed-1, seed-2, leech-1). Each node's
 # HTTP API is exposed on localhost at different ports so the
 # scenario scripts can probe them individually.
 
 services:
-  # seed-1: pre-populates its index on startup via a magnet.
-  # In regtest mode the companion publisher fires within 10s.
   seed-1:
     build:
       context: ..
@@ -32,6 +41,7 @@ services:
     hostname: seed-1
     environment:
       - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=seed
     ports:
       - "17654:7654"
     volumes:
@@ -41,11 +51,10 @@ services:
     command: >
       swartznet add --regtest --no-dht
       --data-dir=/data --api-addr=0.0.0.0:7654
-      "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=testbed-seed-1"
+      /fixture/fixture.torrent
     networks:
       - swartznet
 
-  # seed-2: independent seed with different content.
   seed-2:
     build:
       context: ..
@@ -54,6 +63,7 @@ services:
     hostname: seed-2
     environment:
       - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=seed
     ports:
       - "17655:7654"
     volumes:
@@ -63,19 +73,22 @@ services:
     command: >
       swartznet add --regtest --no-dht
       --data-dir=/data --api-addr=0.0.0.0:7654
-      "magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&dn=testbed-seed-2"
+      /fixture/fixture.torrent
     networks:
       - swartznet
 
-  # leech-1: starts empty, discovers content via Layer S.
   leech-1:
     build:
       context: ..
       dockerfile: testbed/Dockerfile
     container_name: sn-leech-1
     hostname: leech-1
+    depends_on:
+      - seed-1
+      - seed-2
     environment:
       - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
     ports:
       - "17656:7654"
     volumes:
@@ -85,7 +98,7 @@ services:
     command: >
       swartznet add --regtest --no-dht
       --data-dir=/data --api-addr=0.0.0.0:7654
-      "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=testbed-leech-1"
+      "magnet:?xt=urn:btih:c4405d27af8462e3d5e03c30c542f66e170fe4f8&dn=testbed-fixture-book&x.pe=seed-1:42069&x.pe=seed-2:42069"
     networks:
       - swartznet
 

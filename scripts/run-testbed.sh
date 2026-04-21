@@ -5,13 +5,14 @@
 #   scripts/run-testbed.sh <scenario>
 #   scripts/run-testbed.sh all
 #
-# Scenario names: s1  s2  s3  s4  all
+# Scenario names: s1  s2  s3  s4  s5  all
 #
 #   s1  — healthy baseline (no netem)
 #   s2  — lossy profile (5% packet loss, 150ms RTT)
 #   s3  — mobile-4G profile (40ms+20ms jitter, 10Mbit)
 #   s4  — home-DSL profile (20ms+5ms jitter, 25Mbit)
-#   all — run s1 through s4 in sequence
+#   s5  — end-to-end piece transfer (no netem, real fixture content)
+#   all — run s1 through s5 in sequence
 #
 # Each scenario:
 #   1. Brings up the 3-node docker compose stack with the correct NETEM_PROFILE.
@@ -51,7 +52,7 @@ fail() { echo "[run-testbed] ERROR: $*" >&2; exit 1; }
 # ── Preflight checks ──────────────────────────────────────────────────────────
 
 if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 <s1|s2|s3|s4|all>" >&2
+    echo "Usage: $0 <s1|s2|s3|s4|s5|all>" >&2
     exit 2
 fi
 
@@ -59,8 +60,8 @@ SCENARIO="$1"
 
 # Validate scenario argument.
 case "$SCENARIO" in
-    s1|s2|s3|s4|all) ;;
-    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 all" ;;
+    s1|s2|s3|s4|s5|all) ;;
+    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 all" ;;
 esac
 
 # Check docker compose v2 is available.
@@ -126,6 +127,7 @@ scenario_netem_profile() {
         s2) echo "/netem/lossy.sh" ;;
         s3) echo "/netem/mobile-4g.sh" ;;
         s4) echo "/netem/home-dsl.sh" ;;
+        s5) echo "" ;;                         # piece transfer, no netem
     esac
 }
 
@@ -230,7 +232,7 @@ run_scenario() {
 
 SCENARIOS_TO_RUN=()
 if [[ "$SCENARIO" == "all" ]]; then
-    SCENARIOS_TO_RUN=(s1 s2 s3 s4)
+    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5)
 else
     SCENARIOS_TO_RUN=("$SCENARIO")
 fi

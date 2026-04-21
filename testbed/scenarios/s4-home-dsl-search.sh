@@ -77,16 +77,32 @@ done
 
 # ── 4. Search endpoint reachable ──────────────────────────────────────────────
 # Sends a local-only query (no "swarm":true / "dht":true so no fan-out).
-# Expects a valid SearchResponse with at minimum a "local" key.
-for node in "$SEED1" "$SEED2" "$LEECH1"; do
+# Seeds pre-populated the fixture content and auto-indexed it on
+# startup, so a search for the fixture marker ("aethergram") should
+# match both chapter files on each seed. The leech may or may not
+# have finished downloading yet (S5 is the scenario that asserts
+# transfer completion), so we only require structural validity
+# there.
+for node in "$SEED1" "$SEED2"; do
     resp=$(curl -sf -X POST "$node/search" \
         -H "Content-Type: application/json" \
-        -d '{"q":"testbed","limit":5}') \
+        -d '{"q":"aethergram","limit":5}') \
         || fail "$node search endpoint unreachable"
     echo "$resp" | grep -q '"local"' \
         || fail "$node search response missing 'local' key: $resp"
-    pass "$node search endpoint reachable (0 hits expected, structure valid)"
+    hits=$(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('local',{}).get('hits',[]) or []))")
+    [ "$hits" -gt 0 ] || fail "$node search for 'aethergram' returned 0 hits (seed should have indexed fixture): $resp"
+    pass "$node search returned $hits hits for 'aethergram'"
 done
+
+# Leech: just structural check — S5 proves transfer/indexing end-to-end.
+resp=$(curl -sf -X POST "$LEECH1/search" \
+    -H "Content-Type: application/json" \
+    -d '{"q":"aethergram","limit":5}') \
+    || fail "$LEECH1 search endpoint unreachable"
+echo "$resp" | grep -q '"local"' \
+    || fail "$LEECH1 search response missing 'local' key: $resp"
+pass "$LEECH1 search endpoint reachable (structural check only)"
 
 echo ""
 echo "=== S4: all checks passed (home-DSL profile) ==="

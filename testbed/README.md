@@ -24,7 +24,7 @@ sockets, but a controlled environment.
 ## Quick start — driver script (recommended)
 
 ```bash
-# Run all four scenarios sequentially (builds binary if needed):
+# Run all five scenarios sequentially (builds binary if needed):
 scripts/run-testbed.sh all
 
 # Run a single scenario:
@@ -32,6 +32,7 @@ scripts/run-testbed.sh s1    # healthy baseline, no netem
 scripts/run-testbed.sh s2    # lossy: 5% loss + 150ms RTT
 scripts/run-testbed.sh s3    # mobile-4G: 40ms+20ms jitter, 10Mbit
 scripts/run-testbed.sh s4    # home-DSL: 20ms+5ms jitter, 25Mbit
+scripts/run-testbed.sh s5    # piece-transfer: proves leech actually downloads
 ```
 
 The driver script:
@@ -82,22 +83,27 @@ container at startup via `testbed/entrypoint.sh`. Containers need
 
 | Container | Hostname | API port | Role |
 |---|---|---|---|
-| sn-seed-1 | seed-1 | localhost:17654 | Seeds torrent 0xaaaa… |
-| sn-seed-2 | seed-2 | localhost:17655 | Seeds torrent 0xbbbb… |
-| sn-leech-1 | leech-1 | localhost:17656 | Starts with same magnet as seed-1 |
+| sn-seed-1 | seed-1 | localhost:17654 | ROLE=seed, pre-populated with fixture content, serves `fixture.torrent` |
+| sn-seed-2 | seed-2 | localhost:17655 | ROLE=seed, same content as seed-1 (leech has two sources) |
+| sn-leech-1 | leech-1 | localhost:17656 | ROLE=leech, starts empty, magnet URI has `x.pe=seed-1:42069&x.pe=seed-2:42069` |
 
 All nodes run with `--regtest --no-dht` so publisher/companion timings
-are accelerated and no real mainline DHT traffic is generated.
+are accelerated and no real mainline DHT traffic is generated. Peer
+discovery is bootstrapped via the `x.pe=` magnet peer-address hints
+(BEP-9) in the leech's command line — no tracker, no DHT required.
 
-> **Known limitation:** the current `docker-compose.yml` uses placeholder
-> infohashes (0xaaaa…/0xbbbb…) with no real content. The `swartznet add`
-> command creates the torrent entry immediately (visible on `GET /torrents`)
-> but the metadata fetch and piece download never complete because there are
-> no real peers on the swarm for those hashes. The Layer-B scenarios test
-> that the daemon's HTTP API layer, torrent lifecycle, and network stack
-> function correctly under each netem profile — not end-to-end content
-> transfer. A future workstream will add a fixture `.torrent` file with
-> real content seeded between containers.
+## Fixture content
+
+`testbed/fixture/content/testbed-fixture-book/` holds two small
+deterministic `.txt` chapters carrying a distinctive marker
+(`aethergram`). `testbed/fixture/fixture.torrent` is pre-generated
+from that content (piece-size 16 KiB), and
+`testbed/fixture/INFOHASH` records its infohash
+(`c4405d27af8462e3d5e03c30c542f66e170fe4f8`). Seeds copy the
+content into `/data` on container startup (via `ROLE=seed` in
+`entrypoint.sh`) so anacrolix's piece-verify pass marks the
+torrent complete immediately — no download from nowhere,
+real-indexable text for `/search` assertions.
 
 ## Scenario scripts
 
@@ -106,7 +112,8 @@ are accelerated and no real mainline DHT traffic is generated.
 | `s1-healthy-search.sh` | none | Health, status, torrents on all 3 nodes |
 | `s2-lossy-search.sh` | lossy (5% loss) | Same under 5% packet loss + 150ms RTT |
 | `s3-mobile-4g-search.sh` | mobile-4G | Same under 40ms+20ms jitter, 10Mbit |
-| `s4-home-dsl-search.sh` | home-DSL | Health/status/torrents + /search endpoint |
+| `s4-home-dsl-search.sh` | home-DSL | Health/status/torrents + `/search` returns fixture hits on seeds |
+| `s5-piece-transfer.sh` | none | End-to-end piece transfer: leech reaches progress=1.0 and bytes match fixture SHA-256 |
 
 Each script is standalone: it assumes `docker compose up` is already running
 with the correct `NETEM_PROFILE` and just runs assertions against the three

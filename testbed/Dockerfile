@@ -29,6 +29,14 @@ RUN chmod +x /usr/local/bin/swartznet
 ENV SWARTZNET_DATA=/data
 RUN mkdir -p /data
 
+# Testbed fixture — a small deterministic content tree plus its
+# pre-generated .torrent file. Seeds pre-populate /data with the
+# content so `swartznet add /fixture/fixture.torrent` marks all
+# pieces complete on startup. Leeches reference the same infohash
+# via magnet+x.pe peer-hint so they can discover the seeds without
+# DHT or trackers.
+COPY testbed/fixture/ /fixture/
+
 # The entrypoint script applies any netem rules, then exec's
 # the daemon. Override NETEM_PROFILE to select a network
 # profile (see testbed/netem/*.sh).
