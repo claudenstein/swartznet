@@ -164,6 +164,11 @@ func printInfo(w io.Writer, h *engine.Handle) {
 func progressLoop(ctx context.Context, w io.Writer, h *engine.Handle) {
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
+	// Bind the file-event subscription to a local variable so the select
+	// statement does not allocate a fresh subscription per iteration.
+	// SubscribeFileEvents creates an independent fan-out channel so this
+	// display loop does not steal events from the ingest pipeline.
+	fileEvents := h.SubscribeFileEvents()
 	var piecesSeen, filesSeen int
 	for {
 		select {
@@ -171,7 +176,7 @@ func progressLoop(ctx context.Context, w io.Writer, h *engine.Handle) {
 			return
 		case <-h.PieceEvents():
 			piecesSeen++
-		case ev, ok := <-h.FileEvents():
+		case ev, ok := <-fileEvents:
 			if !ok {
 				// Tracker shut down (engine closed); keep the loop alive
 				// until ctx cancels so the UI stops cleanly.

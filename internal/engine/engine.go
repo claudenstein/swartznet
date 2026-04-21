@@ -378,8 +378,23 @@ func (h *Handle) PieceEvents() <-chan torrent.PieceStateChange {
 // FileEvents returns a receive-only channel of FileCompleteEvent values,
 // each fired once when a file inside this torrent becomes fully complete.
 // The channel is closed when the Engine is closed.
+//
+// Every call to FileEvents() creates an independent subscription via the
+// underlying fileTracker. Callers MUST bind the result to a local variable
+// and then receive from that variable — evaluating h.FileEvents() inside a
+// for/select loop allocates a new, empty channel on every iteration and the
+// loop will hang forever. Use SubscribeFileEvents() for new code.
 func (h *Handle) FileEvents() <-chan FileCompleteEvent {
-	return h.fileSub.Events()
+	return h.fileSub.Subscribe()
+}
+
+// SubscribeFileEvents is the preferred alias for FileEvents and makes the
+// per-call subscription semantics explicit at the call site. Each caller
+// receives every emitted event independently; the tracker fans out to all
+// subscribers so two consumers (e.g. the CLI progress loop and the ingest
+// pipeline) no longer race for the same single channel.
+func (h *Handle) SubscribeFileEvents() <-chan FileCompleteEvent {
+	return h.fileSub.Subscribe()
 }
 
 // New constructs an Engine with the given config. The config is validated and
@@ -1373,7 +1388,8 @@ func (e *Engine) autoConfirmOnComplete(h *Handle) {
 // lazily open a reader via t.Files()[i].NewReader() only when the
 // extractor actually wants to read the bytes.
 func (e *Engine) ingestFileEvents(h *Handle) {
-	for ev := range h.FileEvents() {
+	events := h.SubscribeFileEvents()
+	for ev := range events {
 		e.mu.Lock()
 		p := e.pipeline
 		closed := e.closed

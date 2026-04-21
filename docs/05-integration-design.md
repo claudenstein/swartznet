@@ -520,6 +520,8 @@ torrent add / piece verified
 
 **Backpressure.** The extractor and Bleve indexer run in their own goroutines. The file-complete → extract transition is bounded by a channel with capacity 64; if the channel is full, piece-completion callbacks still return immediately, they just drop the extract request. A background scan picks up missed files on the next hour.
 
+**Fan-out.** `Handle.SubscribeFileEvents()` returns a fresh buffered channel per caller; every emitted event is broadcast to every subscriber independently. This matters because two unrelated goroutines observe the stream — the CLI's `progressLoop` and `Engine.ingestFileEvents` — and a single shared channel would silently split events between them (historical bug: `IndexedFiles` stalled mid-way because the CLI stole events the indexer needed).
+
 **Idempotency.** Extraction is keyed by `(infohash, file_index, file_content_sha256)`. If a file is re-downloaded or a torrent is re-added, we don't re-extract the same content.
 
 **Opt-out.** Users can mark a torrent as "don't index" at add time. We also default to not indexing files whose path matches a user-editable deny glob (default includes `**/.git/**`, `**/*.bin`, etc.). Per-file override via the UI.

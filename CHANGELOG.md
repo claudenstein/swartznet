@@ -17,6 +17,27 @@ engagement from actual users of the v0.x prereleases.
 
 ### Fixed
 
+  - **Ingest pipeline silently dropped files when two goroutines
+    read `Handle.FileEvents()`** (`internal/engine/file_tracker.go`,
+    `internal/engine/engine.go`, `cmd/swartznet/cmd_add.go`): the
+    CLI's `swartznet add` progressLoop drained the same
+    `FileCompleteEvent` channel that `Engine.ingestFileEvents` was
+    using to feed the extractor pipeline. Go's single-receiver
+    semantics split each event to exactly one reader, so a random
+    fraction of files never reached the indexer and
+    `TorrentSnapshot.IndexedFiles` stalled at ~11–13/15 for the
+    15-file multi-peer fixture. The `fileTracker` now fans each
+    event out to every subscriber independently via per-caller
+    buffered channels, and `Handle.SubscribeFileEvents()` exposes
+    that contract explicitly. The CLI's `progressLoop` and
+    `Engine.ingestFileEvents` each take their own subscription, so
+    display progress and pipeline progress can no longer cannibalise
+    each other. Regression coverage lives in
+    `internal/engine/file_tracker_dispatch_test.go` (unit fan-out
+    checks) and
+    `internal/testlab/file_events_fanout_scenario_test.go` (real
+    seed→leech run that asserts `IndexedFiles == Files` while a
+    second consumer runs in parallel).
   - **`swartznet add` daemon silently tearing down the HTTP API
     on malformed magnets** (`internal/engine/engine.go`): when
     the CLI was invoked with a magnet whose v1 infohash decoded
