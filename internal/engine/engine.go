@@ -797,7 +797,19 @@ func (e *Engine) AddMagnetURI(uri string) (infohash string, err error) {
 // AddMagnet queues a magnet URI for download. The returned Handle exposes a
 // piece-state subscription; callers MUST drain PieceEvents (via Next) or call
 // Handle.Close to avoid blocking anacrolix's internal publisher.
+//
+// The magnet is parsed locally first so invalid or zero-infohash URIs fail
+// fast with a descriptive error. Without that check, anacrolix/torrent's
+// AddTorrentOpt panics on a zero infohash, which on a long-running daemon
+// would tear down every subsystem via the caller's deferred Close.
 func (e *Engine) AddMagnet(uri string) (*Handle, error) {
+	m, err := metainfo.ParseMagnetUri(uri)
+	if err != nil {
+		return nil, fmt.Errorf("engine: parse magnet: %w", err)
+	}
+	if m.InfoHash.IsZero() {
+		return nil, fmt.Errorf("engine: magnet has zero infohash (caller must provide a non-empty xt=urn:btih:... value)")
+	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
