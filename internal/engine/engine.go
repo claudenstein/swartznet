@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -1871,6 +1872,20 @@ func (e *Engine) Close() error {
 // value (tests, LAN discovery, etc.).
 func (e *Engine) LocalPort() int {
 	return e.client.LocalPort()
+}
+
+// DHTAddr returns the local UDP address of the engine's DHT
+// server (or nil if DHT is disabled). Exposed for wire-compat
+// tests — external KRPC clients need the address to validate
+// that the engine still responds to standard BEP-5 queries.
+// The returned net.Addr is safe to stringify; tests typically
+// resolve it back to *net.UDPAddr via net.ResolveUDPAddr.
+func (e *Engine) DHTAddr() net.Addr {
+	srv := e.dhtServer()
+	if srv == nil {
+		return nil
+	}
+	return srv.Addr()
 }
 
 // HandleByInfoHash looks up a *Handle by 20-byte infohash.

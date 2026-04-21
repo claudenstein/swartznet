@@ -91,5 +91,21 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
 
 - **2026-04-20 22:54** — Phase 0 started. Baseline green; branch created;
   progress log + audit captured (this commit).
-- _(next iterations to be appended here)_
+- **2026-04-20 23:26** — Workstream 1 complete. Prior iteration (f753bf6) had
+  staged `scripts/test-multi-peer.sh` and `scripts/gen-test-fixture.sh` but
+  the test was FAILING due to a search-step race (indexer still ingesting when
+  the search query fired). Updated script to: (1) wait for `indexed_files >=
+  files` before querying, (2) write report to timestamped
+  `results/run-<ts>.txt` per spec. Two back-to-back clean runs both pass:
+  316 KiB torrent downloaded by 3 peers in <2 s on loopback; 32–48 "photon"
+  hits per peer; per-file SHA-256 integrity verified. Gap noted: `indexed_files`
+  sometimes plateaus at 11–13 of 15 before the 15 s wait-loop expires (binary
+  files like `.mobi`/`.epub` produce no text chunks; pipeline may batch-skip
+  them in a separate pass). Search still passes because text-bearing `.txt`
+  files are indexed.
+  Also committing: `engine.go` adds `DHTAddr()` accessor and
+  `dht_wirecompat_test.go` (DHT wire-compat scaffolding left uncommitted by a
+  parallel workstream). That test **currently fails** on 8.3-B and 8.3-C: the
+  engine's DHT server omits a `Token` field in `get_peers` replies, blocking
+  vanilla `announce_peer`. Real SwartzNet bug — fix deferred to next iteration.
 

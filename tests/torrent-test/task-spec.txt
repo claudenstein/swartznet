@@ -47,3 +47,24 @@ Deeply test torrent creation, seeding, and downloading with multiple simultaneou
 - Integrity verification results
 - Search test results
 - Observations and issues
+
+## Status
+
+**Automated — fixture is fully operational.**
+
+The scenario is driven end-to-end by `scripts/test-multi-peer.sh`:
+
+- `scripts/gen-test-fixture.sh` generates the deterministic 15-file, ~310 KiB corpus
+  under `tests/torrent-test/source/` (3 books × 5 file types with searchable text markers).
+- `scripts/test-multi-peer.sh` orchestrates 4 real `dist/swartznet` binary processes on
+  loopback (1 seeder + 3 peers), each with its own isolated data/index directory and port.
+  Peer discovery uses the `x.pe=` magnet URI parameter so no DHT or tracker is required.
+  The script asserts:
+  1. Seeder verifies source tree (hash check complete before serving).
+  2. All 3 peers download 100% of the content.
+  3. Per-file SHA-256 integrity against the original source tree.
+  4. Each peer's Bleve index answers a text-search for the corpus keyword "photon".
+  Timestamped run reports are written to `tests/torrent-test/results/run-<timestamp>.txt`.
+
+First passing run: 2026-04-20. All 3 peers downloaded 316 KiB in under 2 s on loopback;
+search found 48 hits per peer once the ingest pipeline completed.
