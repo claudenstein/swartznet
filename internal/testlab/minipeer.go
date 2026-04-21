@@ -112,6 +112,18 @@ func (mp *MiniPeer) RemoteSnSearchID() int {
 	return mp.remoteExtIDs["sn_search"]
 }
 
+// RemoteExtIDs returns a snapshot of the m-dict the remote peer
+// sent in its LTEP handshake: a map from extension name to the
+// remote's chosen extension ID. Used by wire-compat tests to verify
+// which extensions the remote peer claims to support.
+func (mp *MiniPeer) RemoteExtIDs() map[string]int {
+	out := make(map[string]int, len(mp.remoteExtIDs))
+	for k, v := range mp.remoteExtIDs {
+		out[k] = v
+	}
+	return out
+}
+
 // SendExtended sends a BEP-10 extended message with the given
 // extension ID and payload. The payload is the raw bencoded
 // body (e.g. an sn_search Query or PeerAnnounce).

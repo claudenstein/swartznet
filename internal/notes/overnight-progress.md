@@ -55,7 +55,7 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
 |---|---|---|---|
 | 8.1-A | Vanilla qBittorrent receives pieces from us | COVERED | `testlab/vanilla_download_scenario_test.go:TestScenarioVanillaClientPieceAndMetadata/8.1-A_piece_download_completes` |
 | 8.1-B | BEP-9 `ut_metadata` served to vanilla peer | COVERED | `testlab/vanilla_download_scenario_test.go:TestScenarioVanillaClientPieceAndMetadata/8.1-B_metadata_via_bep9` |
-| 8.1-C | `ut_pex` passthrough; our LTEP keys ignored | WEAK | `TestProtocolOnRemoteHandshakeIncapable` covers handshake side only |
+| 8.1-C | `ut_pex` passthrough; our LTEP keys ignored | COVERED | `testlab/pex_ltep_scenario_test.go:TestScenarioPEXPassthroughAndLTEPKeysIgnored` (PEX topology + LTEP assertion) |
 | 8.2-A | We never send `sn_search` to Transmission-only swarm | COVERED | `protocol_test.go:79`, `on_remote_handshake_test.go:62` |
 | 8.2-B | Same as 8.2-A for libtorrent 2.x | COVERED | same tests |
 | 8.3-A | Vanilla DHT `ping` → reply | COVERED | `engine/dht_wirecompat_test.go` (2026-04-20) |
@@ -164,6 +164,23 @@ Audit of `docs/05-integration-design.md` §8 against `internal/testlab/`,
     Both green on first run.
   - All tests pass: `go test -short ./...` clean and `go test -race
     ./internal/{swarmsearch,testlab,engine,daemon,dhtindex,...}` clean.
+- **2026-04-20** — Workstream 6 (row 8.1-C: ut_pex passthrough + LTEP keys ignored) complete.
+  Closed the last open gap in the wire-compat matrix. Two-part integration test added at
+  `testlab/pex_ltep_scenario_test.go:TestScenarioPEXPassthroughAndLTEPKeysIgnored`:
+  - **PEX passthrough** (`8.1-C/pex_passthrough`): 3-node topology — vanillaA ↔ engine ↔
+    vanillaB with no direct A↔B link. vanillaB connects first so its address lands in the
+    engine's `pexState.msg0`. When vanillaA connects, anacrolix fires an immediate PEX
+    message (timer delay=0). The test polls `vtA.KnownSwarm()` until it contains a peer with
+    `Source == PeerSourcePex ("X")`. Passes in <1 s on first run.
+  - **LTEP keys ignored** (`8.1-C/ltep_keys_ignored`): `DialVanillaMiniPeer` (empty m-dict)
+    connects to the engine. Three assertions verified: (A) engine advertises sn_search in its
+    LTEP handshake (ext_id=4); (B) engine's full m-dict as seen by the vanilla peer is
+    `{ut_metadata:1, ut_holepunch:2, ut_pex:3, sn_search:4}` — all standard extensions plus
+    ours; (C) 0 sn_search frames sent to the vanilla peer in a 2 s drain window.
+  Also added `MiniPeer.RemoteExtIDs()` accessor to `testlab/minipeer.go` for inspection of
+  the full engine m-dict in the test. Wire-compat matrix row 8.1-C moves from WEAK to COVERED.
+  Full short suite green; CLI binary rebuilt.
+
 - **2026-04-21** — Workstream 2 (Layer-B docker testbed expansion) complete.
   docker compose v2.40.3 confirmed available on host. Three new scenario
   scripts added (`s2-lossy-search.sh`, `s3-mobile-4g-search.sh`,
