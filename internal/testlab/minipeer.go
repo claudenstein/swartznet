@@ -59,6 +59,21 @@ var btProtocol = []byte("BitTorrent protocol")
 // testlab cluster's shared dummy infohash) so the engine
 // accepts the connection.
 func DialMiniPeer(addr string, sharedIH [20]byte) (*MiniPeer, error) {
+	return dialMiniPeer(addr, sharedIH, true)
+}
+
+// DialVanillaMiniPeer is the opposite of DialMiniPeer: it performs
+// the BT + LTEP handshake WITHOUT advertising sn_search. The
+// returned peer looks indistinguishable from any mainline
+// BitTorrent client that has never heard of SwartzNet. Used by
+// wire-compat tests (docs/05-integration-design §8.1-A) to verify
+// that the engine silently omits every sn_search frame when
+// talking to a peer that doesn't support it.
+func DialVanillaMiniPeer(addr string, sharedIH [20]byte) (*MiniPeer, error) {
+	return dialMiniPeer(addr, sharedIH, false)
+}
+
+func dialMiniPeer(addr string, sharedIH [20]byte, advertiseSNSearch bool) (*MiniPeer, error) {
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("minipeer: dial %s: %w", addr, err)
@@ -78,7 +93,7 @@ func DialMiniPeer(addr string, sharedIH [20]byte) (*MiniPeer, error) {
 		conn.Close()
 		return nil, err
 	}
-	if err := mp.ltepHandshake(); err != nil {
+	if err := mp.ltepHandshakeAdvertise(advertiseSNSearch); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -194,11 +209,24 @@ func (mp *MiniPeer) btHandshake() error {
 // advertising sn_search, then reads the remote's and extracts
 // their sn_search extension ID.
 func (mp *MiniPeer) ltepHandshake() error {
-	// Our handshake dict: advertise sn_search at our chosen ID.
+	return mp.ltepHandshakeAdvertise(true)
+}
+
+// ltepHandshakeAdvertise is the internal form of ltepHandshake that
+// lets the caller decide whether to include sn_search in the `m`
+// dictionary. Used by DialVanillaMiniPeer to simulate a mainline
+// client that does not know about SwartzNet's extension.
+func (mp *MiniPeer) ltepHandshakeAdvertise(advertiseSNSearch bool) error {
+	// Build our handshake dict. If we're pretending to be a
+	// vanilla client we send an empty `m` dict — that's what any
+	// BEP-10 client does when it supports the extended-message
+	// container but no specific extensions.
+	m := map[string]any{}
+	if advertiseSNSearch {
+		m["sn_search"] = mp.localExtID
+	}
 	hsDict := map[string]any{
-		"m": map[string]any{
-			"sn_search": mp.localExtID,
-		},
+		"m": m,
 	}
 	hsPayload, err := bencode.Marshal(hsDict)
 	if err != nil {

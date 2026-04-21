@@ -15,6 +15,38 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Changed
+
+  - **`sn_search` now rejects queries for unsupported scopes instead
+    of silently downgrading them** (`internal/swarmsearch/handler.go`):
+    a C1 querier that asks a C0 responder for scope `"c"` (or `"f"` on
+    an F0 node) now receives a `Reject` frame with code
+    `RejectUnsupportedScope` (2), matching the wire-compat matrix row
+    8.4-B in `docs/05-integration-design.md`. Empty scope and scope
+    `"n"` are always served. Coverage:
+    `internal/swarmsearch/scope_reject_test.go` (unit) and
+    `internal/testlab/scope_reject_scenario_test.go` (full
+    BT → LTEP → extension message round-trip, including a hit-cache
+    pollution check that proves the reject fires before the local
+    search runs).
+
+### Added
+
+  - **Vanilla-client wire-compat scenarios**
+    (`internal/testlab/vanilla_download_scenario_test.go`,
+    `internal/testlab/vanilla_peer_scenario_test.go`,
+    `internal/dhtindex/vanilla_bep44_wirecompat_test.go`): end-to-end
+    proofs of rows 8.1-A/B and 8.3-D of the wire-compat matrix. A real
+    `anacrolix torrent.Client` with no SwartzNet extensions downloads
+    a seeded payload by magnet (BEP-9 metadata → BEP-3 pieces); a
+    MiniPeer acting as a mainline client connects without advertising
+    `sn_search` and verifies that the engine never pushes an
+    `sn_search` extension frame at it; and a stock BEP-44 reader
+    decodes a SwartzNet-published keyword item and verifies its
+    signature without any SwartzNet code. `DialVanillaMiniPeer` in
+    `internal/testlab/minipeer.go` exposes the empty-`m`-dict
+    handshake path used by these tests.
+
 ### Fixed
 
   - **Ingest pipeline silently dropped files when two goroutines

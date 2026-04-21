@@ -197,6 +197,17 @@ func (p *Protocol) handleQuery(peerAddr string, payload []byte, reply ReplyFunc)
 		return
 	}
 
+	// Wire-compat §8.4-B: if the querier explicitly asked for a
+	// scope level we don't support (e.g. 'c' content hits on a
+	// C0 node), send RejectUnsupportedScope rather than silently
+	// downgrade. An empty scope means "responder's choice" and
+	// is always accepted. 'n' is always accepted too — every
+	// node can serve torrent-name matches.
+	if msg, ok := unsupportedScopeReason(q.Scope, caps); ok {
+		p.sendReject(reply, peerAddr, q.TxID, RejectUnsupportedScope, msg)
+		return
+	}
+
 	// Very short queries are almost always abuse or typos; reject
 	// early rather than run a full-index search.
 	if len(strings.TrimSpace(q.Q)) < 2 {
@@ -326,6 +337,25 @@ func (p *Protocol) sendReject(reply ReplyFunc, peerAddr string, txid uint32, cod
 		p.log.Debug("swarmsearch.send_reject_err",
 			"peer", peerAddr, "err", err)
 	}
+}
+
+// unsupportedScopeReason returns ("missing_f_hits"/"missing_c_hits",
+// true) when scope asks for a level the responder's capabilities
+// do not cover. Empty scope is treated as "responder's choice"
+// and never triggers a reject. Unknown letters are ignored — the
+// spec only defines 'n', 'f', 'c', and new letters added later
+// must be forward-compatible.
+func unsupportedScopeReason(scope string, caps Capabilities) (string, bool) {
+	if scope == "" {
+		return "", false
+	}
+	if strings.ContainsRune(scope, 'c') && caps.ContentHits == 0 {
+		return "unsupported_scope_c", true
+	}
+	if strings.ContainsRune(scope, 'f') && caps.FileHits == 0 {
+		return "unsupported_scope_f", true
+	}
+	return "", false
 }
 
 // _ is a compile-time assertion that LocalHit still has the
