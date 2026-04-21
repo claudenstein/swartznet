@@ -112,38 +112,34 @@ func testPEXPassthrough(t *testing.T) {
 		Trusted: true,
 	}})
 
-	// Poll vanillaA's KnownSwarm() for a PEX-sourced peer.
-	// The first PEX fires with delay=0 in anacrolix so it should
-	// arrive within a second or two of the LTEP handshake.
+	// Poll vanillaA's Stats() for TotalPeers > 1. Starting PeerInfo
+	// count is 1 (engine, from AddPeers above). In this topology
+	// (no DHT, no tracker, no manual peer on B), the only way
+	// TotalPeers can grow is ut_pex frames delivered by the engine
+	// advertising vanillaB. Stats() takes the client's rLock
+	// (torrent.go:2443) so this poll is race-safe — unlike
+	// KnownSwarm()/PeerConns() which iterate unlocked btrees that
+	// the PEX read-loop mutates concurrently.
 	pexDeadline := time.Now().Add(15 * time.Second)
 	var pexFound bool
+	var lastTotal int
 	for time.Now().Before(pexDeadline) && !pexFound {
-		for _, p := range vtA.KnownSwarm() {
-			if string(p.Source) == anacrolixtorrent.PeerSourcePex {
-				pexFound = true
-				t.Logf("8.1-C/pex: vanillaA learned peer %q via PEX (source=%q): PASS",
-					p.Addr, p.Source)
-				break
-			}
+		st := vtA.Stats()
+		lastTotal = st.TotalPeers
+		if st.TotalPeers > 1 {
+			pexFound = true
+			t.Logf("8.1-C/pex: vanillaA TotalPeers=%d after PEX (engine + %d learnt via ut_pex): PASS",
+				st.TotalPeers, st.TotalPeers-1)
+			break
 		}
-		if !pexFound {
-			time.Sleep(100 * time.Millisecond)
-		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	if !pexFound {
 		c.DumpLogs(t)
-		swarm := vtA.KnownSwarm()
-		t.Logf("vanillaA KnownSwarm (%d entries):", len(swarm))
-		for _, p := range swarm {
-			t.Logf("  addr=%q source=%q", p.Addr, p.Source)
-		}
+		t.Logf("vanillaA last Stats().TotalPeers=%d (expected >=2)", lastTotal)
 		if engHandle != nil {
-			eng2 := engHandle.T.KnownSwarm()
-			t.Logf("engine KnownSwarm (%d entries):", len(eng2))
-			for _, p := range eng2 {
-				t.Logf("  addr=%q source=%q", p.Addr, p.Source)
-			}
+			t.Logf("engine Stats(): %+v", engHandle.T.Stats())
 		}
 		t.Fatalf("8.1-C/pex: vanillaA never received a PEX-sourced peer within 15s; " +
 			"engine must not be forwarding ut_pex correctly")
