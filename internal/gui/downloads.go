@@ -663,12 +663,14 @@ func (dl *downloadsTab) removeSelected() {
 		return
 	}
 
-	// Remove is destructive — no undo, and on-disk files are
-	// deleted along with the torrent entry. Show a confirm
-	// dialog naming the torrent so the user can cancel if they
-	// hit Delete (or the Remove toolbar button) by mistake.
-	// Also applies to the Delete keyboard shortcut path (see
-	// app.go installShortcuts), which calls this method.
+	// Remove drops the torrent from the download list and stops
+	// seeding/leeching it. engine.RemoveTorrent calls t.Drop()
+	// under the hood, which does NOT delete on-disk files and
+	// does NOT purge the Bleve content docs — those stay on disk
+	// and in the index until the user removes them manually. The
+	// confirm dialog exists mainly so the Delete key doesn't
+	// silently vanish a row when the user meant to press a
+	// different key.
 	var name string
 	dl.mu.RLock()
 	for _, s := range dl.snaps {
@@ -685,7 +687,7 @@ func (dl *downloadsTab) removeSelected() {
 
 	dialog.ShowConfirm(
 		"Remove torrent?",
-		fmt.Sprintf("Remove \"%s\" from the list?\n\nThis also deletes any downloaded data on disk and cannot be undone.", label),
+		fmt.Sprintf("Remove \"%s\" from the download list and stop seeding/leeching?\n\nDownloaded files on disk are kept; the torrent entry in your list is removed.", label),
 		func(ok bool) {
 			if !ok {
 				return

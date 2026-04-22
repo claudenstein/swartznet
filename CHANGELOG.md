@@ -22,9 +22,14 @@ engagement from actual users of the v0.x prereleases.
     - *Downloads — confirm before Remove*: the Remove toolbar
       button, context-menu item, and Delete keyboard shortcut
       now all trigger a `dialog.ShowConfirm` that names the
-      torrent ("Remove \"Ubuntu 24.04 Desktop\"?") and warns that
-      the action also deletes on-disk data. Removes the only
-      irreversible one-click action in the app.
+      torrent ("Remove \"Ubuntu 24.04 Desktop\" from the
+      download list and stop seeding/leeching?") and clarifies
+      that downloaded files are kept. The previous version of
+      this confirm dialog claimed it also deleted on-disk data,
+      which was inaccurate — `engine.RemoveTorrent` calls
+      `anacrolix.Torrent.Drop()` and removes the session-
+      manifest entry, but leaves both `/data` and the Bleve
+      index untouched.
     - *Downloads — friendlier Add Magnet errors*: client-side
       validation fires instantly for two common paste mistakes
       (a non-magnet URL, or a magnet missing the `xt=urn:btih:`
