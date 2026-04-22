@@ -5,7 +5,7 @@
 #   scripts/run-testbed.sh <scenario>
 #   scripts/run-testbed.sh all
 #
-# Scenario names: s1  s2  s3  s4  s5  s6  s7  s8  swarm  all
+# Scenario names: s1 s2 s3 s4 s5 s6 s7 s8 s9 swarm all
 #
 #   s1     — healthy baseline (no netem, 3-node stack)
 #   s2     — lossy profile (5% packet loss, 150ms RTT)
@@ -17,9 +17,14 @@
 #   s7     — Layer-S sn_search fan-out across the 6-node swarm
 #   s8     — 6-node swarm under lossy netem (5% loss + 150ms RTT),
 #            convergence budget 300s
+#   s9     — pass-along / late-joiner: after the 4 leeches complete,
+#            kill both seeds, bring up leech-5 via docker compose
+#            profile, and verify leech-5 downloads entirely from the
+#            ex-leeches
 #   swarm  — alias: run s6 then s7 against a single long-lived 6-node
 #            stack (avoids paying the compose up/down cost twice)
-#   all    — run s1..s5 (3-node) then swarm (6-node) then s8 (lossy swarm)
+#   all    — run s1..s5 (3-node) then swarm (6-node) then s8 (lossy
+#            swarm) then s9 (pass-along)
 #
 # Each scenario:
 #   1. Brings up the 3-node docker compose stack with the correct NETEM_PROFILE.
@@ -68,8 +73,8 @@ SCENARIO="$1"
 
 # Validate scenario argument.
 case "$SCENARIO" in
-    s1|s2|s3|s4|s5|s6|s7|s8|swarm|all) ;;
-    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 s8 swarm all" ;;
+    s1|s2|s3|s4|s5|s6|s7|s8|s9|swarm|all) ;;
+    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 s8 s9 swarm all" ;;
 esac
 
 # Check docker compose v2 is available.
@@ -138,6 +143,7 @@ scenario_netem_profile() {
         s5) echo "" ;;                         # piece transfer, no netem
         s6|s7) echo "" ;;                      # 6-node swarm, no netem
         s8) echo "/netem/lossy.sh" ;;          # 6-node swarm under lossy
+        s9) echo "" ;;                         # pass-along, no netem
     esac
 }
 
@@ -145,7 +151,7 @@ scenario_netem_profile() {
 scenario_compose_file() {
     case "$1" in
         s1|s2|s3|s4|s5) echo "$COMPOSE_FILE" ;;
-        s6|s7|s8)       echo "$COMPOSE_SWARM_FILE" ;;
+        s6|s7|s8|s9)    echo "$COMPOSE_SWARM_FILE" ;;
     esac
 }
 
@@ -153,7 +159,13 @@ scenario_containers() {
     case "$1" in
         s1|s2|s3|s4|s5)
             echo "sn-seed-1 sn-seed-2 sn-leech-1" ;;
-        s6|s7|s8)
+        s6|s7|s8|s9)
+            # s9 starts with the baseline 6 and later brings up
+            # sn-swarm-leech-5 via the `late-joiner` profile from
+            # inside the scenario script. The startup wait here
+            # only checks the baseline; teardown (`compose down
+            # -v`) covers profile-started services too since they
+            # are part of the same project.
             echo "sn-swarm-seed-1 sn-swarm-seed-2 sn-swarm-leech-1 sn-swarm-leech-2 sn-swarm-leech-3 sn-swarm-leech-4" ;;
     esac
 }
@@ -206,8 +218,15 @@ run_scenario() {
         if [[ ! -f "$flag_file" ]]; then
             touch "$flag_file"
             log "Tearing down docker compose stack..."
+            # Include every profile defined in the compose file so
+            # any service gated behind a profile (s9's leech-5) also
+            # gets stopped and removed. Without this, `down -v`
+            # leaves profile-gated containers running, which holds
+            # the bridge network and logs "Resource is still in
+            # use" during network removal.
             NETEM_PROFILE="$netem_profile" \
-                docker compose -f "$compose_file" down -v 2>&1 | \
+                docker compose -f "$compose_file" \
+                --profile '*' down -v 2>&1 | \
                 tee -a "$logfile" || true
         fi
     }
@@ -298,7 +317,7 @@ run_scenario() {
 
 SCENARIOS_TO_RUN=()
 case "$SCENARIO" in
-    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8) ;;
+    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8 s9) ;;
     swarm)  SCENARIOS_TO_RUN=(swarm) ;;
     *)      SCENARIOS_TO_RUN=("$SCENARIO") ;;
 esac

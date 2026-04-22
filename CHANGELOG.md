@@ -66,6 +66,26 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **s9 — pass-along + late-joiner resilience scenario**
+    (`testbed/scenarios/s9-swarm-late-joiner.sh`,
+    `testbed/docker-compose.swarm.yml` gains a `leech-5`
+    service gated behind the `late-joiner` docker compose
+    profile). The shape: (1) wait for the four original leeches
+    to reach `progress=1.0` via the original seeds, (2) `docker
+    stop` both seeds so the swarm has only ex-leeches with the
+    content, (3) bring up `leech-5` (172.28.0.8, profile
+    `late-joiner`) whose magnet URI includes every node's IP,
+    (4) assert leech-5 reaches `progress=1.0` entirely from
+    ex-leech pass-along, (5) assert bytes match fixture
+    byte-for-byte. Budget 60 s for the pass-along transfer.
+    First passing run completed in under 10 s wall clock; the
+    assertion is structural, so timing flakes would only
+    surface as a correctness regression (ex-leeches not
+    seeding, PEX not falling back, or `x.pe=` multi-address
+    resolution silently picking only dead hints). Driver wires
+    `--profile '*'` into the teardown path so compose-profile-
+    gated services don't leak and hold the bridge network
+    open.
   - **Layer-B 3-node testbed is now portable across UFW-DROP hosts**
     (`testbed/docker-compose.yml`, `testbed/scenarios/s1-s5`).
     Previously the scenarios probed `http://localhost:17654-17656`

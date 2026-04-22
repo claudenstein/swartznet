@@ -38,6 +38,7 @@ scripts/run-testbed.sh s5    # piece-transfer: proves leech actually downloads
 scripts/run-testbed.sh s6    # 4-leech piece transfer at scale + PEX evidence
 scripts/run-testbed.sh s7    # sn_search (Layer-S) fan-out hits fixture infohash
 scripts/run-testbed.sh s8    # 6-node swarm under lossy netem (5% loss + 150ms)
+scripts/run-testbed.sh s9    # pass-along: kill seeds, late-joiner leech-5 still completes
 scripts/run-testbed.sh swarm # alias: s6 + s7 against one compose lifecycle
 ```
 
@@ -105,6 +106,7 @@ container at startup via `testbed/entrypoint.sh`. Containers need
 | sn-swarm-leech-2 | leech-2  | 172.28.0.5   | 17667    | ROLE=leech, `x.pe=` hints to every other node |
 | sn-swarm-leech-3 | leech-3  | 172.28.0.6   | 17668    | ROLE=leech, `x.pe=` hints to every other node |
 | sn-swarm-leech-4 | leech-4  | 172.28.0.7   | 17669    | ROLE=leech, `x.pe=` hints to every other node |
+| sn-swarm-leech-5 | leech-5  | 172.28.0.8   | 17670    | ROLE=leech, **late-joiner** (compose profile `late-joiner` — only started by s9), `x.pe=` hints to every node so it can source from ex-leeches after seeds are gone |
 
 The swarm stack pins IPs in a dedicated `172.28.0.0/24` IPAM subnet
 because anacrolix's `StringAddr` dialer feeds the raw `x.pe=` string
@@ -157,6 +159,7 @@ real-indexable text for `/search` assertions.
 | `s6-swarm-transfer.sh` | none | 6-node (swarm) | All 4 leeches hit progress=1.0 via mesh; peak active\_peers during transfer ≥ 2 (PEX evidence); bytes match fixture |
 | `s7-swarm-search.sh` | none | 6-node (swarm) | Content indexed on every leech; `swarm:true` search from leech-1 returns a hit whose infohash is the fixture's |
 | `s8-swarm-lossy.sh` | lossy | 6-node (swarm) | Same 6-node mesh under 5% loss + 150ms RTT: all 4 leeches converge within 300s, leech-1 bytes match fixture byte-for-byte |
+| `s9-swarm-late-joiner.sh` | none | 6-node + late-joiner | After original leeches complete, stop both seeds, launch leech-5 via compose profile `late-joiner`; leech-5 must pull 4 MiB entirely from ex-leeches and bytes must match fixture |
 
 Each script is standalone: it assumes `docker compose up` is already running
 with the correct `NETEM_PROFILE` and just runs assertions against the three

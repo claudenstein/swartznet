@@ -228,6 +228,40 @@ services:
       swartznet:
         ipv4_address: 172.28.0.7
 
+  # Late-joiner leech used by the s9 pass-along scenario. Gated
+  # behind docker compose profile `late-joiner` so the baseline
+  # 6-node stack stays 6-node. Scenario brings this up after the
+  # four original leeches have completed and both seeds have been
+  # removed — so leech-5 has to source the entire 4-MiB fixture
+  # from its peers. x.pe= hints include every IP in the subnet so
+  # dead seed addresses just fail and the leech picks up via
+  # leech-1..leech-4.
+  leech-5:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-swarm-leech-5
+    hostname: leech-5
+    profiles:
+      - late-joiner
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17670:7654"
+    volumes:
+      - ./netem:/netem:ro
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.28.0.2:42069&x.pe=172.28.0.3:42069&x.pe=172.28.0.4:42069&x.pe=172.28.0.5:42069&x.pe=172.28.0.6:42069&x.pe=172.28.0.7:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.8
+
 networks:
   swartznet:
     driver: bridge
