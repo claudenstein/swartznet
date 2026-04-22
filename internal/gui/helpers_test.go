@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 	"testing"
@@ -376,6 +377,59 @@ func TestFriendlyAddErr(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// --- copyableValue ---
+
+// copyableValue returns a plain Label for the empty / placeholder
+// cases (so we don't invite users to Copy nothing) and a container
+// with both the Label AND a Copy button for real values. We can't
+// render Fyne widgets without an app, but we CAN inspect the type
+// of the returned CanvasObject to confirm the shape is correct.
+func TestCopyableValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		value         string
+		wantPlainOnly bool // true → bare Label; false → container with Copy
+	}{
+		{"", true},
+		{"unknown", true},
+		{"disabled", true},
+		{"abc123", false},
+		{"long-ed25519-pubkey-1234567890-64-chars-of-hex-abcdefabcdefabcdefabcdef", false},
+	}
+	for _, c := range cases {
+		got := copyableValue(c.value)
+		if got == nil {
+			t.Errorf("copyableValue(%q) returned nil", c.value)
+			continue
+		}
+		// Identify by runtime type. *widget.Label vs *fyne.Container
+		// is the coarse distinction we care about.
+		typeName := reflectTypeName(got)
+		if c.wantPlainOnly {
+			if typeName != "*widget.Label" {
+				t.Errorf("copyableValue(%q): got %s, want *widget.Label (plain-only placeholder)", c.value, typeName)
+			}
+		} else {
+			if typeName == "*widget.Label" {
+				t.Errorf("copyableValue(%q): got bare Label, want container with Copy button", c.value)
+			}
+		}
+	}
+}
+
+func reflectTypeName(v interface{}) string {
+	// Stdlib-only type name so we don't pull reflect just for a
+	// test helper.
+	// fmt.Sprintf("%T", v) produces the same string as
+	// reflect.TypeOf(v).String().
+	type nilErr error
+	if v == nil {
+		var e nilErr
+		return fmt.Sprintf("%T", e)
+	}
+	return fmt.Sprintf("%T", v)
+}
 
 // --- windowForObject ---
 

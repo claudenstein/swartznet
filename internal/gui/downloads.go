@@ -487,14 +487,70 @@ func sortSnapsSlice(s []engine.TorrentSnapshot, less func(a, b engine.TorrentSna
 }
 
 func (dl *downloadsTab) showAddMagnetDialog() {
+	dl.showAddMagnetDialogPrefilled("", true)
+}
+
+// showAddMagnetDialogPrefilled opens the Add Magnet dialog with
+// the URI entry pre-populated and the "Index" checkbox
+// initialised to indexChecked. Used both for the first-time
+// "paste a magnet" path (empty prefill) and for the retry-after-
+// error path (prefill = the bad URI) so users can fix a typo
+// without re-pasting the whole string.
+func (dl *downloadsTab) showAddMagnetDialogPrefilled(prefill string, indexChecked bool) {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("magnet:?xt=urn:btih:...")
 	entry.MultiLine = false
+	if prefill != "" {
+		entry.SetText(prefill)
+	}
 
 	indexCheck := widget.NewCheck("Index this torrent's files after download", nil)
-	indexCheck.SetChecked(true)
+	indexCheck.SetChecked(indexChecked)
 
-	d := dialog.NewForm(
+	// Build-and-reopen helper. If validation or the engine
+	// rejects the submitted URI, we close this dialog, show the
+	// error, and call showAddMagnetDialogPrefilled again with
+	// the same URI + checkbox state — so the user can edit the
+	// existing text instead of re-pasting.
+	var d dialog.Dialog
+	submit := func(ok bool) {
+		if !ok {
+			return
+		}
+		uri := strings.TrimSpace(entry.Text)
+		shouldIndex := indexCheck.Checked
+		if uri == "" {
+			showAddMagnetError(dl, "paste a magnet URI starting with \"magnet:?xt=urn:btih:\"", uri, shouldIndex)
+			return
+		}
+		// Shallow client-side validation so the user doesn't
+		// have to wait for the engine to return a cryptic
+		// error for an obviously-malformed paste.
+		if reason := validateMagnetURI(uri); reason != "" {
+			showAddMagnetError(dl, reason, uri, shouldIndex)
+			return
+		}
+		go func() {
+			ih, err := dl.d.Eng.AddMagnetURI(uri)
+			if err != nil {
+				fyne.Do(func() {
+					showAddMagnetError(dl,
+						"Could not add this magnet: "+friendlyAddErr(err),
+						uri, shouldIndex,
+					)
+				})
+				return
+			}
+			if !shouldIndex {
+				// Flip the flag immediately so autoIndex's
+				// 5-minute wait for metadata doesn't index it
+				// when GotInfo fires.
+				_ = dl.d.Eng.SetTorrentIndexing(ih, false)
+			}
+		}()
+	}
+
+	d = dialog.NewForm(
 		"Add Magnet URI",
 		"Add",
 		"Cancel",
@@ -502,46 +558,25 @@ func (dl *downloadsTab) showAddMagnetDialog() {
 			widget.NewFormItem("Magnet URI", entry),
 			widget.NewFormItem("", indexCheck),
 		},
-		func(ok bool) {
-			if !ok {
-				return
-			}
-			uri := strings.TrimSpace(entry.Text)
-			if uri == "" {
-				dialog.ShowError(fmt.Errorf("paste a magnet URI starting with \"magnet:?xt=urn:btih:\""), dl.win())
-				return
-			}
-			// Shallow client-side validation so the user doesn't
-			// have to wait for the engine to return a cryptic
-			// error for an obviously-malformed paste.
-			if reason := validateMagnetURI(uri); reason != "" {
-				dialog.ShowError(fmt.Errorf("%s", reason), dl.win())
-				return
-			}
-			shouldIndex := indexCheck.Checked
-			go func() {
-				ih, err := dl.d.Eng.AddMagnetURI(uri)
-				if err != nil {
-					fyne.Do(func() {
-						dialog.ShowError(
-							fmt.Errorf("Could not add this magnet: %s", friendlyAddErr(err)),
-							dl.win(),
-						)
-					})
-					return
-				}
-				if !shouldIndex {
-					// Flip the flag immediately so autoIndex's
-					// 5-minute wait for metadata doesn't index it
-					// when GotInfo fires.
-					_ = dl.d.Eng.SetTorrentIndexing(ih, false)
-				}
-			}()
-		},
+		submit,
 		dl.win(),
 	)
 	d.Resize(fyne.NewSize(500, 180))
 	d.Show()
+}
+
+// showAddMagnetError presents an error dialog AND, on dismiss,
+// reopens the Add Magnet dialog with the bad URI pre-filled so
+// the user can edit it instead of starting over. The magnet URI
+// is long enough that re-pasting it would be a real annoyance,
+// and the common cause of errors (wrong scheme, missing btih) is
+// a one- or two-character fix.
+func showAddMagnetError(dl *downloadsTab, msg, uri string, indexChecked bool) {
+	info := dialog.NewInformation("Add Magnet failed", msg, dl.win())
+	info.SetOnClosed(func() {
+		dl.showAddMagnetDialogPrefilled(uri, indexChecked)
+	})
+	info.Show()
 }
 
 // validateMagnetURI runs cheap checks on a pasted magnet string so

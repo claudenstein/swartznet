@@ -17,6 +17,25 @@ engagement from actual users of the v0.x prereleases.
 
 ### Changed
 
+  - **GUI: more design polish — About dialog + Add Magnet
+    retry.** Follow-up to the first design pass:
+    - *About dialog — copyable values*: the identity pubkey,
+      BitTorrent port, and HTTP API address each now have an
+      inline Copy icon-button next to them. Previously the
+      dialog rendered these as plain `widget.NewLabel`, which
+      Fyne does not let users select or copy — so the 64-char
+      ed25519 pubkey was effectively trapped in the dialog.
+      The placeholder values ("unknown", "disabled") and the
+      empty-string case don't get the Copy button; we don't
+      want to invite users to copy nothing. Covered by a new
+      `TestCopyableValue` unit test.
+    - *Add Magnet — preserve URI on error*: validation failures
+      and engine rejections used to close the dialog; the user
+      had to reopen it and re-paste the whole magnet URI to
+      fix a single-character typo. Now the error dialog's
+      onClosed callback reopens the Add Magnet form with the
+      bad URI pre-filled and the "Index" checkbox state
+      preserved, so the user edits in place.
   - **GUI: design polish across Downloads, Search, Companion, and
     the main menu.** Specifically:
     - *Downloads — confirm before Remove*: the Remove toolbar

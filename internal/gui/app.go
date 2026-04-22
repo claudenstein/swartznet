@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/swartznet/swartznet/internal/daemon"
@@ -265,7 +266,13 @@ func (a *App) setupSystemTray() {
 }
 
 // showAbout presents a modal about dialog with version and
-// identity information.
+// identity information. Each value that a user might want to
+// paste elsewhere (identity pubkey, BitTorrent port, HTTP API
+// address) is rendered with an inline Copy button that writes
+// the value to the system clipboard. Plain text Labels are not
+// selectable in Fyne, so without the Copy buttons these values
+// were effectively locked inside the dialog — which is a real
+// problem for a 64-char ed25519 pubkey users need to share.
 func (a *App) showAbout() {
 	var pubKey string
 	if id := a.daemon.Eng.Identity(); id != nil {
@@ -286,14 +293,31 @@ func (a *App) showAbout() {
 
 	content := widget.NewForm(
 		widget.NewFormItem("Version", widget.NewLabel(a.version)),
-		widget.NewFormItem("Identity", widget.NewLabel(pubKey)),
-		widget.NewFormItem("BitTorrent port", widget.NewLabel(port)),
-		widget.NewFormItem("HTTP API", widget.NewLabel(apiAddr)),
+		widget.NewFormItem("Identity", copyableValue(pubKey)),
+		widget.NewFormItem("BitTorrent port", copyableValue(port)),
+		widget.NewFormItem("HTTP API", copyableValue(apiAddr)),
 		widget.NewFormItem("License", widget.NewLabel("MPL 2.0 (engine) + MIT (SwartzNet code)")),
 	)
 
 	dialog.ShowCustom("About SwartzNet",
 		"Close", content, a.win)
+}
+
+// copyableValue returns a composite widget showing `value` next
+// to a small Copy icon-button that writes the value to the
+// system clipboard when tapped. If the value is empty or a
+// placeholder ("unknown", "disabled"), the Copy button is
+// suppressed so the user isn't invited to copy nothing.
+func copyableValue(value string) fyne.CanvasObject {
+	label := widget.NewLabel(value)
+	if value == "" || value == "unknown" || value == "disabled" {
+		return label
+	}
+	copyBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+		fyne.CurrentApp().Clipboard().SetContent(value)
+	})
+	copyBtn.Importance = widget.LowImportance
+	return container.NewBorder(nil, nil, nil, copyBtn, label)
 }
 
 // titleLoop updates the window title with aggregate download +
