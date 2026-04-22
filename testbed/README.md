@@ -39,6 +39,7 @@ scripts/run-testbed.sh s6    # 4-leech piece transfer at scale + PEX evidence
 scripts/run-testbed.sh s7    # sn_search (Layer-S) fan-out hits fixture infohash
 scripts/run-testbed.sh s8    # 6-node swarm under lossy netem (5% loss + 150ms)
 scripts/run-testbed.sh s9    # pass-along: kill seeds, late-joiner leech-5 still completes
+scripts/run-testbed.sh s10   # mid-transfer churn: kill seed-1 at 30% progress, expect convergence
 scripts/run-testbed.sh swarm # alias: s6 + s7 against one compose lifecycle
 ```
 
@@ -160,6 +161,7 @@ real-indexable text for `/search` assertions.
 | `s7-swarm-search.sh` | none | 6-node (swarm) | Content indexed on every leech; `swarm:true` search from leech-1 returns a hit whose infohash is the fixture's |
 | `s8-swarm-lossy.sh` | lossy | 6-node (swarm) | Same 6-node mesh under 5% loss + 150ms RTT: all 4 leeches converge within 300s, leech-1 bytes match fixture byte-for-byte |
 | `s9-swarm-late-joiner.sh` | none | 6-node + late-joiner | After original leeches complete, stop both seeds, launch leech-5 via compose profile `late-joiner`; leech-5 must pull 4 MiB entirely from ex-leeches and bytes must match fixture |
+| `s10-swarm-churn.sh` | lossy | 6-node (swarm) | Once `leech-1.progress ≥ 0.3`, stop `sn-swarm-seed-1` mid-flight; assert all 4 leeches still converge within 300s via seed-2 + mutual exchange; leech-1 bytes match fixture |
 
 Each script is standalone: it assumes `docker compose up` is already running
 with the correct `NETEM_PROFILE` and just runs assertions against the three

@@ -66,6 +66,18 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **s10 — mid-transfer seed churn**
+    (`testbed/scenarios/s10-swarm-churn.sh`). Only scenario in
+    the matrix that kills a seed *while* transfers are in flight
+    (s8 runs to completion under loss without churn; s9 kills
+    seeds only after leeches finish). Runs the 6-node swarm
+    under `/netem/lossy.sh` to stretch the transfer window to
+    ~15-20s, waits for `leech-1.progress >= 0.3`, `docker stop
+    sn-swarm-seed-1`, asserts all 4 leeches converge within 300s
+    via seed-2 + mutual exchange, and byte-checks leech-1's
+    on-disk fixture. First passing run converged 14s post-churn.
+    Gracefully short-circuits if the fixture is too small / the
+    netem profile too gentle to produce a mid-transfer window.
   - **s9 — pass-along + late-joiner resilience scenario**
     (`testbed/scenarios/s9-swarm-late-joiner.sh`,
     `testbed/docker-compose.swarm.yml` gains a `leech-5`
