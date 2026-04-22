@@ -633,26 +633,8 @@ func (dl *downloadsTab) selectedInfoHash() string {
 	return dl.snaps[dl.selected].InfoHash
 }
 
-// win returns the parent window for dialogs. It walks up from the
-// content canvas object.
-func (dl *downloadsTab) win() fyne.Window {
-	c := fyne.CurrentApp().Driver().CanvasForObject(dl.content)
-	if c == nil {
-		// Fallback: return the first window from the app.
-		for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-			return w
-		}
-		return nil
-	}
-	// The canvas doesn't directly expose the window, but all
-	// current Fyne drivers associate one window per canvas.
-	for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-		if w.Canvas() == c {
-			return w
-		}
-	}
-	return nil
-}
+// win returns the parent window for dialogs.
+func (dl *downloadsTab) win() fyne.Window { return windowForObject(dl.content) }
 
 // torrentFilter limits file dialogs to .torrent files.
 type torrentFilter struct{}

@@ -228,21 +228,7 @@ func (st *settingsTab) save() {
 	dialog.ShowInformation("Saved", "Sharing capabilities updated", st.win())
 }
 
-func (st *settingsTab) win() fyne.Window {
-	c := fyne.CurrentApp().Driver().CanvasForObject(st.content)
-	if c == nil {
-		for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-			return w
-		}
-		return nil
-	}
-	for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-		if w.Canvas() == c {
-			return w
-		}
-	}
-	return nil
-}
+func (st *settingsTab) win() fyne.Window { return windowForObject(st.content) }
 
 func boolInt(b bool) int {
 	if b {

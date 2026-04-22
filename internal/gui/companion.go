@@ -245,18 +245,4 @@ func (ct *companionTab) unfollowAt(idx int) {
 	ct.d.CompSub.Unfollow(pub)
 }
 
-func (ct *companionTab) win() fyne.Window {
-	c := fyne.CurrentApp().Driver().CanvasForObject(ct.content)
-	if c == nil {
-		for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-			return w
-		}
-		return nil
-	}
-	for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-		if w.Canvas() == c {
-			return w
-		}
-	}
-	return nil
-}
+func (ct *companionTab) win() fyne.Window { return windowForObject(ct.content) }

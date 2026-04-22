@@ -340,18 +340,4 @@ func (st *searchTab) flagHit(infoHashHex string) {
 	dialog.ShowInformation("Flagged", fmt.Sprintf("Flagged %s as spam (%d indexers demoted)", infoHashHex[:16], len(pks)), st.win())
 }
 
-func (st *searchTab) win() fyne.Window {
-	c := fyne.CurrentApp().Driver().CanvasForObject(st.content)
-	if c == nil {
-		for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-			return w
-		}
-		return nil
-	}
-	for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-		if w.Canvas() == c {
-			return w
-		}
-	}
-	return nil
-}
+func (st *searchTab) win() fyne.Window { return windowForObject(st.content) }

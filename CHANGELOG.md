@@ -15,6 +15,34 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Changed
+
+  - **GUI: consolidated four duplicated `win()` helpers into a
+    single `windowForObject`** (`internal/gui/window.go`). Each
+    tab (Downloads, Search, Settings, Companion) previously
+    carried a near-identical 15-line method that walked the
+    Fyne driver's window list to find the hosting window for a
+    canvas object; they now all delegate to the shared helper.
+    The new helper also handles the no-Fyne-app case without
+    panicking (covered by a regression test), which makes the
+    GUI package test-friendly for the first time.
+
+### Added
+
+  - **GUI: first unit tests** (`internal/gui/helpers_test.go`,
+    `internal/gui/sort_test.go`). Lifts package coverage from
+    0.0 % to 7.4 % by exercising the pure helpers (`humanBytes`,
+    `rateStr`, `parseKiB`, `kibStr`, `limitDisplay`, `boolInt`,
+    `boolStr`, `portStr`, `pieceLengthFromLabel`, `splitLines`,
+    `torrentFilter.Matches`, `swartzTheme.Color/Font/Icon/Size`)
+    and the Downloads-tab sort state machine (`snapLess` across
+    all 9 columns and both directions, `sortSnapsSlice`
+    stability on equal keys and edge cases, `toggleSort` cycle
+    none → asc → desc → none, `selectedInfoHash` bounds
+    checks). The larger widget-construction paths still need a
+    real Fyne runtime to exercise end-to-end; these tests cover
+    every piece of state logic the widget code calls into.
+
 ### Fixed
 
   - **`fileTracker.Subscribe` now replays events for files that
