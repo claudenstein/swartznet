@@ -228,6 +228,44 @@ services:
       swartznet:
         ipv4_address: 172.28.0.7
 
+  # Vanilla aria2c BT client used by scenario s11 to prove
+  # mainline-compatibility at the wire level. Gated behind the
+  # `vanilla` docker compose profile so the baseline swarm stays
+  # swartznet-only. Not attached to the stack's internal volume
+  # layout — it downloads to /vanilla-data in the container, and
+  # the scenario script sha256s that dir against the fixture on
+  # the host.
+  vanilla-leech:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile.vanilla
+    container_name: sn-swarm-vanilla-leech
+    hostname: vanilla-leech
+    profiles:
+      - vanilla
+    cap_add:
+      - NET_ADMIN
+    # anacrolix/torrent CLI. Subcommand `download` fetches each
+    # magnet URI and exits when all are complete. --no-seed
+    # means "don't hang around after verifying". --no-dht
+    # keeps us on the same --no-dht policy as the SwartzNet
+    # peers so the test exercises only the x.pe= + BEP-10 path.
+    # --no-pex disables peer-exchange so aria2's failure mode
+    # (no peers ever learned) can't be masked by PEX; if the
+    # download succeeds it MUST be due to the x.pe= hints.
+    # The `torrent` CLI writes content into the CWD
+    # (/vanilla-data, set by the Dockerfile's WORKDIR).
+    command:
+      - torrent
+      - download
+      - --no-seed
+      - --no-dht
+      - --no-pex
+      - "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.28.0.2:42069&x.pe=172.28.0.3:42069&x.pe=172.28.0.4:42069&x.pe=172.28.0.5:42069&x.pe=172.28.0.6:42069&x.pe=172.28.0.7:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.9
+
   # Late-joiner leech used by the s9 pass-along scenario. Gated
   # behind docker compose profile `late-joiner` so the baseline
   # 6-node stack stays 6-node. Scenario brings this up after the

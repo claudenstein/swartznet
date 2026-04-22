@@ -1,0 +1,36 @@
+# Vanilla BitTorrent client container used by scenario s11 to
+# prove SwartzNet seeds are mainline-compatible at the wire level.
+#
+# Runs the stock anacrolix/torrent CLI binary
+# (github.com/anacrolix/torrent/cmd/torrent) — same library family
+# our engine wraps, but without any of the SwartzNet extension-
+# protocol registrations (no sn_search LTEP advertise, no custom
+# callbacks, no DHT PeerStore injection). So interop across the
+# SwartzNet ↔ this-binary boundary exercises exactly the
+# BEP-3/9/10 baseline that CLAUDE.md's wire-compat constraint says
+# must be the only thing a vanilla client sees.
+#
+# aria2c and transmission-cli were tried first; both accepted the
+# magnet URI but did not actually honor the `x.pe=` peer-address
+# hints over the isolated docker bridge (zero peer connections).
+# anacrolix's CLI honors `x.pe=` the same way our engine does
+# (metainfo.TorrentSpecFromMagnetUri → spec.PeerAddrs →
+# client.addPeersIter), so we know this path exercises the same
+# wire-level peer bootstrap we use in production.
+#
+# Build-time choice: the binary is built on the host (in a fresh
+# go module to avoid polluting our own go.mod with the CLI's
+# tagflag / prometheus deps) and COPIED in. Building inside the
+# builder stage failed with "TLS handshake timeout" reaching
+# proxy.golang.org; host-build is simpler and pins the version
+# explicitly via scripts/run-testbed.sh's prep step.
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+
+COPY dist/torrent-vanilla-linux-amd64 /usr/local/bin/torrent
+RUN chmod +x /usr/local/bin/torrent
+
+RUN mkdir -p /vanilla-data
+WORKDIR /vanilla-data

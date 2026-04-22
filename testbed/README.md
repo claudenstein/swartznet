@@ -40,6 +40,7 @@ scripts/run-testbed.sh s7    # sn_search (Layer-S) fan-out hits fixture infohash
 scripts/run-testbed.sh s8    # 6-node swarm under lossy netem (5% loss + 150ms)
 scripts/run-testbed.sh s9    # pass-along: kill seeds, late-joiner leech-5 still completes
 scripts/run-testbed.sh s10   # mid-transfer churn: kill seed-1 at 30% progress, expect convergence
+scripts/run-testbed.sh s11   # vanilla BT interop: anacrolix CLI downloads from SwartzNet using BEP-9/10 only
 scripts/run-testbed.sh swarm # alias: s6 + s7 against one compose lifecycle
 ```
 
@@ -108,6 +109,7 @@ container at startup via `testbed/entrypoint.sh`. Containers need
 | sn-swarm-leech-3 | leech-3  | 172.28.0.6   | 17668    | ROLE=leech, `x.pe=` hints to every other node |
 | sn-swarm-leech-4 | leech-4  | 172.28.0.7   | 17669    | ROLE=leech, `x.pe=` hints to every other node |
 | sn-swarm-leech-5 | leech-5  | 172.28.0.8   | 17670    | ROLE=leech, **late-joiner** (compose profile `late-joiner` — only started by s9), `x.pe=` hints to every node so it can source from ex-leeches after seeds are gone |
+| sn-swarm-vanilla-leech | vanilla-leech | 172.28.0.9 | — | **Vanilla BT client** (compose profile `vanilla` — only started by s11), stock `anacrolix/torrent` CLI built from upstream without any SwartzNet extensions; proves wire-compat by downloading from SwartzNet peers using BEP-3/9/10 only |
 
 The swarm stack pins IPs in a dedicated `172.28.0.0/24` IPAM subnet
 because anacrolix's `StringAddr` dialer feeds the raw `x.pe=` string
@@ -162,6 +164,7 @@ real-indexable text for `/search` assertions.
 | `s8-swarm-lossy.sh` | lossy | 6-node (swarm) | Same 6-node mesh under 5% loss + 150ms RTT: all 4 leeches converge within 300s, leech-1 bytes match fixture byte-for-byte |
 | `s9-swarm-late-joiner.sh` | none | 6-node + late-joiner | After original leeches complete, stop both seeds, launch leech-5 via compose profile `late-joiner`; leech-5 must pull 4 MiB entirely from ex-leeches and bytes must match fixture |
 | `s10-swarm-churn.sh` | lossy | 6-node (swarm) | Once `leech-1.progress ≥ 0.3`, stop `sn-swarm-seed-1` mid-flight; assert all 4 leeches still converge within 300s via seed-2 + mutual exchange; leech-1 bytes match fixture |
+| `s11-vanilla-interop.sh` | none | 6-node + vanilla | Stock `anacrolix/torrent` CLI joins the swarm (no SwartzNet extensions, `--no-dht --no-pex --no-seed`) and downloads 4 MiB from SwartzNet peers via BEP-9 `x.pe=` hints + BEP-3/10 only; bytes match fixture |
 
 Each script is standalone: it assumes `docker compose up` is already running
 with the correct `NETEM_PROFILE` and just runs assertions against the three

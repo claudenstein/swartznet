@@ -66,6 +66,31 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **s11 — vanilla BT client interop at the wire level**
+    (`testbed/scenarios/s11-vanilla-interop.sh`,
+    `testbed/Dockerfile.vanilla`,
+    `testbed/docker-compose.swarm.yml` gains a `vanilla-leech`
+    service at 172.28.0.9 under compose profile `vanilla`).
+    Runs the upstream `anacrolix/torrent/cmd/torrent` CLI — the
+    same library family our engine wraps, but built without any
+    SwartzNet extension-protocol registrations — on the swarm
+    bridge and requires it to download the 4-MiB fixture from
+    SwartzNet peers using `--no-dht --no-pex --no-seed`. That
+    leaves only the BEP-9 `x.pe=` peer hints + BEP-3/10 handshake
+    as the peer bootstrap path. Successful download proves the
+    SwartzNet seeds are emitting nothing that violates
+    CLAUDE.md's "vanilla client must see nothing but
+    BEP-3/5/9/10/44" constraint; a regression anywhere in our
+    LTEP handshake, reserved-bit usage, or peer-wire framing
+    would trip this test. First passing run: the vanilla binary
+    downloaded + verified + exited in 2 s. Bytes SHA-256 checked
+    via `docker cp` because the binary exits cleanly on
+    completion (no persistent container to `docker exec` into).
+    Two other BT implementations were tried first — aria2c and
+    transmission-cli — but both silently failed to honor
+    `x.pe=` over the isolated docker bridge; the scenario's
+    DEPLOYMENT NOTES in the script documents why anacrolix's
+    CLI was chosen.
   - **s10 — mid-transfer seed churn**
     (`testbed/scenarios/s10-swarm-churn.sh`). Only scenario in
     the matrix that kills a seed *while* transfers are in flight

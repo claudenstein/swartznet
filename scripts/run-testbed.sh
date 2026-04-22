@@ -5,7 +5,7 @@
 #   scripts/run-testbed.sh <scenario>
 #   scripts/run-testbed.sh all
 #
-# Scenario names: s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 swarm all
+# Scenario names: s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 swarm all
 #
 #   s1     — healthy baseline (no netem, 3-node stack)
 #   s2     — lossy profile (5% packet loss, 150ms RTT)
@@ -24,10 +24,15 @@
 #   s10    — mid-transfer seed churn under lossy netem: kill seed-1
 #            once leech-1 crosses 30% progress; verify all 4 leeches
 #            still converge via seed-2 + mutual exchange
+#   s11    — vanilla BT client interop: an aria2c container joins the
+#            swarm (compose profile `vanilla`) and must download the
+#            4-MiB fixture from SwartzNet peers using only BEP-3/9/10
+#            traffic. Proves wire-compat at the real-TCP level.
 #   swarm  — alias: run s6 then s7 against a single long-lived 6-node
 #            stack (avoids paying the compose up/down cost twice)
 #   all    — run s1..s5 (3-node) then swarm (6-node) then s8 (lossy
 #            swarm) then s9 (pass-along) then s10 (mid-transfer churn)
+#            then s11 (vanilla interop)
 #
 # Each scenario:
 #   1. Brings up the 3-node docker compose stack with the correct NETEM_PROFILE.
@@ -76,8 +81,8 @@ SCENARIO="$1"
 
 # Validate scenario argument.
 case "$SCENARIO" in
-    s1|s2|s3|s4|s5|s6|s7|s8|s9|s10|swarm|all) ;;
-    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 swarm all" ;;
+    s1|s2|s3|s4|s5|s6|s7|s8|s9|s10|s11|swarm|all) ;;
+    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 swarm all" ;;
 esac
 
 # Check docker compose v2 is available.
@@ -133,6 +138,29 @@ if [[ "$BUILD_NEEDED" -eq 1 ]]; then
     log "Built: $BINARY ($(du -h "$BINARY" | cut -f1))"
 fi
 
+# Build the vanilla anacrolix/torrent CLI binary if absent. This
+# is a separate binary used only by s11 (vanilla-leech container).
+# Its deps (tagflag, prometheus/client_golang) aren't in our
+# go.mod, so we build it in a throwaway temp module to avoid
+# polluting the project's module graph. We only rebuild if the
+# file is missing — there's no source in this repo that would
+# invalidate it.
+VANILLA_BIN="$REPO_ROOT/dist/torrent-vanilla-linux-amd64"
+if [[ ! -f "$VANILLA_BIN" ]]; then
+    log "Vanilla binary not found: $VANILLA_BIN"
+    log "Building github.com/anacrolix/torrent/cmd/torrent@v1.61.0 in a temp module..."
+    VANILLA_TMP=$(mktemp -d /tmp/sn-vanilla-build-XXXXXX)
+    (
+        cd "$VANILLA_TMP"
+        "$GO" mod init tempvanilla > /dev/null
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            "$GO" install github.com/anacrolix/torrent/cmd/torrent@v1.61.0
+    ) || fail "vanilla build failed"
+    cp "$HOME/go/bin/torrent" "$VANILLA_BIN" || fail "could not stage $VANILLA_BIN"
+    rm -rf "$VANILLA_TMP"
+    log "Built: $VANILLA_BIN ($(du -h "$VANILLA_BIN" | cut -f1))"
+fi
+
 mkdir -p "$RESULTS_DIR"
 
 # ── Per-scenario config ───────────────────────────────────────────────────────
@@ -148,14 +176,15 @@ scenario_netem_profile() {
         s8) echo "/netem/lossy.sh" ;;          # 6-node swarm under lossy
         s9) echo "" ;;                         # pass-along, no netem
         s10) echo "/netem/lossy.sh" ;;         # mid-transfer churn under lossy
+        s11) echo "" ;;                        # vanilla interop, no netem
     esac
 }
 
 # Which compose file and container set does this scenario use?
 scenario_compose_file() {
     case "$1" in
-        s1|s2|s3|s4|s5)   echo "$COMPOSE_FILE" ;;
-        s6|s7|s8|s9|s10)  echo "$COMPOSE_SWARM_FILE" ;;
+        s1|s2|s3|s4|s5)       echo "$COMPOSE_FILE" ;;
+        s6|s7|s8|s9|s10|s11)  echo "$COMPOSE_SWARM_FILE" ;;
     esac
 }
 
@@ -163,13 +192,15 @@ scenario_containers() {
     case "$1" in
         s1|s2|s3|s4|s5)
             echo "sn-seed-1 sn-seed-2 sn-leech-1" ;;
-        s6|s7|s8|s9|s10)
+        s6|s7|s8|s9|s10|s11)
             # s9 starts with the baseline 6 and later brings up
             # sn-swarm-leech-5 via the `late-joiner` profile from
             # inside the scenario script; s10 kills sn-swarm-seed-1
-            # mid-scenario. The startup wait here only checks the
-            # baseline six; teardown (`--profile '*' compose down
-            # -v`) covers profile-started services too.
+            # mid-scenario; s11 brings up sn-swarm-vanilla-leech
+            # via the `vanilla` profile. The startup wait here
+            # only checks the baseline six; teardown
+            # (`--profile '*' compose down -v`) covers
+            # profile-started services too.
             echo "sn-swarm-seed-1 sn-swarm-seed-2 sn-swarm-leech-1 sn-swarm-leech-2 sn-swarm-leech-3 sn-swarm-leech-4" ;;
     esac
 }
@@ -321,7 +352,7 @@ run_scenario() {
 
 SCENARIOS_TO_RUN=()
 case "$SCENARIO" in
-    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8 s9 s10) ;;
+    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8 s9 s10 s11) ;;
     swarm)  SCENARIOS_TO_RUN=(swarm) ;;
     *)      SCENARIOS_TO_RUN=("$SCENARIO") ;;
 esac
