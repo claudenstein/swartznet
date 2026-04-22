@@ -1,54 +1,52 @@
 #!/usr/bin/env bash
-# Scenario S1: healthy 3-node search
+# Scenario S1: healthy 3-node baseline
 #
-# Precondition: docker-compose up is running (the 3 containers
-# from docker-compose.yml: seed-1, seed-2, leech-1).
-#
-# This script probes each node's HTTP API and asserts basic
-# health, status, and search functionality. It's a lightweight
-# smoke test for the docker-compose baseline, NOT a replacement
-# for the internal/testlab in-process scenarios (which run in CI
-# and test the real code paths; this script only tests the
-# deployment plumbing).
+# Precondition: `docker compose -f testbed/docker-compose.yml up -d`
+# is running. Probes the API via `docker exec sn-seed-1 curl
+# http://<hostname>:7654/...` over the internal bridge network, so
+# the test is independent of the host's UFW FORWARD policy (on
+# stock Ubuntu with DEFAULT_FORWARD_POLICY=DROP, the host-published
+# ports are RST'd by the kernel and s1 cannot rely on them).
 #
 # Exit 0 if all checks pass, 1 otherwise.
 
 set -euo pipefail
 
-SEED1=http://localhost:17654
-SEED2=http://localhost:17655
-LEECH1=http://localhost:17656
+PROBER="sn-seed-1"
+NODES=("seed-1" "seed-2" "leech-1")
 
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
 
+api_get() {
+    docker exec "$PROBER" curl -sf --max-time 5 "http://$1:7654$2" 2>/dev/null
+}
+
 echo "=== S1: Healthy 3-node search scenario ==="
 
-# Wait for all nodes to come up (healthz).
-for node in "$SEED1" "$SEED2" "$LEECH1"; do
+for name in "${NODES[@]}"; do
+    ok=0
     for i in $(seq 1 30); do
-        if curl -sf "$node/healthz" > /dev/null 2>&1; then
-            break
+        if api_get "$name" "/healthz" > /dev/null 2>&1; then
+            ok=1; break
         fi
         sleep 1
     done
-    resp=$(curl -sf "$node/healthz" 2>/dev/null) || fail "$node healthz unreachable after 30s"
-    echo "$resp" | grep -q '"ok":true' || fail "$node healthz not ok: $resp"
-    pass "$node healthz"
+    [ "$ok" -eq 1 ] || fail "$name healthz unreachable after 30s"
+    resp=$(api_get "$name" "/healthz")
+    echo "$resp" | grep -q '"ok":true' || fail "$name healthz not ok: $resp"
+    pass "$name healthz"
 done
 
-# Check status on each node.
-for node in "$SEED1" "$SEED2" "$LEECH1"; do
-    resp=$(curl -sf "$node/status")
-    echo "$node status: $resp" | head -c 200
-    echo
+for name in "${NODES[@]}"; do
+    resp=$(api_get "$name" "/status") || fail "$name status unreachable"
+    echo "$resp" | grep -q '"local"' || fail "$name status missing local: $resp"
 done
 
-# Check /torrents — each node should have at least 1 torrent.
-for node in "$SEED1" "$SEED2" "$LEECH1"; do
-    resp=$(curl -sf "$node/torrents")
-    echo "$resp" | grep -q '"infohash"' || fail "$node has no torrents"
-    pass "$node has torrents"
+for name in "${NODES[@]}"; do
+    resp=$(api_get "$name" "/torrents") || fail "$name torrents unreachable"
+    echo "$resp" | grep -q '"infohash"' || fail "$name has no torrents"
+    pass "$name has torrents"
 done
 
 echo

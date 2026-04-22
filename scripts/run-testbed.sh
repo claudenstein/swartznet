@@ -5,7 +5,7 @@
 #   scripts/run-testbed.sh <scenario>
 #   scripts/run-testbed.sh all
 #
-# Scenario names: s1  s2  s3  s4  s5  s6  s7  swarm  all
+# Scenario names: s1  s2  s3  s4  s5  s6  s7  s8  swarm  all
 #
 #   s1     — healthy baseline (no netem, 3-node stack)
 #   s2     — lossy profile (5% packet loss, 150ms RTT)
@@ -15,9 +15,11 @@
 #   s6     — 6-node swarm piece transfer at scale (2 seeds + 4 leeches,
 #            uses docker-compose.swarm.yml, separate ports 17664-17669)
 #   s7     — Layer-S sn_search fan-out across the 6-node swarm
+#   s8     — 6-node swarm under lossy netem (5% loss + 150ms RTT),
+#            convergence budget 300s
 #   swarm  — alias: run s6 then s7 against a single long-lived 6-node
 #            stack (avoids paying the compose up/down cost twice)
-#   all    — run s1..s5 (3-node) then swarm (6-node)
+#   all    — run s1..s5 (3-node) then swarm (6-node) then s8 (lossy swarm)
 #
 # Each scenario:
 #   1. Brings up the 3-node docker compose stack with the correct NETEM_PROFILE.
@@ -66,8 +68,8 @@ SCENARIO="$1"
 
 # Validate scenario argument.
 case "$SCENARIO" in
-    s1|s2|s3|s4|s5|s6|s7|swarm|all) ;;
-    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 swarm all" ;;
+    s1|s2|s3|s4|s5|s6|s7|s8|swarm|all) ;;
+    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 s8 swarm all" ;;
 esac
 
 # Check docker compose v2 is available.
@@ -135,6 +137,7 @@ scenario_netem_profile() {
         s4) echo "/netem/home-dsl.sh" ;;
         s5) echo "" ;;                         # piece transfer, no netem
         s6|s7) echo "" ;;                      # 6-node swarm, no netem
+        s8) echo "/netem/lossy.sh" ;;          # 6-node swarm under lossy
     esac
 }
 
@@ -142,7 +145,7 @@ scenario_netem_profile() {
 scenario_compose_file() {
     case "$1" in
         s1|s2|s3|s4|s5) echo "$COMPOSE_FILE" ;;
-        s6|s7)          echo "$COMPOSE_SWARM_FILE" ;;
+        s6|s7|s8)       echo "$COMPOSE_SWARM_FILE" ;;
     esac
 }
 
@@ -150,7 +153,7 @@ scenario_containers() {
     case "$1" in
         s1|s2|s3|s4|s5)
             echo "sn-seed-1 sn-seed-2 sn-leech-1" ;;
-        s6|s7)
+        s6|s7|s8)
             echo "sn-swarm-seed-1 sn-swarm-seed-2 sn-swarm-leech-1 sn-swarm-leech-2 sn-swarm-leech-3 sn-swarm-leech-4" ;;
     esac
 }
@@ -295,7 +298,7 @@ run_scenario() {
 
 SCENARIOS_TO_RUN=()
 case "$SCENARIO" in
-    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm) ;;
+    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8) ;;
     swarm)  SCENARIOS_TO_RUN=(swarm) ;;
     *)      SCENARIOS_TO_RUN=("$SCENARIO") ;;
 esac

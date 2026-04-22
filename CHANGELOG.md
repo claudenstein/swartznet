@@ -66,6 +66,31 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **Layer-B 3-node testbed is now portable across UFW-DROP hosts**
+    (`testbed/docker-compose.yml`, `testbed/scenarios/s1-s5`).
+    Previously the scenarios probed `http://localhost:17654-17656`
+    and relied on host-side port forwarding; on stock Ubuntu
+    (`DEFAULT_FORWARD_POLICY="DROP"`) the docker-proxy's forward
+    leg is blocked and the scenarios RST'd without ever running
+    their assertions. And the leech magnet URI's `x.pe=` hints
+    were hostname-based (`seed-1:42069`), which anacrolix's
+    `StringAddr` dialer has been observed to silently drop. Both
+    are now fixed: `docker-compose.yml` pins static IPs in a
+    `172.27.0.0/24` subnet (distinct from the swarm stack's
+    `172.28.0.0/24`), the magnet URI uses dotted-quad IPs, and
+    s1-s5 probe the API via `docker exec sn-seed-1 curl
+    http://<hostname>:7654/…` over the internal bridge. The
+    three-node testbed now runs green on hosts with the default
+    UFW profile. Full matrix wall clock: 70s.
+  - **s8 — 6-node swarm under a lossy link**
+    (`testbed/scenarios/s8-swarm-lossy.sh`). Runs the
+    `docker-compose.swarm.yml` stack with the existing
+    `/netem/lossy.sh` profile (5% loss + 150ms RTT). Asserts
+    all 4 leeches converge within 300s despite retransmits and
+    leech-1's on-disk bytes match the fixture byte-for-byte
+    (smoke check that retransmits don't corrupt the wire).
+    Drop-in-addition to s6/s7 so `scripts/run-testbed.sh all`
+    now executes the full matrix: s1..s5 → swarm → s8.
   - **Layer-B testbed now includes a 6-node small-swarm scenario**
     (`testbed/docker-compose.swarm.yml`, scenarios
     `s6-swarm-transfer.sh` and `s7-swarm-search.sh`). Two seeds

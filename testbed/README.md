@@ -37,6 +37,7 @@ scripts/run-testbed.sh s5    # piece-transfer: proves leech actually downloads
 # 6-node swarm scenarios (docker-compose.swarm.yml — 2 seeds + 4 leeches):
 scripts/run-testbed.sh s6    # 4-leech piece transfer at scale + PEX evidence
 scripts/run-testbed.sh s7    # sn_search (Layer-S) fan-out hits fixture infohash
+scripts/run-testbed.sh s8    # 6-node swarm under lossy netem (5% loss + 150ms)
 scripts/run-testbed.sh swarm # alias: s6 + s7 against one compose lifecycle
 ```
 
@@ -88,11 +89,11 @@ container at startup via `testbed/entrypoint.sh`. Containers need
 
 **3-node stack** (`docker-compose.yml` — scenarios s1-s5):
 
-| Container | Hostname | API port | Role |
-|---|---|---|---|
-| sn-seed-1 | seed-1 | localhost:17654 | ROLE=seed, pre-populated with fixture content, serves `fixture.torrent` |
-| sn-seed-2 | seed-2 | localhost:17655 | ROLE=seed, same content as seed-1 (leech has two sources) |
-| sn-leech-1 | leech-1 | localhost:17656 | ROLE=leech, starts empty, magnet URI has `x.pe=seed-1:42069&x.pe=seed-2:42069` |
+| Container  | Hostname | Static IP  | API port | Role |
+|------------|----------|------------|----------|------|
+| sn-seed-1  | seed-1   | 172.27.0.2 | 17654    | ROLE=seed, pre-populated with fixture content |
+| sn-seed-2  | seed-2   | 172.27.0.3 | 17655    | ROLE=seed, same content as seed-1 |
+| sn-leech-1 | leech-1  | 172.27.0.4 | 17656    | ROLE=leech, `x.pe=172.27.0.2:42069&x.pe=172.27.0.3:42069` |
 
 **6-node swarm stack** (`docker-compose.swarm.yml` — scenarios s6, s7):
 
@@ -155,6 +156,7 @@ real-indexable text for `/search` assertions.
 | `s5-piece-transfer.sh` | none | 3-node | End-to-end piece transfer: leech reaches progress=1.0 and bytes match fixture SHA-256 |
 | `s6-swarm-transfer.sh` | none | 6-node (swarm) | All 4 leeches hit progress=1.0 via mesh; peak active\_peers during transfer ≥ 2 (PEX evidence); bytes match fixture |
 | `s7-swarm-search.sh` | none | 6-node (swarm) | Content indexed on every leech; `swarm:true` search from leech-1 returns a hit whose infohash is the fixture's |
+| `s8-swarm-lossy.sh` | lossy | 6-node (swarm) | Same 6-node mesh under 5% loss + 150ms RTT: all 4 leeches converge within 300s, leech-1 bytes match fixture byte-for-byte |
 
 Each script is standalone: it assumes `docker compose up` is already running
 with the correct `NETEM_PROFILE` and just runs assertions against the three

@@ -53,7 +53,8 @@ services:
       --data-dir=/data --api-addr=0.0.0.0:7654
       /fixture/fixture.torrent
     networks:
-      - swartznet
+      swartznet:
+        ipv4_address: 172.27.0.2
 
   seed-2:
     build:
@@ -75,7 +76,8 @@ services:
       --data-dir=/data --api-addr=0.0.0.0:7654
       /fixture/fixture.torrent
     networks:
-      - swartznet
+      swartznet:
+        ipv4_address: 172.27.0.3
 
   leech-1:
     build:
@@ -95,13 +97,28 @@ services:
       - ./netem:/netem:ro
     cap_add:
       - NET_ADMIN
+    # Peer-address hints use dotted-quad IPs because anacrolix's
+    # StringAddr dialer feeds x.pe= entries through its peer list
+    # without eager DNS resolution; hostnames have been observed
+    # to silently drop. See docker-compose.swarm.yml for the same
+    # reasoning in the 6-node stack.
     command: >
       swartznet add --regtest --no-dht
       --data-dir=/data --api-addr=0.0.0.0:7654
-      "magnet:?xt=urn:btih:c4405d27af8462e3d5e03c30c542f66e170fe4f8&dn=testbed-fixture-book&x.pe=seed-1:42069&x.pe=seed-2:42069"
+      "magnet:?xt=urn:btih:c4405d27af8462e3d5e03c30c542f66e170fe4f8&dn=testbed-fixture-book&x.pe=172.27.0.2:42069&x.pe=172.27.0.3:42069"
     networks:
-      - swartznet
+      swartznet:
+        ipv4_address: 172.27.0.4
 
 networks:
   swartznet:
     driver: bridge
+    ipam:
+      driver: default
+      config:
+        # Distinct subnet from docker-compose.swarm.yml (172.28.0.0/24)
+        # so the two stacks can coexist on the same host during
+        # debugging, though running simultaneously is still not
+        # supported (scenarios assume known container names).
+        - subnet: 172.27.0.0/24
+          gateway: 172.27.0.1

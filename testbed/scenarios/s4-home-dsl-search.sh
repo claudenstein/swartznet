@@ -1,108 +1,102 @@
 #!/usr/bin/env bash
-# Scenario S4: home-DSL network 3-node search
+# Scenario S4: home-DSL 3-node baseline (20ms ±5ms jitter, 25 Mbit)
+#   — also the only S1-S4 scenario that exercises /search end-to-end.
 #
-# Precondition: docker compose is running with NETEM_PROFILE=/netem/home-dsl.sh
-# (scripts/run-testbed.sh s4 handles this; you can also start manually:
-#   NETEM_PROFILE=/netem/home-dsl.sh docker compose -f testbed/docker-compose.yml up -d)
+# Precondition: docker compose running with
+#   NETEM_PROFILE=/netem/home-dsl.sh
+# Probes via docker exec (UFW-independent).
 #
-# The home-DSL profile adds 20 ms base delay + 5 ms jitter (uniform) and
-# caps bandwidth at 25 Mbit/s. This is the mildest degraded profile —
-# typical of a cable/DSL connection with a bit of jitter. API responses
-# are fast; the only observable effect at this scale is slightly higher
-# latency on the first connection setup.
-#
-# What this asserts:
-#   1. All 3 nodes reach /healthz "ok" within 60 s.
-#   2. GET /status returns valid JSON on all 3 nodes.
-#   3. GET /torrents reports at least 1 torrent per node.
-#   4. POST /search with a simple query returns a valid SearchResponse
-#      JSON structure (even with 0 hits — the important thing is that the
-#      search path is end-to-end reachable under the DSL profile).
-#
-# S4 is the only scenario that also exercises the /search endpoint, because
-# the DSL profile is gentle enough that the 10-second HTTP timeout is
-# unlikely to be hit. Lossy/4G scenarios deliberately skip /search to avoid
-# flakiness from the search handler's ReadTimeout.
-#
-# Exit 0 if all checks pass, 1 on any failure.
+# Asserts:
+#   1. healthz on all 3 nodes,
+#   2. /status returns valid JSON,
+#   3. /torrents lists at least one torrent,
+#   4. /search on both seeds returns hits for the fixture marker
+#      "aethergram" (seeds pre-populated + auto-indexed on startup),
+#   5. /search on the leech is at least structurally reachable (we
+#      don't assert hits here — s5 is the end-to-end transfer proof).
 
 set -euo pipefail
 
-SEED1=http://localhost:17654
-SEED2=http://localhost:17655
-LEECH1=http://localhost:17656
+PROBER="sn-seed-1"
+SEEDS=("seed-1" "seed-2")
+LEECH="leech-1"
+NODES=("${SEEDS[@]}" "$LEECH")
 
-HEALTHZ_WAIT=60   # DSL profile is mild; 60 s is generous
-RETRY_INTERVAL=2
+HEALTHZ_WAIT=60
 
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
 
-echo "=== S4: home-DSL network 3-node search scenario ==="
-echo "    netem profile: home-DSL (20ms+5ms jitter, 25Mbit)"
-echo "    healthz timeout: ${HEALTHZ_WAIT}s"
-echo ""
+api_get() {
+    docker exec "$PROBER" curl -sf --max-time 5 "http://$1:7654$2" 2>/dev/null
+}
 
-# ── 1. Healthz ───────────────────────────────────────────────────────────────
-for node in "$SEED1" "$SEED2" "$LEECH1"; do
+api_post_search() {
+    docker exec "$PROBER" curl -sf --max-time 5 \
+        -X POST -H 'Content-Type: application/json' \
+        -d "{\"q\":\"aethergram\",\"limit\":5}" \
+        "http://$1:7654/search" 2>/dev/null
+}
+
+echo "=== S4: home-DSL 3-node search scenario ==="
+echo "    netem: home-DSL (20ms+5ms jitter, 25Mbit)"
+
+for name in "${NODES[@]}"; do
     deadline=$(( $(date +%s) + HEALTHZ_WAIT ))
     ok=0
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        if curl -sf "$node/healthz" > /dev/null 2>&1; then
+        if api_get "$name" "/healthz" > /dev/null 2>&1; then
             ok=1; break
         fi
-        sleep "$RETRY_INTERVAL"
+        sleep 2
     done
-    if [ "$ok" -eq 0 ]; then
-        fail "$node healthz unreachable after ${HEALTHZ_WAIT}s (home-DSL profile)"
-    fi
-    resp=$(curl -sf "$node/healthz") || fail "$node healthz final probe failed"
-    echo "$resp" | grep -q '"ok":true' || fail "$node healthz not ok: $resp"
-    pass "$node healthz (home-DSL profile)"
+    [ "$ok" -eq 1 ] || fail "$name healthz unreachable after ${HEALTHZ_WAIT}s (home-DSL)"
+    resp=$(api_get "$name" "/healthz")
+    echo "$resp" | grep -q '"ok":true' || fail "$name healthz not ok: $resp"
+    pass "$name healthz"
 done
 
-# ── 2. Status ─────────────────────────────────────────────────────────────────
-for node in "$SEED1" "$SEED2" "$LEECH1"; do
-    resp=$(curl -sf "$node/status") || fail "$node status unreachable"
-    echo "$resp" | grep -q '"local"' || fail "$node status missing 'local' field: $resp"
-    pass "$node status valid JSON"
+for name in "${NODES[@]}"; do
+    resp=$(api_get "$name" "/status") || fail "$name status unreachable"
+    echo "$resp" | grep -q '"local"' || fail "$name status missing local: $resp"
+    pass "$name status valid JSON"
 done
 
-# ── 3. Torrents ───────────────────────────────────────────────────────────────
-for node in "$SEED1" "$SEED2" "$LEECH1"; do
-    resp=$(curl -sf "$node/torrents") || fail "$node torrents unreachable"
-    echo "$resp" | grep -q '"infohash"' || fail "$node has no torrents"
-    pass "$node has torrents"
+for name in "${NODES[@]}"; do
+    resp=$(api_get "$name" "/torrents") || fail "$name torrents unreachable"
+    echo "$resp" | grep -q '"infohash"' || fail "$name has no torrents"
+    pass "$name has torrents"
 done
 
-# ── 4. Search endpoint reachable ──────────────────────────────────────────────
-# Sends a local-only query (no "swarm":true / "dht":true so no fan-out).
-# Seeds pre-populated the fixture content and auto-indexed it on
-# startup, so a search for the fixture marker ("aethergram") should
-# match both chapter files on each seed. The leech may or may not
-# have finished downloading yet (S5 is the scenario that asserts
-# transfer completion), so we only require structural validity
-# there.
-for node in "$SEED1" "$SEED2"; do
-    resp=$(curl -sf -X POST "$node/search" \
-        -H "Content-Type: application/json" \
-        -d '{"q":"aethergram","limit":5}') \
-        || fail "$node search endpoint unreachable"
-    echo "$resp" | grep -q '"local"' \
-        || fail "$node search response missing 'local' key: $resp"
-    hits=$(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('local',{}).get('hits',[]) or []))")
-    [ "$hits" -gt 0 ] || fail "$node search for 'aethergram' returned 0 hits (seed should have indexed fixture): $resp"
-    pass "$node search returned $hits hits for 'aethergram'"
+# Give the seeds a moment to finish content ingest (fixture is 3
+# KiB; extraction finishes in well under a second once the pipeline
+# starts, but we allow a small budget for startup tasks to settle
+# under the home-DSL profile).
+for i in $(seq 1 30); do
+    all_ready=1
+    for name in "${SEEDS[@]}"; do
+        stats=$(api_get "$name" "/index/stats" 2>/dev/null || echo "{}")
+        cc=$(echo "$stats" | python3 -c "import sys,json;print(json.load(sys.stdin).get('content_count',0))")
+        if [ "${cc:-0}" -lt 1 ]; then
+            all_ready=0
+        fi
+    done
+    [ "$all_ready" -eq 1 ] && break
+    sleep 1
 done
 
-# Leech: just structural check — S5 proves transfer/indexing end-to-end.
-resp=$(curl -sf -X POST "$LEECH1/search" \
-    -H "Content-Type: application/json" \
-    -d '{"q":"aethergram","limit":5}') \
-    || fail "$LEECH1 search endpoint unreachable"
-echo "$resp" | grep -q '"local"' \
-    || fail "$LEECH1 search response missing 'local' key: $resp"
-pass "$LEECH1 search endpoint reachable (structural check only)"
+for name in "${SEEDS[@]}"; do
+    resp=$(api_post_search "$name") || fail "$name /search unreachable"
+    echo "$resp" | grep -q '"local"' || fail "$name search response missing 'local': $resp"
+    hits=$(echo "$resp" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d.get('local',{}).get('hits',[]) or []))")
+    [ "${hits:-0}" -gt 0 ] || fail "$name /search for 'aethergram' returned 0 hits"
+    pass "$name search returned $hits hits for 'aethergram'"
+done
 
-echo ""
+# Leech: structural check only.
+resp=$(api_post_search "$LEECH") || fail "$LEECH /search unreachable"
+echo "$resp" | grep -q '"local"' || fail "$LEECH search missing 'local': $resp"
+pass "$LEECH search endpoint reachable (structural check only)"
+
+echo
 echo "=== S4: all checks passed (home-DSL profile) ==="
