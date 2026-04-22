@@ -17,6 +17,43 @@ engagement from actual users of the v0.x prereleases.
 
 ### Changed
 
+  - **GUI: design polish across Downloads, Search, Companion, and
+    the main menu.** Specifically:
+    - *Downloads — confirm before Remove*: the Remove toolbar
+      button, context-menu item, and Delete keyboard shortcut
+      now all trigger a `dialog.ShowConfirm` that names the
+      torrent ("Remove \"Ubuntu 24.04 Desktop\"?") and warns that
+      the action also deletes on-disk data. Removes the only
+      irreversible one-click action in the app.
+    - *Downloads — friendlier Add Magnet errors*: client-side
+      validation fires instantly for two common paste mistakes
+      (a non-magnet URL, or a magnet missing the `xt=urn:btih:`
+      parameter) with explicit guidance; engine-side errors are
+      rewritten from anacrolix's internal phrasing
+      ("engine: magnet has zero infohash") into user-facing
+      text ("the magnet URI's infohash is all zeros — it needs
+      a real 40-character btih value"). Unknown errors pass
+      through unchanged. Unit tests cover both the validator
+      and the rewriter.
+    - *Search — empty-state hint*: before any search runs, the
+      result panel now shows a centred "Search across your
+      local index, the swarm, and the DHT" prompt explaining
+      what the tab does and how to broaden the query. Hidden
+      once results arrive; re-shown when a search returns zero
+      hits from every enabled layer.
+    - *Companion — followed-publishers empty state*: the
+      Followed Publishers card previously rendered an empty
+      rectangle when you had no follows. It now overlays a
+      "No publishers followed yet. Paste a 64-char public key
+      above and press Follow to start syncing a remote Bleve
+      index." hint that hides once the first follow lands.
+    - *Main menu — discoverable shortcuts*: a proper `File`
+      menu now sits alongside `Help`, with `Add Magnet...`,
+      `Find in Search`, and `Quit` each carrying their
+      registered `desktop.CustomShortcut` so Fyne renders the
+      accelerator next to the label. The `Quit` item also sets
+      `IsQuit` so platform integrations (macOS app menu) can
+      route it correctly.
   - **GUI: consolidated four duplicated `win()` helpers into a
     single `windowForObject`** (`internal/gui/window.go`). Each
     tab (Downloads, Search, Settings, Companion) previously

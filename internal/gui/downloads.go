@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -502,16 +503,30 @@ func (dl *downloadsTab) showAddMagnetDialog() {
 			widget.NewFormItem("", indexCheck),
 		},
 		func(ok bool) {
-			if !ok || entry.Text == "" {
+			if !ok {
 				return
 			}
-			uri := entry.Text
+			uri := strings.TrimSpace(entry.Text)
+			if uri == "" {
+				dialog.ShowError(fmt.Errorf("paste a magnet URI starting with \"magnet:?xt=urn:btih:\""), dl.win())
+				return
+			}
+			// Shallow client-side validation so the user doesn't
+			// have to wait for the engine to return a cryptic
+			// error for an obviously-malformed paste.
+			if reason := validateMagnetURI(uri); reason != "" {
+				dialog.ShowError(fmt.Errorf("%s", reason), dl.win())
+				return
+			}
 			shouldIndex := indexCheck.Checked
 			go func() {
 				ih, err := dl.d.Eng.AddMagnetURI(uri)
 				if err != nil {
 					fyne.Do(func() {
-						dialog.ShowError(err, dl.win())
+						dialog.ShowError(
+							fmt.Errorf("Could not add this magnet: %s", friendlyAddErr(err)),
+							dl.win(),
+						)
 					})
 					return
 				}
@@ -527,6 +542,39 @@ func (dl *downloadsTab) showAddMagnetDialog() {
 	)
 	d.Resize(fyne.NewSize(500, 180))
 	d.Show()
+}
+
+// validateMagnetURI runs cheap checks on a pasted magnet string so
+// we can fail fast with a friendly message instead of surfacing
+// anacrolix's internal error text. Returns an empty string when
+// the URI looks acceptable; otherwise the user-facing reason.
+func validateMagnetURI(uri string) string {
+	if !strings.HasPrefix(uri, "magnet:?") {
+		return "magnet URI must start with \"magnet:?\" — did you paste a regular URL?"
+	}
+	if !strings.Contains(uri, "xt=urn:btih:") {
+		return "magnet URI is missing the \"xt=urn:btih:\" infohash parameter"
+	}
+	return ""
+}
+
+// friendlyAddErr rewrites the most common engine error strings
+// into user-facing phrasing. Unknown errors pass through.
+func friendlyAddErr(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "zero infohash"):
+		return "the magnet URI's infohash is all zeros — it needs a real 40-character btih value"
+	case strings.Contains(msg, "parse magnet"):
+		return "the magnet URI is malformed and couldn't be parsed"
+	case strings.Contains(msg, "closed"):
+		return "the engine is shutting down; try again after restart"
+	default:
+		return msg
+	}
 }
 
 func (dl *downloadsTab) showAddFileDialog() {
@@ -614,14 +662,45 @@ func (dl *downloadsTab) removeSelected() {
 	if ih == "" {
 		return
 	}
-	go func() {
-		_ = dl.d.Eng.RemoveTorrent(ih)
-		fyne.Do(func() {
-			dl.mu.Lock()
-			dl.selected = -1
-			dl.mu.Unlock()
-		})
-	}()
+
+	// Remove is destructive — no undo, and on-disk files are
+	// deleted along with the torrent entry. Show a confirm
+	// dialog naming the torrent so the user can cancel if they
+	// hit Delete (or the Remove toolbar button) by mistake.
+	// Also applies to the Delete keyboard shortcut path (see
+	// app.go installShortcuts), which calls this method.
+	var name string
+	dl.mu.RLock()
+	for _, s := range dl.snaps {
+		if s.InfoHash == ih {
+			name = s.Name
+			break
+		}
+	}
+	dl.mu.RUnlock()
+	label := name
+	if label == "" {
+		label = ih[:16] + "..."
+	}
+
+	dialog.ShowConfirm(
+		"Remove torrent?",
+		fmt.Sprintf("Remove \"%s\" from the list?\n\nThis also deletes any downloaded data on disk and cannot be undone.", label),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			go func() {
+				_ = dl.d.Eng.RemoveTorrent(ih)
+				fyne.Do(func() {
+					dl.mu.Lock()
+					dl.selected = -1
+					dl.mu.Unlock()
+				})
+			}()
+		},
+		dl.win(),
+	)
 }
 
 func (dl *downloadsTab) selectedInfoHash() string {

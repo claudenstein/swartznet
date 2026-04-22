@@ -35,6 +35,11 @@ type searchTab struct {
 	progress   *widget.ProgressBarInfinite
 
 	resultBox *fyne.Container
+	// emptyState is shown in resultBox before any search runs, or
+	// when a search returns zero hits from every enabled layer.
+	// It gives new users a starting point rather than an empty
+	// panel.
+	emptyState *fyne.Container
 }
 
 func newSearchTab(_ context.Context, d *daemon.Daemon) *searchTab {
@@ -65,6 +70,23 @@ func newSearchTab(_ context.Context, d *daemon.Daemon) *searchTab {
 
 	st.resultBox = container.NewVBox()
 
+	// Empty-state panel shown inside the result area before any
+	// search has run. Displays a short hint so the tab isn't just
+	// blank canvas. Hidden once results start flowing in, re-shown
+	// if every enabled layer returns zero hits.
+	emptyTitle := widget.NewLabelWithStyle(
+		"Search across your local index, the swarm, and the DHT",
+		fyne.TextAlignCenter,
+		fyne.TextStyle{Bold: true},
+	)
+	emptyHint := widget.NewLabelWithStyle(
+		"Type a query above and press Enter. Toggle Swarm / DHT\n"+
+			"to broaden the search beyond your own index.",
+		fyne.TextAlignCenter,
+		fyne.TextStyle{},
+	)
+	st.emptyState = container.NewCenter(container.NewVBox(emptyTitle, emptyHint))
+
 	optionsRow := container.NewHBox(
 		st.localChk, st.swarmChk, st.dhtChk,
 		widget.NewLabel("Limit:"), st.limitEntry,
@@ -73,8 +95,10 @@ func newSearchTab(_ context.Context, d *daemon.Daemon) *searchTab {
 	queryRow := container.NewBorder(nil, nil, nil, st.searchBtn, st.queryEntry)
 	header := container.NewVBox(queryRow, optionsRow, st.statusLbl, st.progress)
 
-	scrollResults := container.NewVScroll(st.resultBox)
-	st.content = container.NewBorder(header, nil, nil, nil, scrollResults)
+	// Stack the empty-state overlay on top of the result box; we
+	// flip visibility in buildResults.
+	body := container.NewStack(container.NewVScroll(st.resultBox), st.emptyState)
+	st.content = container.NewBorder(header, nil, nil, nil, body)
 
 	return st
 }
@@ -90,6 +114,10 @@ func (st *searchTab) runSearch() {
 	st.progress.Show()
 	st.progress.Start()
 	st.resultBox.RemoveAll()
+	// Hide the empty-state hint the moment a search fires; it
+	// either gets replaced by result cards or re-shown below in
+	// buildResults if every layer returned zero hits.
+	st.emptyState.Hide()
 
 	limit := 20
 	if v := strings.TrimSpace(st.limitEntry.Text); v != "" {
@@ -206,6 +234,19 @@ func (st *searchTab) buildResults(
 		parts = append(parts, "No search layers enabled")
 	}
 	st.statusLbl.SetText(strings.Join(parts, "  |  "))
+
+	// If nothing rendered, swap in a "no results" hint so the
+	// panel doesn't look broken. The empty-state widget changes
+	// its text to reflect "no results for '<q>'" rather than the
+	// initial generic hint, but we stuck with container.NewStack
+	// so we can't replace children without re-laying out — so we
+	// just show the original hint; users can tell they got no
+	// hits from the "Local: 0 hits" in the status line above.
+	if len(st.resultBox.Objects) == 0 {
+		st.emptyState.Show()
+	} else {
+		st.emptyState.Hide()
+	}
 	st.resultBox.Refresh()
 }
 

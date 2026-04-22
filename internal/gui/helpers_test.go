@@ -308,6 +308,75 @@ func TestSwartzThemeColours(t *testing.T) {
 	}
 }
 
+// --- validateMagnetURI ---
+
+func TestValidateMagnetURI(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in          string
+		wantReason  string
+		wantInvalid bool
+	}{
+		{
+			in:          "https://example.com/foo.torrent",
+			wantInvalid: true,
+			wantReason:  "magnet URI must start with \"magnet:?\" — did you paste a regular URL?",
+		},
+		{
+			in:          "magnet:?dn=foo",
+			wantInvalid: true,
+			wantReason:  "magnet URI is missing the \"xt=urn:btih:\" infohash parameter",
+		},
+		{
+			in:          "magnet:?xt=urn:btih:c4405d27af8462e3d5e03c30c542f66e170fe4f8",
+			wantInvalid: false,
+		},
+		{
+			in:          "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=foo",
+			wantInvalid: false,
+		},
+	}
+	for _, c := range cases {
+		got := validateMagnetURI(c.in)
+		invalid := got != ""
+		if invalid != c.wantInvalid {
+			t.Errorf("validateMagnetURI(%q) invalid=%v, want %v (reason=%q)", c.in, invalid, c.wantInvalid, got)
+			continue
+		}
+		if c.wantInvalid && got != c.wantReason {
+			t.Errorf("validateMagnetURI(%q) reason=%q, want %q", c.in, got, c.wantReason)
+		}
+	}
+}
+
+// --- friendlyAddErr ---
+
+func TestFriendlyAddErr(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"engine: magnet has zero infohash (caller must provide ...)", "the magnet URI's infohash is all zeros — it needs a real 40-character btih value"},
+		{"engine: parse magnet: cannot decode", "the magnet URI is malformed and couldn't be parsed"},
+		{"engine: closed", "the engine is shutting down; try again after restart"},
+		{"some brand new error", "some brand new error"},
+	}
+	for _, c := range cases {
+		if got := friendlyAddErr(errString(c.in)); got != c.want {
+			t.Errorf("friendlyAddErr(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := friendlyAddErr(nil); got != "unknown error" {
+		t.Errorf("friendlyAddErr(nil) = %q, want \"unknown error\"", got)
+	}
+}
+
+// errString is a tiny error type for table-driven tests.
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
 // --- windowForObject ---
 
 // windowForObject must tolerate nil / no-app cases without

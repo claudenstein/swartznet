@@ -92,12 +92,49 @@ func New(d *daemon.Daemon, version string) *App {
 
 	guiApp.installShortcuts()
 
-	// Main menu: About + Quit.
+	// Main menu with shortcut hints so the user can discover
+	// bindings without poking around. The handlers intentionally
+	// duplicate the canvas-shortcut handlers installed above —
+	// both the accelerator and the menu item trigger the same
+	// action.
+	ctrl := fyne.KeyModifierControl
+
+	addMagnetItem := fyne.NewMenuItem("Add Magnet...", func() {
+		tabs.SelectIndex(0)
+		if guiApp.dl != nil {
+			guiApp.dl.showAddMagnetDialog()
+		}
+	})
+	addMagnetItem.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: ctrl}
+
+	findItem := fyne.NewMenuItem("Find in Search", func() {
+		tabs.SelectIndex(1)
+		if guiApp.sr != nil && guiApp.sr.queryEntry != nil {
+			win.Canvas().Focus(guiApp.sr.queryEntry)
+		}
+	})
+	findItem.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: ctrl}
+
+	quitItem := fyne.NewMenuItem("Quit", func() {
+		cancel()
+		a.Quit()
+	})
+	quitItem.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyQ, Modifier: ctrl}
+	quitItem.IsQuit = true
+
+	fileMenu := fyne.NewMenu("File",
+		addMagnetItem,
+		fyne.NewMenuItemSeparator(),
+		findItem,
+		fyne.NewMenuItemSeparator(),
+		quitItem,
+	)
+
 	aboutItem := fyne.NewMenuItem("About SwartzNet", func() {
 		guiApp.showAbout()
 	})
 	helpMenu := fyne.NewMenu("Help", aboutItem)
-	win.SetMainMenu(fyne.NewMainMenu(helpMenu))
+	win.SetMainMenu(fyne.NewMainMenu(fileMenu, helpMenu))
 
 	win.SetContent(tabs)
 
