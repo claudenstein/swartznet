@@ -1,0 +1,238 @@
+# SwartzNet Layer-B testbed — 6-node small-swarm scenarios.
+#
+# This file is the companion to docker-compose.yml. That file spins
+# up a minimal 3-node topology (2 seeds + 1 leech) suitable for
+# smoke-testing the deployment plumbing. This file spins up a
+# 6-node mesh (2 seeds + 4 leeches) so scenarios can exercise:
+#
+#   - Real swarm dynamics: 4 leeches compete over 2 seeds' upload
+#     slots and are expected to learn about each other (BEP-11
+#     PEX kicks in once each leech has ≥ 1 peer). Before PEX, every
+#     leech is bootstrapped with x.pe= hints to every other node,
+#     so the swarm is fully connected from t=0.
+#   - Swarm-search (Layer-S `sn_search` BEP-10 extension) fan-out:
+#     one leech queries with swarm:true, the two seeds answer with
+#     local hits for the fixture marker ("aethergram"), and the
+#     swarm response aggregates them. Scenario s7 asserts this.
+#   - Piece transfer at scale: all 4 leeches must reach progress=1.0
+#     within the scenario budget; their on-disk bytes must match
+#     the fixture. Scenario s6 asserts this.
+#
+# Usage:
+#   scripts/run-testbed.sh s6     # 4-leech piece transfer
+#   scripts/run-testbed.sh s7     # swarm-search fan-out
+#   scripts/run-testbed.sh swarm  # alias for s6+s7 (one compose lifecycle)
+#
+# Ports on localhost (distinct from docker-compose.yml's 17654-6):
+#   17664  seed-1   17667  leech-2
+#   17665  seed-2   17668  leech-3
+#   17666  leech-1  17669  leech-4
+# (The scenarios themselves do not depend on these host ports —
+# they probe the API via `docker exec curl` over the docker bridge.
+# Published ports are kept for manual/GUI inspection.)
+#
+# IMPORTANT — static IPs in x.pe= hints:
+#   BEP-9 specifies the `x.pe=` magnet parameter as IP:port. We
+#   assign a fixed IPAM subnet (172.28.0.0/24) with static IPv4
+#   addresses so the hints resolve without DNS. Hostnames
+#   (seed-1:42069 etc.) *do* resolve inside the bridge via Docker's
+#   embedded DNS, but anacrolix feeds the raw string into its peer
+#   list as `StringAddr` and only lazily resolves at dial time —
+#   which has been observed to silently drop non-dotted-quad peer
+#   hints. Static IPs eliminate that ambiguity and give scenarios
+#   stable peer addresses to assert against.
+#
+# All nodes run --regtest --no-dht (publisher timings accelerated,
+# no mainline DHT traffic). Peer discovery is bootstrapped via
+# x.pe= hints to every other node; PEX (ut_pex, BEP-11) then fills
+# in any leech that lost a hint.
+
+services:
+  seed-1:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-swarm-seed-1
+    hostname: seed-1
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=seed
+    ports:
+      - "17664:7654"
+    volumes:
+      - ./netem:/netem:ro
+      # Override the baked-in 3-KiB testbed fixture with the
+      # 4-MiB swarm fixture. See scripts/gen-swarm-fixture.sh.
+      # Transfer-in-progress peer observation needs the larger
+      # fixture to keep the transfer window open long enough.
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      /fixture/fixture.torrent
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.2
+
+  seed-2:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-swarm-seed-2
+    hostname: seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=seed
+    ports:
+      - "17665:7654"
+    volumes:
+      - ./netem:/netem:ro
+      # Override the baked-in 3-KiB testbed fixture with the
+      # 4-MiB swarm fixture. See scripts/gen-swarm-fixture.sh.
+      # Transfer-in-progress peer observation needs the larger
+      # fixture to keep the transfer window open long enough.
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      /fixture/fixture.torrent
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.3
+
+  leech-1:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-swarm-leech-1
+    hostname: leech-1
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17666:7654"
+    volumes:
+      - ./netem:/netem:ro
+      # Override the baked-in 3-KiB testbed fixture with the
+      # 4-MiB swarm fixture. See scripts/gen-swarm-fixture.sh.
+      # Transfer-in-progress peer observation needs the larger
+      # fixture to keep the transfer window open long enough.
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.28.0.2:42069&x.pe=172.28.0.3:42069&x.pe=172.28.0.5:42069&x.pe=172.28.0.6:42069&x.pe=172.28.0.7:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.4
+
+  leech-2:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-swarm-leech-2
+    hostname: leech-2
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17667:7654"
+    volumes:
+      - ./netem:/netem:ro
+      # Override the baked-in 3-KiB testbed fixture with the
+      # 4-MiB swarm fixture. See scripts/gen-swarm-fixture.sh.
+      # Transfer-in-progress peer observation needs the larger
+      # fixture to keep the transfer window open long enough.
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.28.0.2:42069&x.pe=172.28.0.3:42069&x.pe=172.28.0.4:42069&x.pe=172.28.0.6:42069&x.pe=172.28.0.7:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.5
+
+  leech-3:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-swarm-leech-3
+    hostname: leech-3
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17668:7654"
+    volumes:
+      - ./netem:/netem:ro
+      # Override the baked-in 3-KiB testbed fixture with the
+      # 4-MiB swarm fixture. See scripts/gen-swarm-fixture.sh.
+      # Transfer-in-progress peer observation needs the larger
+      # fixture to keep the transfer window open long enough.
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.28.0.2:42069&x.pe=172.28.0.3:42069&x.pe=172.28.0.4:42069&x.pe=172.28.0.5:42069&x.pe=172.28.0.7:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.6
+
+  leech-4:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-swarm-leech-4
+    hostname: leech-4
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17669:7654"
+    volumes:
+      - ./netem:/netem:ro
+      # Override the baked-in 3-KiB testbed fixture with the
+      # 4-MiB swarm fixture. See scripts/gen-swarm-fixture.sh.
+      # Transfer-in-progress peer observation needs the larger
+      # fixture to keep the transfer window open long enough.
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --no-dht
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.28.0.2:42069&x.pe=172.28.0.3:42069&x.pe=172.28.0.4:42069&x.pe=172.28.0.5:42069&x.pe=172.28.0.6:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.28.0.7
+
+networks:
+  swartznet:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/24
+          gateway: 172.28.0.1

@@ -142,6 +142,17 @@ func mimeFromPath(path string) string {
 // package gets wrong (or doesn't know). Entries here take precedence over
 // mime.TypeByExtension.
 var extTypes = map[string]string{
+	// Plain text — not in Go's builtin mime map and therefore
+	// empty on systems without /etc/mime.types (Alpine, scratch
+	// containers, minimal base images). Without this override,
+	// every .txt file silently skips extraction, which the Layer-B
+	// Docker testbed hit head-on because the containers run
+	// Alpine. Keep this list as the authoritative fallback for
+	// common text suffixes so the indexer behaves the same across
+	// deployment targets.
+	".txt":      "text/plain",
+	".text":     "text/plain",
+	".md":       "text/markdown",
 	".srt":      "application/x-subrip",
 	".vtt":      "text/vtt",
 	".ass":      "text/x-ssa",

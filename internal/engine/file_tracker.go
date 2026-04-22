@@ -36,7 +36,17 @@ type fileTracker struct {
 
 	mu          sync.Mutex
 	subscribers []chan FileCompleteEvent
-	closed      bool
+	// doneReplay is the replay buffer for subscribers that register
+	// after run() has already dispatched events for files that were
+	// complete at startup. Without it, ingestFileEvents (spawned as
+	// a separate goroutine from registerLocked) can race the
+	// fileTracker goroutine on a seed whose files are all complete
+	// on-disk at add time: the initial dispatch fires into an empty
+	// subscriber list, and the pipeline never sees the file-complete
+	// events. The replay bounds itself to the torrent's file count,
+	// so memory is O(files), not O(events).
+	doneReplay []FileCompleteEvent
+	closed     bool
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -75,6 +85,25 @@ func (ft *fileTracker) Subscribe() <-chan FileCompleteEvent {
 		ft.mu.Unlock()
 		close(ch)
 		return ch
+	}
+	// Replay events for files already dispatched. If the replay
+	// exceeds the channel buffer, the overflow is dropped — but
+	// the buffer is fileTrackerSubBuf (64), which exceeds any
+	// realistic file-count-at-startup case for content torrents.
+	// Larger torrents that exceed the buffer would simply need
+	// a bigger fileTrackerSubBuf; we don't allocate a side channel
+	// because the only current consumer (the ingest pipeline) has
+	// its own input buffer that would absorb any backlog.
+	for _, ev := range ft.doneReplay {
+		select {
+		case ch <- ev:
+		default:
+			ft.log.Warn("file_tracker.replay.dropped",
+				"info_hash", ft.ihHex,
+				"file_index", ev.FileIndex,
+				"path", ev.Path,
+			)
+		}
 	}
 	ft.subscribers = append(ft.subscribers, ch)
 	ft.mu.Unlock()
@@ -190,6 +219,9 @@ func (ft *fileTracker) dispatch(span fileSpan, done map[int]bool) {
 
 	ft.mu.Lock()
 	subs := ft.subscribers
+	// Record the event for replay to late subscribers. See the
+	// doneReplay comment on the struct for why this is needed.
+	ft.doneReplay = append(ft.doneReplay, ev)
 	ft.mu.Unlock()
 
 	ft.log.Info("file.complete",

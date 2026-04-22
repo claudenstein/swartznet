@@ -5,14 +5,19 @@
 #   scripts/run-testbed.sh <scenario>
 #   scripts/run-testbed.sh all
 #
-# Scenario names: s1  s2  s3  s4  s5  all
+# Scenario names: s1  s2  s3  s4  s5  s6  s7  swarm  all
 #
-#   s1  — healthy baseline (no netem)
-#   s2  — lossy profile (5% packet loss, 150ms RTT)
-#   s3  — mobile-4G profile (40ms+20ms jitter, 10Mbit)
-#   s4  — home-DSL profile (20ms+5ms jitter, 25Mbit)
-#   s5  — end-to-end piece transfer (no netem, real fixture content)
-#   all — run s1 through s5 in sequence
+#   s1     — healthy baseline (no netem, 3-node stack)
+#   s2     — lossy profile (5% packet loss, 150ms RTT)
+#   s3     — mobile-4G profile (40ms+20ms jitter, 10Mbit)
+#   s4     — home-DSL profile (20ms+5ms jitter, 25Mbit)
+#   s5     — end-to-end piece transfer (no netem, real fixture content)
+#   s6     — 6-node swarm piece transfer at scale (2 seeds + 4 leeches,
+#            uses docker-compose.swarm.yml, separate ports 17664-17669)
+#   s7     — Layer-S sn_search fan-out across the 6-node swarm
+#   swarm  — alias: run s6 then s7 against a single long-lived 6-node
+#            stack (avoids paying the compose up/down cost twice)
+#   all    — run s1..s5 (3-node) then swarm (6-node)
 #
 # Each scenario:
 #   1. Brings up the 3-node docker compose stack with the correct NETEM_PROFILE.
@@ -41,6 +46,7 @@ TESTBED_DIR="$REPO_ROOT/testbed"
 RESULTS_DIR="$TESTBED_DIR/results"
 SCENARIOS_DIR="$TESTBED_DIR/scenarios"
 COMPOSE_FILE="$TESTBED_DIR/docker-compose.yml"
+COMPOSE_SWARM_FILE="$TESTBED_DIR/docker-compose.swarm.yml"
 BINARY="$REPO_ROOT/dist/swartznet-testbed-linux-amd64"
 GO="${GO:-/usr/local/go/bin/go}"
 
@@ -60,8 +66,8 @@ SCENARIO="$1"
 
 # Validate scenario argument.
 case "$SCENARIO" in
-    s1|s2|s3|s4|s5|all) ;;
-    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 all" ;;
+    s1|s2|s3|s4|s5|s6|s7|swarm|all) ;;
+    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 swarm all" ;;
 esac
 
 # Check docker compose v2 is available.
@@ -128,6 +134,24 @@ scenario_netem_profile() {
         s3) echo "/netem/mobile-4g.sh" ;;
         s4) echo "/netem/home-dsl.sh" ;;
         s5) echo "" ;;                         # piece transfer, no netem
+        s6|s7) echo "" ;;                      # 6-node swarm, no netem
+    esac
+}
+
+# Which compose file and container set does this scenario use?
+scenario_compose_file() {
+    case "$1" in
+        s1|s2|s3|s4|s5) echo "$COMPOSE_FILE" ;;
+        s6|s7)          echo "$COMPOSE_SWARM_FILE" ;;
+    esac
+}
+
+scenario_containers() {
+    case "$1" in
+        s1|s2|s3|s4|s5)
+            echo "sn-seed-1 sn-seed-2 sn-leech-1" ;;
+        s6|s7)
+            echo "sn-swarm-seed-1 sn-swarm-seed-2 sn-swarm-leech-1 sn-swarm-leech-2 sn-swarm-leech-3 sn-swarm-leech-4" ;;
     esac
 }
 
@@ -138,26 +162,39 @@ scenario_script() {
 # ── Run one scenario ──────────────────────────────────────────────────────────
 
 run_scenario() {
+    # Args:  sc=<scenario-name>  [extra_scripts=<space-separated extra scripts
+    #        to run against the same live stack after the primary one>]
     local sc="$1"
+    local -a EXTRA_SCRIPTS=()
+    if [[ $# -gt 1 ]]; then
+        # Shift past sc; remaining args are extra scenario names whose
+        # scripts run against the same stack. Used by the `swarm` alias
+        # to fold s6+s7 into one compose lifecycle.
+        shift
+        EXTRA_SCRIPTS=("$@")
+    fi
+
     local ts
     ts=$(date +%Y%m%d-%H%M%S)
     local logfile="$RESULTS_DIR/$sc-$ts.log"
     local netem_profile
     netem_profile=$(scenario_netem_profile "$sc")
+    local compose_file
+    compose_file=$(scenario_compose_file "$sc")
+    [[ -f "$compose_file" ]] || fail "Compose file not found for $sc: $compose_file"
+
     local script_glob="$SCENARIOS_DIR/${sc}-*.sh"
     local script
     script=$(echo $script_glob)   # expand glob (one match expected)
-
     if [[ ! -f "$script" ]]; then
         fail "Scenario script not found: $script_glob"
     fi
 
     log "=== Running $sc (log: $logfile) ==="
+    log "    compose: $compose_file"
     [[ -n "$netem_profile" ]] && log "    netem: $netem_profile" || log "    netem: none"
 
     # Tear down the stack on EXIT (success or failure).
-    # Using a flag file instead of a variable so the trap fires correctly
-    # even if the subshell approach changes scope.
     local flag_file
     flag_file=$(mktemp /tmp/sn-teardown-XXXXXX)
     rm -f "$flag_file"   # file absent = teardown not yet done
@@ -167,7 +204,7 @@ run_scenario() {
             touch "$flag_file"
             log "Tearing down docker compose stack..."
             NETEM_PROFILE="$netem_profile" \
-                docker compose -f "$COMPOSE_FILE" down -v 2>&1 | \
+                docker compose -f "$compose_file" down -v 2>&1 | \
                 tee -a "$logfile" || true
         fi
     }
@@ -176,20 +213,27 @@ run_scenario() {
     # Write scenario header to log.
     {
         echo "=== run-testbed: scenario=$sc ts=$ts ==="
+        echo "    compose=$compose_file"
         echo "    netem=$netem_profile"
+        if [[ ${#EXTRA_SCRIPTS[@]} -gt 0 ]]; then
+            echo "    extra scenarios against same stack: ${EXTRA_SCRIPTS[*]}"
+        fi
         echo ""
     } | tee "$logfile"
 
     # Start the stack.
     log "Starting docker compose (netem=${netem_profile:-none})..."
     NETEM_PROFILE="$netem_profile" \
-        docker compose -f "$COMPOSE_FILE" up --build -d 2>&1 | tee -a "$logfile"
+        docker compose -f "$compose_file" up --build -d 2>&1 | tee -a "$logfile"
 
-    # Wait for all three containers to be in "running" state.
-    local CONTAINERS=("sn-seed-1" "sn-seed-2" "sn-leech-1")
+    # Wait for all containers to be in "running" state.
+    local containers_str
+    containers_str=$(scenario_containers "$sc")
+    # shellcheck disable=SC2206
+    local CONTAINERS=($containers_str)
     local WAIT_SECS=120
     local deadline=$(( $(date +%s) + WAIT_SECS ))
-    log "Waiting up to ${WAIT_SECS}s for all containers to be running..."
+    log "Waiting up to ${WAIT_SECS}s for ${#CONTAINERS[@]} containers to be running..."
     while true; do
         local all_running=1
         for c in "${CONTAINERS[@]}"; do
@@ -201,13 +245,13 @@ run_scenario() {
             fi
         done
         if [[ "$all_running" -eq 1 ]]; then
-            log "All containers running."
+            log "All ${#CONTAINERS[@]} containers running."
             break
         fi
         if [[ "$(date +%s)" -ge "$deadline" ]]; then
             log "ERROR: Containers not running after ${WAIT_SECS}s" | tee -a "$logfile"
-            docker compose -f "$COMPOSE_FILE" ps 2>&1 | tee -a "$logfile"
-            docker compose -f "$COMPOSE_FILE" logs 2>&1 | tail -50 | tee -a "$logfile"
+            docker compose -f "$compose_file" ps 2>&1 | tee -a "$logfile"
+            docker compose -f "$compose_file" logs 2>&1 | tail -50 | tee -a "$logfile"
             _do_teardown
             trap - EXIT
             rm -f "$flag_file"
@@ -216,10 +260,29 @@ run_scenario() {
         sleep 2
     done
 
-    # Run the assertion script.
+    # Run the primary assertion script.
     log "Running assertion script: $script"
     local assertion_exit=0
     bash "$script" 2>&1 | tee -a "$logfile" || assertion_exit=$?
+
+    # Run any extra scripts against the same live stack (used by the
+    # swarm alias so s6+s7 share one `compose up`). If the primary
+    # script failed we still try the extras so the log captures
+    # everything, but the final exit is the max of all codes.
+    for extra in "${EXTRA_SCRIPTS[@]}"; do
+        local extra_script
+        extra_script=$(echo "$SCENARIOS_DIR/${extra}-"*".sh")
+        if [[ ! -f "$extra_script" ]]; then
+            log "WARN: extra scenario script not found: $extra_script"
+            continue
+        fi
+        log "Running extra assertion script (same stack): $extra_script"
+        local extra_exit=0
+        bash "$extra_script" 2>&1 | tee -a "$logfile" || extra_exit=$?
+        if [[ "$extra_exit" -ne 0 ]]; then
+            assertion_exit="$extra_exit"
+        fi
+    done
 
     _do_teardown
     trap - EXIT
@@ -231,11 +294,11 @@ run_scenario() {
 # ── Main dispatch ─────────────────────────────────────────────────────────────
 
 SCENARIOS_TO_RUN=()
-if [[ "$SCENARIO" == "all" ]]; then
-    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5)
-else
-    SCENARIOS_TO_RUN=("$SCENARIO")
-fi
+case "$SCENARIO" in
+    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm) ;;
+    swarm)  SCENARIOS_TO_RUN=(swarm) ;;
+    *)      SCENARIOS_TO_RUN=("$SCENARIO") ;;
+esac
 
 declare -A RESULTS
 OVERALL_EXIT=0
@@ -243,6 +306,23 @@ WALL_START=$(date +%s)
 
 for sc in "${SCENARIOS_TO_RUN[@]}"; do
     sc_start=$(date +%s)
+    # `swarm` is an alias: run s6's compose stack and execute the s6
+    # and s7 assertion scripts back-to-back against it.
+    if [[ "$sc" == "swarm" ]]; then
+        if run_scenario "s6" "s7"; then
+            RESULTS["swarm"]="PASS"
+            log "swarm (s6+s7): PASS ($(( $(date +%s) - sc_start ))s)"
+        else
+            RESULTS["swarm"]="FAIL"
+            OVERALL_EXIT=1
+            log "swarm (s6+s7): FAIL ($(( $(date +%s) - sc_start ))s)"
+        fi
+        # Settle before next scenario.
+        if [[ "${#SCENARIOS_TO_RUN[@]}" -gt 1 ]]; then
+            sleep 3
+        fi
+        continue
+    fi
     if run_scenario "$sc"; then
         RESULTS["$sc"]="PASS"
         log "$sc: PASS ($(( $(date +%s) - sc_start ))s)"

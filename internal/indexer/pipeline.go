@@ -163,6 +163,13 @@ func (p *Pipeline) handle(in FileInput) {
 	}
 	ex, mime := extractors.Dispatch(candidate)
 	if ex == nil {
+		// Debug-level only: "no extractor" is the common case on
+		// mixed-media torrents (mp3/video/etc.) and we don't want
+		// to log every file. Tests and operators can crank the
+		// logger to debug if they need to see why a specific path
+		// was skipped.
+		p.log.Debug("pipeline.no_extractor",
+			"path", in.Path, "mime", mime, "size", in.Size)
 		counters.skipped.Add(1)
 		return
 	}
