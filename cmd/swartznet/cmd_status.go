@@ -84,6 +84,16 @@ func emitStatusText(w io.Writer, s *httpapi.StatusResponse) int {
 	fmt.Fprintf(w, "  capable peers:  %d\n", s.Swarm.CapablePeers)
 	fmt.Fprintln(w, "")
 
+	// DHT block is omitted from the response when the daemon
+	// started with DisableDHT=true; nil here is the explicit
+	// "DHT disabled" state.
+	if s.DHT != nil {
+		fmt.Fprintln(w, "DHT routing table:")
+		fmt.Fprintf(w, "  good nodes:     %d\n", s.DHT.GoodNodes)
+		fmt.Fprintf(w, "  total nodes:    %d\n", s.DHT.Nodes)
+		fmt.Fprintln(w, "")
+	}
+
 	fmt.Fprintln(w, "DHT publisher (Layer D, BEP-44 keyword index):")
 	if s.Publisher.PubKey != "" {
 		fmt.Fprintf(w, "  pubkey:         %s\n", s.Publisher.PubKey)
