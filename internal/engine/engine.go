@@ -413,9 +413,19 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	tc := torrent.NewDefaultClientConfig()
 	tc.DataDir = cfg.DataDir
 	tc.ListenPort = cfg.ListenPort
+	if cfg.ListenHost != "" {
+		host := cfg.ListenHost
+		tc.ListenHost = func(string) string { return host }
+	}
 	tc.Seed = cfg.Seed
 	tc.NoUpload = cfg.NoUpload
 	tc.NoDHT = cfg.DisableDHT
+	// DisableIPv6 folds straight through to the torrent client.
+	// See internal/config/config.go: the harness flips it to
+	// force a single address family so cross-node DHT
+	// traversal doesn't accumulate [::ffff:v4]-style entries
+	// that puts can't round-trip.
+	tc.DisableIPv6 = cfg.DisableIPv6
 	if cfg.HTTPUserAgent != "" {
 		tc.HTTPUserAgent = cfg.HTTPUserAgent
 	}
@@ -1991,6 +2001,25 @@ func (e *Engine) DHTAddr() net.Addr {
 	}
 	return srv.Addr()
 }
+
+// DHTRoutingTableSize returns (good, total) — the number of good
+// nodes and the total number of nodes in the engine's DHT
+// routing table. Returns (0, 0) if DHT is disabled. Exposed for
+// tests that need to tell "the put/get traversal found no
+// neighbours" from "the traversal fanned out but nothing
+// answered". In production this is effectively dead code;
+// keeping it exported keeps the surface area wide enough that
+// a diagnostic dashboard or status endpoint can surface DHT
+// health without reaching for internal types.
+func (e *Engine) DHTRoutingTableSize() (good int, total int) {
+	srv := e.dhtServer()
+	if srv == nil {
+		return 0, 0
+	}
+	s := srv.Stats()
+	return s.GoodNodes, s.Nodes
+}
+
 
 // HandleByInfoHash looks up a *Handle by 20-byte infohash.
 // Returns an error if the infohash is not currently registered

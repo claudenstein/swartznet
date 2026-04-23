@@ -25,6 +25,20 @@ type Config struct {
 	// multi-instance local runs).
 	ListenPort int
 
+	// ListenHost, when non-empty, binds the BitTorrent peer-wire
+	// and DHT listeners to the given interface (e.g. "127.0.0.1"
+	// to stay on loopback). Empty (the default) delegates to
+	// anacrolix/torrent's default, which is "" → 0.0.0.0.
+	//
+	// Operators rarely need to touch this; the in-process testlab
+	// harness sets it to "127.0.0.1" so the DHT's BEP-44 tokens
+	// (which are keyed on the query's source IP) stay consistent
+	// across a multi-node cluster. Without it the OS may pick
+	// different source IPs for sibling queries and token
+	// validation silently rejects the put — which is how the
+	// Layer-B s12 scenario's end-to-end put/get timed out.
+	ListenHost string
+
 	// Seed, when true, means the Engine will continue seeding torrents after
 	// download completes (the default behaviour of any well-behaved client).
 	Seed bool
@@ -58,6 +72,19 @@ type Config struct {
 	// host:port string; the engine resolves them at DHT-server
 	// configuration time. Default: nil.
 	DHTBootstrapAddrs []string
+
+	// DisableIPv6, when true, prevents the embedded torrent client
+	// from opening udp6 / tcp6 listeners. The client otherwise
+	// spins up both v4 and v6 sockets; for the embedded DHT
+	// that becomes two DHT servers per node, and the Engine's
+	// Publisher only drives one of them. Cross-node traversals
+	// end up with IPv4-mapped-IPv6 addresses like
+	// [::ffff:127.0.0.1]:X in their routing tables, which puts
+	// cannot round-trip. Flipping this keeps the harness on a
+	// single address family end-to-end. Also useful on networks
+	// that have no functional IPv6 path (many corporate LANs,
+	// most docker bridges). Default: false.
+	DisableIPv6 bool
 
 	// DHTInsecure, when true, disables BEP-42 node-ID security
 	// enforcement on the anacrolix DHT server (maps to

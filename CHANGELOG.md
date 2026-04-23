@@ -15,6 +15,43 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Added
+
+  - **Layer-A DHT cluster harness** (`internal/testlab.NewDHTCluster`).
+    In-process multi-node engine harness with the mainline DHT
+    enabled and every node chain-bootstrapped to its siblings
+    on loopback. Mirrors testbed scenario s12's topology (2
+    seeds + N leeches, `NoSecurity=true`, explicit
+    `DHTBootstrapAddrs`) without any docker dependency. Purpose:
+    isolate whether a Layer-D failure lives in the engine's DHT
+    wiring or in the containerised-network path. First
+    application: `internal/testlab.TestLayerDDHTClusterRoundTrip`
+    and `TestDHTClusterPointerRoundTrip` (both `t.Skip`'d today)
+    reproduce the s12 BEP-44 get-returns-"value not found" bug
+    in pure Go — proof the failure is NOT docker-specific.
+  - **Engine DHT introspection**: `Engine.DHTRoutingTableSize()
+    returns (good, total)` exposes the embedded anacrolix DHT
+    server's routing-table occupancy. Intended for diagnostic
+    dashboards and for tests that need to distinguish "put
+    traversal found no neighbours" from "put traversal fanned
+    out but nothing answered" — a load-bearing distinction when
+    debugging the s12 family of failures.
+  - **`config.ListenHost`**: when non-empty, binds every
+    BitTorrent/DHT listener to the given interface (e.g.
+    `127.0.0.1`). Default empty = anacrolix's default =
+    `0.0.0.0`. Operators rarely need this, but the `testlab`
+    DHT cluster sets it to `127.0.0.1` so the DHT's BEP-44
+    token validator (which SHA1s the query's source IP) sees a
+    deterministic source across sibling queries.
+  - **`config.DisableIPv6`**: passes straight through to
+    `torrent.ClientConfig.DisableIPv6`. Forces the embedded
+    client onto a single address family, avoiding the latent
+    "two DHT servers per node, Publisher drives only one" trap
+    and the cross-family `[::ffff:v4]` routing-table entries
+    that can't round-trip through a v4-only Put. Useful for
+    any deployment on a network without functional IPv6
+    (corporate LANs, most docker bridges).
+
 ### Changed
 
   - **GUI: more design polish — About dialog + Add Magnet

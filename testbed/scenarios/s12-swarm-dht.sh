@@ -35,15 +35,26 @@
 #     leech returns "value not found" for every indexer
 #     pubkey. A 6-node in-process anacrolix DHT with the same
 #     bootstrap topology + NoSecurity=true PASSES the same
-#     put-then-get in <1s (dht6test_main.go, scratch), so
-#     this is not an anacrolix limitation but something
-#     specific to the docker bridge path — possibly related
-#     to IPv4-mapped-IPv6 addressing (puts target
-#     [::ffff:172.29.x.y]), to how the DHT server's routing
-#     table evolves after a cross-container ping, or to KRPC
-#     token validation across the v4/v6 framing boundary.
-#     Deferred to a follow-up loop to track down with
-#     tcpdump + anacrolix-level debug logging.
+#     put-then-get in <1s (dht6test_main.go, scratch), so it
+#     is NOT an anacrolix limitation — but the same bug
+#     ALSO reproduces in-process when the DHT servers are
+#     hosted by `engine.Engine` (utpSocket-wrapped UDP,
+#     ConfigureAnacrolixDhtServer callback, etc.). That
+#     reproducer is
+#     `internal/testlab.TestLayerDDHTClusterRoundTrip` plus
+#     its sibling pointer-level probe
+#     `TestDHTClusterPointerRoundTrip`; both are t.Skip'd
+#     today but can be unblocked in a tight Go-only loop
+#     once the underlying cause is pinned. Symptom there
+#     matches s12 exactly: token validation passes on the
+#     receiver ("received put with valid token" expvar
+#     increments), yet a subsequent get returns "value not
+#     found". Candidates: signature re-verify after
+#     interface{} round-trip in the anacrolix put handler
+#     (Wrapper.Put → Check), utpSocket source-address
+#     inconsistencies, or something else in the torrent
+#     client's DHT config that diverges from a naked
+#     dht.NewServer. Deferred to a follow-up loop.
 #
 # What this scenario CURRENTLY asserts (all must pass):
 #   1. All 6 nodes reach /healthz.
