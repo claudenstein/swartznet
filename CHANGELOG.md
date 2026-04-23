@@ -50,9 +50,37 @@ engagement from actual users of the v0.x prereleases.
     isolate whether a Layer-D failure lives in the engine's DHT
     wiring or in the containerised-network path. First
     application: `internal/testlab.TestLayerDDHTClusterRoundTrip`
-    and `TestDHTClusterPointerRoundTrip` (both `t.Skip`'d today)
-    reproduce the s12 BEP-44 get-returns-"value not found" bug
-    in pure Go — proof the failure is NOT docker-specific.
+    and `TestDHTClusterPointerRoundTrip` originally reproduced the
+    s12 BEP-44 get-returns-"value not found" bug in pure Go;
+    after the `sc.Exp` fix landed they became the regression gate
+    for the fix. `TestLayerDDHTClusterRoundTrip` further asserts
+    that every seed answers the lookup and each seed's distinct
+    fixture infohash appears in the merged hit list (exercises
+    Lookup.Query's fan-out + merge).
+  - **`internal/testlab.TestDHTClusterWireMeshConverges`** — gate
+    for the DHT-cluster's sn_search mesh contract. Documents
+    that `NewDHTCluster` on its own does NOT converge a
+    peer-wire mesh (the shared testlab infohash has no real
+    torrent so no node announces_peer for it), and asserts that
+    calling `Cluster.WireMesh` explicitly gets all n-1 peers
+    handshaked within 15 s.
+  - **`internal/testlab.TestLayerDGossipEndToEnd`** — strictly
+    stronger than the round-trip test. Exercises the full
+    in-process equivalent of testbed s12: DHT cluster +
+    WireMesh + Publisher.Submit + sn_search PeerAnnounce `pk`
+    gossip → auto-AddIndexer on the leech → real BEP-44
+    Lookup.Query. No manual `AddIndexer` call anywhere. If the
+    gossip cross-registration path regresses, the leech's
+    Lookup.Indexers() never gets the seed pubkeys and this
+    test fails before the DHT query runs.
+  - **`internal/testlab.TestLayerDPublisherRefreshKeepsItemFresh`** —
+    regression gate for the Publisher's refresh ticker. Asserts
+    LastPublished advances past the initial timestamp within
+    12 s under regtest (RefreshInterval=5 s) AND that a
+    post-refresh Lookup.Query still resolves the keyword to
+    the fixture infohash. Catches any bug where the refresh
+    loop stops firing — which would silently let BEP-44 items
+    expire in production (2h TTL) without being re-published.
   - **Engine DHT introspection**: `Engine.DHTRoutingTableSize()
     returns (good, total)` exposes the embedded anacrolix DHT
     server's routing-table occupancy. Intended for diagnostic
