@@ -39,7 +39,10 @@ func TestLayerDDHTClusterRoundTrip(t *testing.T) {
 	c := testlab.NewDHTCluster(t, total)
 
 	// Give DHTs time to cross-bootstrap before any put/get
-	// traversal runs.
+	// traversal runs. Blind sleep here — empirical polling on
+	// routing-table occupancy wasn't strictly predictive of
+	// put-traversal readiness, so we stick with a fixed
+	// window that's always been stable.
 	time.Sleep(5 * time.Second)
 
 	// Publish the same keyword from every seed, each pointing
