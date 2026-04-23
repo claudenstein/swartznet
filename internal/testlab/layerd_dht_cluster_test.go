@@ -2,7 +2,7 @@ package testlab_test
 
 import (
 	"context"
-	"fmt"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -102,10 +102,7 @@ func TestLayerDDHTClusterRoundTrip(t *testing.T) {
 					seen[h.InfoHash] = true
 				}
 				for s := 0; s < nSeeds; s++ {
-					ihHex := ""
-					for _, b := range fixtures[s] {
-						ihHex += fmt.Sprintf("%02x", b)
-					}
+					ihHex := hex.EncodeToString(fixtures[s][:])
 					if !seen[ihHex] {
 						t.Fatalf("fixture for seed %d (ih=%s) missing from hits: %+v",
 							s, ihHex, resp.Hits)
