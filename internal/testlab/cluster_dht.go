@@ -39,8 +39,13 @@ import (
 // in the docker-bridge networking layer.
 //
 // The shared fake swarm (SharedInfoHash) is still added to every
-// node so the sn_search LTEP handshake path exists alongside DHT.
-// Tests that don't care about sn_search can just ignore it.
+// node. Layer S / sn_search peer-wire connectivity does NOT
+// converge on its own over a DHT-only path — the shared infohash
+// has no real torrent behind it so no node announces_peer for it,
+// and get_peers consistently returns the closest-nodes list (no
+// peer-wire targets). Tests that need the sn_search mesh in
+// addition to the DHT must call Cluster.WireMesh(t) explicitly;
+// see TestDHTClusterWireMeshConverges for the contract test.
 func NewDHTCluster(t *testing.T, n int) *Cluster {
 	t.Helper()
 	if n < 1 {
