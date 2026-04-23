@@ -58,7 +58,7 @@ services:
     # seed's own entry and the subsequent put raced its own
     # listen socket.
     command: >
-      swartznet add --regtest
+      swartznet add --regtest --dht-insecure
       --dht-bootstrap=172.29.0.3:42069
       --data-dir=/data --api-addr=0.0.0.0:7654
       /fixture/fixture.torrent
@@ -85,7 +85,7 @@ services:
     cap_add:
       - NET_ADMIN
     command: >
-      swartznet add --regtest
+      swartznet add --regtest --dht-insecure
       --dht-bootstrap=172.29.0.2:42069
       --data-dir=/data --api-addr=0.0.0.0:7654
       /fixture/fixture.torrent
@@ -116,7 +116,7 @@ services:
     cap_add:
       - NET_ADMIN
     command: >
-      swartznet add --regtest
+      swartznet add --regtest --dht-insecure
       --dht-bootstrap=172.29.0.2:42069
       --dht-bootstrap=172.29.0.3:42069
       --data-dir=/data --api-addr=0.0.0.0:7654
@@ -145,7 +145,7 @@ services:
     cap_add:
       - NET_ADMIN
     command: >
-      swartznet add --regtest
+      swartznet add --regtest --dht-insecure
       --dht-bootstrap=172.29.0.2:42069
       --dht-bootstrap=172.29.0.3:42069
       --data-dir=/data --api-addr=0.0.0.0:7654
@@ -174,7 +174,7 @@ services:
     cap_add:
       - NET_ADMIN
     command: >
-      swartznet add --regtest
+      swartznet add --regtest --dht-insecure
       --dht-bootstrap=172.29.0.2:42069
       --dht-bootstrap=172.29.0.3:42069
       --data-dir=/data --api-addr=0.0.0.0:7654
@@ -203,7 +203,7 @@ services:
     cap_add:
       - NET_ADMIN
     command: >
-      swartznet add --regtest
+      swartznet add --regtest --dht-insecure
       --dht-bootstrap=172.29.0.2:42069
       --dht-bootstrap=172.29.0.3:42069
       --data-dir=/data --api-addr=0.0.0.0:7654

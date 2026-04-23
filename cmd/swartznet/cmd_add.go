@@ -44,6 +44,8 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
 	fs.BoolVar(&regtest, "regtest", false, "regtest mode: accelerated publisher/companion timings (TESTING ONLY — never run against mainnet)")
 	fs.Var(&dhtBootstrapArg, "dht-bootstrap", "host:port of a DHT node to bootstrap against (repeat for multiple; empty uses anacrolix defaults)")
+	var dhtInsecure bool
+	fs.BoolVar(&dhtInsecure, "dht-insecure", false, "disable BEP-42 node-ID security (TESTING ONLY; needed for private DHTs on docker bridges / k8s cluster IPs)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -66,6 +68,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	cfg.DisableDHT = noDHT
 	cfg.DisableDHTPublish = noDHTPublish
 	cfg.DHTBootstrapAddrs = []string(dhtBootstrapArg)
+	cfg.DHTInsecure = dhtInsecure
 	cfg.NoUpload = leechOnly
 	cfg.Regtest = regtest
 

@@ -434,6 +434,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// populate our local per-infohash peer table too.
 	peerStore := &peer_store.InMemory{}
 	bootstrapAddrs := append([]string(nil), cfg.DHTBootstrapAddrs...)
+	dhtInsecure := cfg.DHTInsecure
 	tc.ConfigureAnacrolixDhtServer = func(sc *dht.ServerConfig) {
 		if sc.PeerStore == nil {
 			sc.PeerStore = peerStore
@@ -449,6 +450,17 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 			sc.StartingNodes = func() ([]dht.Addr, error) {
 				return dht.ResolveHostPorts(snapshot)
 			}
+		}
+		// Opt out of BEP-42 node-ID security enforcement when the
+		// caller explicitly asked for it. Required for private
+		// DHTs on docker bridges / k8s cluster IPs, where node
+		// IDs can never pass the BEP-42 "tied to your public IP"
+		// check and puts therefore silently filter out every
+		// target as "not secure". See
+		// internal/config/config.go:DHTInsecure for why operators
+		// must never set this on mainline.
+		if dhtInsecure {
+			sc.NoSecurity = true
 		}
 	}
 

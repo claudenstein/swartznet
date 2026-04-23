@@ -177,6 +177,36 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **`swartznet add --dht-insecure`** (testing-only)
+    (`cmd/swartznet/cmd_add.go`, `internal/config/config.go`,
+    `internal/engine/engine.go`). Disables BEP-42 node-ID
+    security enforcement on the anacrolix DHT server (maps to
+    `dht.ServerConfig.NoSecurity`). Required for private DHTs
+    on docker bridges / k8s cluster IPs where container IPs
+    never produce a "secure" ID under BEP-42's rules —
+    anacrolix would otherwise silently filter every peer as
+    "not secure" and BEP-44 puts time out on every target.
+    Must stay off on mainline: flipping it in production
+    weakens Sybil resistance.
+  - **Testbed: s12 asserts up to the full Layer-D put stage**
+    (`testbed/scenarios/s12-swarm-dht.sh`,
+    `testbed/docker-compose.dht.yml`, back in
+    `run-testbed.sh all`). Concretely verifies: 6-node DHT
+    formation, seed publisher warm-up, every node has
+    `capable_peers >= 1` (sn_search LTEP handshake
+    converged), at least one BEP-44 put emitted, AND
+    `leech-1.dht.indexers_asked >= 2` — proves pubkey-gossip
+    cross-registration via sn_search is actually working end-
+    to-end. The final hop (leech gets non-empty `hits` from
+    the Layer-D lookup) is intentionally NOT asserted yet;
+    header comment in the scenario documents the deferred
+    investigation into why `getput.Get` returns "value not
+    found" in docker when a matching 6-node in-process test
+    (same bootstrap topology, NoSecurity=true) completes in
+    <1s. Incorrect keyword ("aethergram") was another bug
+    the investigation caught — dhtindex.Publisher publishes
+    only `Tokenize(torrent.Name)` keywords, not content
+    tokens. Scenario now queries "corpus".
   - **`swartznet add --dht-bootstrap=HOST:PORT`** (repeatable)
     (`cmd/swartznet/cmd_add.go`, `internal/config/config.go`,
     `internal/engine/engine.go`). Threads a user-provided list

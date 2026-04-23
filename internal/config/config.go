@@ -59,6 +59,21 @@ type Config struct {
 	// configuration time. Default: nil.
 	DHTBootstrapAddrs []string
 
+	// DHTInsecure, when true, disables BEP-42 node-ID security
+	// enforcement on the anacrolix DHT server (maps to
+	// dht.ServerConfig.NoSecurity). BEP-42 ties a node's 20-byte
+	// ID to its public IP so a single host can't cheaply forge
+	// many identities (Sybil resistance on mainline). In a
+	// private testbed DHT that lives entirely on a docker bridge
+	// or k8s cluster, container IPs (172.16.0.0/12 style) never
+	// produce a "secure" ID under BEP-42's rules, so anacrolix
+	// silently drops every peer as "not secure" and traversals
+	// return empty — BEP-44 put/get then times out. This flag
+	// opts out so private networks can form a DHT at all. Must
+	// be left at false on mainline: flipping it in production
+	// is a Sybil-resistance regression. Default: false.
+	DHTInsecure bool
+
 	// Regtest, when true, activates "regtest mode" — a
 	// deterministic fast-forward mode modeled on Bitcoin Core's
 	// `-regtest`. Every production time constant is accelerated

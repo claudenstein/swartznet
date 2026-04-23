@@ -378,13 +378,13 @@ run_scenario() {
 
 SCENARIOS_TO_RUN=()
 case "$SCENARIO" in
-    # s12 is deliberately NOT in `all` — the DHT put path times
-    # out in the 6-node private DHT (post-investigation note in
-    # testbed/scenarios/s12-swarm-dht.sh). The scenario +
-    # docker-compose.dht.yml are kept in-tree so a future loop
-    # can continue the investigation, and so the gossip-caps
-    # fix in engine.startPublisher has a real end-to-end target.
-    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8 s9 s10 s11) ;;
+    # s12 asserts DHT formation + pubkey-gossip cross-registration
+    # and stops short of the final BEP-44 put-get round-trip,
+    # which is still under investigation (see the header of
+    # testbed/scenarios/s12-swarm-dht.sh). The current assertion
+    # set is a legitimate lower bound for "Layer-D is
+    # reachable"; `all` exercises it.
+    all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8 s9 s10 s11 s12) ;;
     swarm)  SCENARIOS_TO_RUN=(swarm) ;;
     *)      SCENARIOS_TO_RUN=("$SCENARIO") ;;
 esac
