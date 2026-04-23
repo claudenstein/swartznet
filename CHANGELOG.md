@@ -88,6 +88,15 @@ engagement from actual users of the v0.x prereleases.
     traversal found no neighbours" from "put traversal fanned
     out but nothing answered" — a load-bearing distinction when
     debugging the s12 family of failures.
+  - **`GET /status.dht`** (HTTP API): new JSON block
+    `{"good_nodes": N, "nodes": M}` exposing the daemon's DHT
+    routing-table occupancy. Daemon wires
+    `engine.DHTRoutingTableSize` into the new
+    `httpapi.Options.DHTStats` probe. Omitted entirely (nil
+    field) when the daemon ran with `DisableDHT=true`, so
+    callers can distinguish "DHT disabled" from "DHT enabled
+    but empty". Lets operators and Layer-B scenarios surface
+    DHT health without reaching into internal types.
   - **`config.ListenHost`**: when non-empty, binds every
     BitTorrent/DHT listener to the given interface (e.g.
     `127.0.0.1`). Default empty = anacrolix's default =
