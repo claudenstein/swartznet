@@ -485,6 +485,17 @@
       ['capable peers', String((s.swarm && s.swarm.capable_peers) || 0)],
     ]));
 
+    // DHT routing-table card. Only rendered when the daemon
+    // reports a "dht" block (it's omitted entirely when the
+    // daemon started with DisableDHT=true), so a DHT-off daemon
+    // sees one fewer card rather than a card full of zeros.
+    if (s.dht) {
+      grid.appendChild(card('DHT routing', [
+        ['good nodes', String(s.dht.good_nodes || 0)],
+        ['total nodes', String(s.dht.nodes || 0)],
+      ]));
+    }
+
     const pubRows = [
       ['keywords', String((s.publisher && s.publisher.total_keywords) || 0)],
       ['hits', String((s.publisher && s.publisher.total_hits) || 0)],
