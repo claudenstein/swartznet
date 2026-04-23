@@ -2,6 +2,7 @@ package testlab_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -75,7 +76,15 @@ func TestLayerDDHTClusterRoundTrip(t *testing.T) {
 		look.AddIndexer(id.PublicKeyBytes(), "seed")
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
+	// Poll the lookup until BOTH seeds respond. Partial success
+	// (one seed answers, the other doesn't) would pass a weaker
+	// assertion but mask regressions in the merge path or in
+	// how traversal fans out to multiple pubkey targets. We
+	// need responded == nSeeds for the assertion to be
+	// load-bearing, and len(Hits) == nSeeds because each seed
+	// published a different infohash.
+	want := nSeeds
+	deadline := time.Now().Add(20 * time.Second)
 	var lastResp *dhtindex.LookupResponse
 	for time.Now().Before(deadline) {
 		qctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -83,7 +92,22 @@ func TestLayerDDHTClusterRoundTrip(t *testing.T) {
 		cancel()
 		if err == nil {
 			lastResp = resp
-			if resp.IndexersResponded >= 1 && len(resp.Hits) >= 1 {
+			if resp.IndexersResponded >= want && len(resp.Hits) >= want {
+				// Assert both fixture infohashes show up.
+				seen := make(map[string]bool)
+				for _, h := range resp.Hits {
+					seen[h.InfoHash] = true
+				}
+				for s := 0; s < nSeeds; s++ {
+					ihHex := ""
+					for _, b := range fixtures[s] {
+						ihHex += fmt.Sprintf("%02x", b)
+					}
+					if !seen[ihHex] {
+						t.Fatalf("fixture for seed %d (ih=%s) missing from hits: %+v",
+							s, ihHex, resp.Hits)
+					}
+				}
 				return
 			}
 		}
@@ -92,8 +116,8 @@ func TestLayerDDHTClusterRoundTrip(t *testing.T) {
 	if lastResp == nil {
 		t.Fatalf("Layer-D lookup never succeeded")
 	}
-	t.Fatalf("Layer-D lookup returned no hit: asked=%d responded=%d hits=%d",
-		lastResp.IndexersAsked, lastResp.IndexersResponded, len(lastResp.Hits))
+	t.Fatalf("Layer-D lookup did not converge: asked=%d responded=%d hits=%d (want responded>=%d hits>=%d)",
+		lastResp.IndexersAsked, lastResp.IndexersResponded, len(lastResp.Hits), want, want)
 }
 
 // TestDHTClusterPointerRoundTrip is a deeper-than-Layer-D
