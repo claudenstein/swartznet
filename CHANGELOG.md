@@ -106,6 +106,28 @@ engagement from actual users of the v0.x prereleases.
 
 ### Fixed
 
+  - **Engine: outbound PeerAnnounce frames now actually carry
+    the `pk` field when Layer-D publisher is running**
+    (`internal/engine/engine.go:startPublisher`). Wire-compat
+    matrix row 8.4-C introduced pubkey gossip in sn_search
+    PeerAnnounce — but the gossip path in
+    `swarmsearch.Protocol.onRemoteHandshake` gates on
+    `caps.Publisher > 0`, and the engine never bumped caps
+    after starting the publisher. `SetPublisherPubkey` set the
+    pubkey in the protocol state but the frame-encode path
+    silently skipped it because caps.Publisher was still 0.
+    Net effect: every running SwartzNet node had pubkey gossip
+    disabled, so Layer-D cross-registration via sn_search
+    handshake never fired in practice. `startPublisher` now
+    reads the current capabilities, flips Publisher=1, and
+    calls `SetCapabilities` — but only when
+    `DisableDHTPublish` is false (leech-only DHT mode keeps
+    gossip off on purpose). Surfaced by building the
+    DHT-enabled Layer-B testbed stack: leech-1's /search
+    --dht reported `indexers_asked=0` until the fix went in;
+    now reports `indexers_asked=6` (all nodes cross-
+    registered).
+
   - **`fileTracker.Subscribe` now replays events for files that
     were already complete at registration time**
     (`internal/engine/file_tracker.go`). Previously, on a seed
@@ -154,6 +176,32 @@ engagement from actual users of the v0.x prereleases.
     search runs).
 
 ### Added
+
+  - **`swartznet add --dht-bootstrap=HOST:PORT`** (repeatable)
+    (`cmd/swartznet/cmd_add.go`, `internal/config/config.go`,
+    `internal/engine/engine.go`). Threads a user-provided list
+    of bootstrap addresses into
+    `dht.ServerConfig.StartingNodes` instead of anacrolix's
+    default public mainline hosts. Required for any isolated-
+    network DHT scenario (docker bridge, k8s cluster-local
+    testing) where public hosts are unreachable. Empty value
+    preserves the previous behaviour.
+
+  - **Testbed: DHT-enabled 6-node stack (s12, WIP)**
+    (`testbed/docker-compose.dht.yml`,
+    `testbed/scenarios/s12-swarm-dht.sh`). 6-node swarm with
+    DHT enabled, static IPs in a new 172.29.0.0/24 subnet,
+    cross-bootstrapped seeds. The scenario is deliberately
+    NOT in `scripts/run-testbed.sh all`: gossip-based indexer
+    cross-registration now works end-to-end
+    (`indexers_asked=6` post-fix, up from 0), but BEP-44 puts
+    on the private DHT time out consistently in anacrolix's
+    getput extension (`transaction timed out` warnings on
+    every attempt). Raw KRPC ping/pong between containers
+    works, ruling out basic UDP. Root cause is still under
+    investigation — left in-tree for a future loop to pick
+    up so the `--dht-bootstrap` flag and the gossip-caps fix
+    have a real end-to-end target.
 
   - **Testbed driver: per-scenario timing + JSON output**
     (`scripts/run-testbed.sh`). The scoreboard now shows a

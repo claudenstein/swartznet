@@ -23,15 +23,16 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		dataDir      string
-		indexDir     string
-		port         int
-		noDHT        bool
-		noDHTPublish bool
-		leechOnly    bool
-		noIndex      bool
-		apiAddr      string
-		regtest      bool
+		dataDir         string
+		indexDir        string
+		port            int
+		noDHT           bool
+		noDHTPublish    bool
+		leechOnly       bool
+		noIndex         bool
+		apiAddr         string
+		regtest         bool
+		dhtBootstrapArg stringSliceFlag
 	)
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for downloaded content")
 	fs.StringVar(&indexDir, "index-dir", "", "Bleve index directory (default: ~/.local/share/swartznet/index)")
@@ -42,6 +43,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&noIndex, "no-index", false, "don't write this torrent to the local index")
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
 	fs.BoolVar(&regtest, "regtest", false, "regtest mode: accelerated publisher/companion timings (TESTING ONLY — never run against mainnet)")
+	fs.Var(&dhtBootstrapArg, "dht-bootstrap", "host:port of a DHT node to bootstrap against (repeat for multiple; empty uses anacrolix defaults)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -63,6 +65,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg.DisableDHT = noDHT
 	cfg.DisableDHTPublish = noDHTPublish
+	cfg.DHTBootstrapAddrs = []string(dhtBootstrapArg)
 	cfg.NoUpload = leechOnly
 	cfg.Regtest = regtest
 

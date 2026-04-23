@@ -35,11 +35,16 @@
 #            swarm (compose profile `vanilla`) and must download the
 #            4-MiB fixture from SwartzNet peers using only BEP-3/9/10
 #            traffic. Proves wire-compat at the real-TCP level.
+#   s12    — Layer-D (DHT keyword index) end-to-end: DHT-enabled
+#            6-node stack bootstrapping to seed-1, seeds publish
+#            BEP-44 keyword→infohash mappings, leech-1's /search
+#            with dht:true resolves "aethergram" to the fixture
+#            infohash. First testbed scenario to exercise DHT.
 #   swarm  — alias: run s6 then s7 against a single long-lived 6-node
 #            stack (avoids paying the compose up/down cost twice)
 #   all    — run s1..s5 (3-node) then swarm (6-node) then s8 (lossy
 #            swarm) then s9 (pass-along) then s10 (mid-transfer churn)
-#            then s11 (vanilla interop)
+#            then s11 (vanilla interop) then s12 (DHT/Layer-D)
 #
 # Each scenario:
 #   1. Brings up the 3-node docker compose stack with the correct NETEM_PROFILE.
@@ -69,6 +74,7 @@ RESULTS_DIR="$TESTBED_DIR/results"
 SCENARIOS_DIR="$TESTBED_DIR/scenarios"
 COMPOSE_FILE="$TESTBED_DIR/docker-compose.yml"
 COMPOSE_SWARM_FILE="$TESTBED_DIR/docker-compose.swarm.yml"
+COMPOSE_DHT_FILE="$TESTBED_DIR/docker-compose.dht.yml"
 BINARY="$REPO_ROOT/dist/swartznet-testbed-linux-amd64"
 GO="${GO:-/usr/local/go/bin/go}"
 
@@ -97,8 +103,8 @@ done
 
 # Validate scenario argument.
 case "$SCENARIO" in
-    s1|s2|s3|s4|s5|s6|s7|s8|s9|s10|s11|swarm|all) ;;
-    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 swarm all" ;;
+    s1|s2|s3|s4|s5|s6|s7|s8|s9|s10|s11|s12|swarm|all) ;;
+    *) fail "Unknown scenario '$SCENARIO'. Valid: s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 swarm all" ;;
 esac
 
 # Check docker compose v2 is available.
@@ -193,6 +199,7 @@ scenario_netem_profile() {
         s9) echo "" ;;                         # pass-along, no netem
         s10) echo "/netem/lossy.sh" ;;         # mid-transfer churn under lossy
         s11) echo "" ;;                        # vanilla interop, no netem
+        s12) echo "" ;;                        # Layer-D / DHT, no netem
     esac
 }
 
@@ -201,6 +208,7 @@ scenario_compose_file() {
     case "$1" in
         s1|s2|s3|s4|s5)       echo "$COMPOSE_FILE" ;;
         s6|s7|s8|s9|s10|s11)  echo "$COMPOSE_SWARM_FILE" ;;
+        s12)                  echo "$COMPOSE_DHT_FILE" ;;
     esac
 }
 
@@ -218,6 +226,8 @@ scenario_containers() {
             # (`--profile '*' compose down -v`) covers
             # profile-started services too.
             echo "sn-swarm-seed-1 sn-swarm-seed-2 sn-swarm-leech-1 sn-swarm-leech-2 sn-swarm-leech-3 sn-swarm-leech-4" ;;
+        s12)
+            echo "sn-dht-seed-1 sn-dht-seed-2 sn-dht-leech-1 sn-dht-leech-2 sn-dht-leech-3 sn-dht-leech-4" ;;
     esac
 }
 
@@ -368,6 +378,12 @@ run_scenario() {
 
 SCENARIOS_TO_RUN=()
 case "$SCENARIO" in
+    # s12 is deliberately NOT in `all` — the DHT put path times
+    # out in the 6-node private DHT (post-investigation note in
+    # testbed/scenarios/s12-swarm-dht.sh). The scenario +
+    # docker-compose.dht.yml are kept in-tree so a future loop
+    # can continue the investigation, and so the gossip-caps
+    # fix in engine.startPublisher has a real end-to-end target.
     all)    SCENARIOS_TO_RUN=(s1 s2 s3 s4 s5 swarm s8 s9 s10 s11) ;;
     swarm)  SCENARIOS_TO_RUN=(swarm) ;;
     *)      SCENARIOS_TO_RUN=("$SCENARIO") ;;

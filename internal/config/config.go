@@ -47,6 +47,18 @@ type Config struct {
 	// Layer-D contribution to the network. Default: false.
 	DisableDHTPublish bool
 
+	// DHTBootstrapAddrs, when non-empty, pre-seeds the anacrolix
+	// DHT server's StartingNodes list with these host:port
+	// addresses instead of the mainline defaults
+	// (router.bittorrent.com etc.). Used by the Layer-B testbed
+	// to form a private DHT on a docker bridge where the default
+	// bootstrap hosts are unreachable. Empty slice means "use
+	// anacrolix's default public bootstrap nodes", which is
+	// correct for any real deployment. Each entry is a single
+	// host:port string; the engine resolves them at DHT-server
+	// configuration time. Default: nil.
+	DHTBootstrapAddrs []string
+
 	// Regtest, when true, activates "regtest mode" — a
 	// deterministic fast-forward mode modeled on Bitcoin Core's
 	// `-regtest`. Every production time constant is accelerated

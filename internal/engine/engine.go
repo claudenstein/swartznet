@@ -433,9 +433,22 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// which means vanilla announce_peer queries correctly
 	// populate our local per-infohash peer table too.
 	peerStore := &peer_store.InMemory{}
+	bootstrapAddrs := append([]string(nil), cfg.DHTBootstrapAddrs...)
 	tc.ConfigureAnacrolixDhtServer = func(sc *dht.ServerConfig) {
 		if sc.PeerStore == nil {
 			sc.PeerStore = peerStore
+		}
+		// If the caller explicitly pre-seeded the DHT's bootstrap
+		// node list, honour it instead of anacrolix's public
+		// mainline defaults (router.bittorrent.com etc.). Used by
+		// the Layer-B testbed where default bootstrap hosts are
+		// unreachable from the isolated docker bridge. Empty =
+		// defaults.
+		if len(bootstrapAddrs) > 0 {
+			snapshot := append([]string(nil), bootstrapAddrs...)
+			sc.StartingNodes = func() ([]dht.Addr, error) {
+				return dht.ResolveHostPorts(snapshot)
+			}
 		}
 	}
 
@@ -795,6 +808,28 @@ func (e *Engine) startPublisher() error {
 	// pubkeys back into the lookup's known-indexer set.
 	e.swarm.SetPublisherPubkey(e.identity.PublicKey)
 	e.swarm.SetIndexerSink(&gossipIndexerSink{lookup: e.lookup})
+	// Flip caps.Publisher to 1 so outgoing PeerAnnounce frames
+	// actually include the `pk` field (the gossip path in
+	// swarmsearch.Protocol.onRemoteHandshake gates on
+	// `caps.Publisher > 0`, not on publisherPubkey being non-
+	// nil). Without this, every running publisher's pubkey stays
+	// invisible to peers and Layer-D cross-registration never
+	// fires. Latent bug since the gossip feature shipped in
+	// wire-compat row 8.4-C — first caught by the Layer-B
+	// s12 scenario, where leech-1's /search --dht found
+	// indexers_asked=0 because nothing gossiped.
+	//
+	// If DisableDHTPublish is set we're running in "leech-only
+	// DHT" mode: the Publisher worker is suppressed above but
+	// the node still has an identity and still lookups via the
+	// DHT. Keeping Publisher=0 in that mode is intentional —
+	// we don't want passive nodes gossiping themselves as
+	// indexers when they aren't actually pushing entries.
+	if !e.cfg.DisableDHTPublish {
+		currentCaps := e.swarm.Capabilities()
+		currentCaps.Publisher = 1
+		e.swarm.SetCapabilities(currentCaps)
+	}
 	return nil
 }
 
