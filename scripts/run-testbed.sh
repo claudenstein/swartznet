@@ -7,6 +7,13 @@
 #
 # Scenario names: s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 swarm all
 #
+# Optional flags (must come AFTER the scenario name):
+#   --json=<path>   emit a machine-readable JSON summary of the
+#                   scenarios' results, durations, and netem
+#                   profile at <path>. Useful for CI consumers
+#                   and perf-regression tracking; the scoreboard
+#                   always prints to stdout regardless.
+#
 #   s1     — healthy baseline (no netem, 3-node stack)
 #   s2     — lossy profile (5% packet loss, 150ms RTT)
 #   s3     — mobile-4G profile (40ms+20ms jitter, 10Mbit)
@@ -72,12 +79,21 @@ fail() { echo "[run-testbed] ERROR: $*" >&2; exit 1; }
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 
-if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 <s1|s2|s3|s4|s5|all>" >&2
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <scenario> [--json=<path>]" >&2
     exit 2
 fi
 
 SCENARIO="$1"
+shift
+
+JSON_OUT=""
+for arg in "$@"; do
+    case "$arg" in
+        --json=*) JSON_OUT="${arg#--json=}" ;;
+        *) echo "Unknown flag: $arg" >&2; exit 2 ;;
+    esac
+done
 
 # Validate scenario argument.
 case "$SCENARIO" in
@@ -358,6 +374,8 @@ case "$SCENARIO" in
 esac
 
 declare -A RESULTS
+declare -A DURATIONS        # scenario → wall-clock duration in seconds
+declare -A NETEM_USED       # scenario → netem profile that was applied
 OVERALL_EXIT=0
 WALL_START=$(date +%s)
 
@@ -374,7 +392,8 @@ for sc in "${SCENARIOS_TO_RUN[@]}"; do
             OVERALL_EXIT=1
             log "swarm (s6+s7): FAIL ($(( $(date +%s) - sc_start ))s)"
         fi
-        # Settle before next scenario.
+        DURATIONS["swarm"]=$(( $(date +%s) - sc_start ))
+        NETEM_USED["swarm"]=""
         if [[ "${#SCENARIOS_TO_RUN[@]}" -gt 1 ]]; then
             sleep 3
         fi
@@ -388,25 +407,93 @@ for sc in "${SCENARIOS_TO_RUN[@]}"; do
         OVERALL_EXIT=1
         log "$sc: FAIL ($(( $(date +%s) - sc_start ))s)"
     fi
+    DURATIONS["$sc"]=$(( $(date +%s) - sc_start ))
+    NETEM_USED["$sc"]=$(scenario_netem_profile "$sc")
     # Allow a brief settle between scenarios to avoid port conflicts.
     if [[ "${#SCENARIOS_TO_RUN[@]}" -gt 1 ]]; then
         sleep 3
     fi
 done
 
+WALL_TOTAL=$(( $(date +%s) - WALL_START ))
+
 # ── Scoreboard ────────────────────────────────────────────────────────────────
+#
+# Per-scenario timing is surfaced here (in addition to the per-run
+# log line) so flakes and slow trends are visible at a glance
+# without having to read the log file.
 
 echo ""
-echo "╔══════════════════════════════════════╗"
-echo "║        Testbed scenario results      ║"
-echo "╠══════════════════════════════════════╣"
+echo "╔════════════════════════════════════════════════╗"
+echo "║            Testbed scenario results            ║"
+echo "╠════════════════════════════════════════════════╣"
+printf "║  %-8s  %-8s  %-24s  ║\n" "SCENARIO" "RESULT" "DURATION"
+echo "╠════════════════════════════════════════════════╣"
 for sc in "${SCENARIOS_TO_RUN[@]}"; do
     result="${RESULTS[$sc]:-SKIP}"
-    printf "║  %-6s  %-28s  ║\n" "$sc" "$result"
+    dur="${DURATIONS[$sc]:--}"
+    if [[ "$dur" != "-" ]]; then
+        dur="${dur}s"
+    fi
+    printf "║  %-8s  %-8s  %-24s  ║\n" "$sc" "$result" "$dur"
 done
-echo "╠══════════════════════════════════════╣"
-printf "║  total wall clock: %-18s  ║\n" "$(( $(date +%s) - WALL_START ))s"
-echo "╚══════════════════════════════════════╝"
+echo "╠════════════════════════════════════════════════╣"
+printf "║  total wall clock: %-28s  ║\n" "${WALL_TOTAL}s"
+echo "╚════════════════════════════════════════════════╝"
+
+# ── Optional JSON summary ────────────────────────────────────────────────────
+#
+# Emitted only when --json=<path> was supplied. Format is a
+# single object with a top-level "scenarios" array suitable for
+# consumption by CI status bots, perf-regression dashboards, and
+# git-logged trending analysis. Durations are integer seconds.
+
+if [[ -n "$JSON_OUT" ]]; then
+    # Export per-scenario fields into the environment so the
+    # python emitter can read them by key. Bash associative
+    # arrays don't marshal into python arg lists cleanly; env
+    # vars are the simplest portable handoff. Keys are
+    # name-mangled with an SN_ prefix to avoid shell collisions.
+    for sc in "${SCENARIOS_TO_RUN[@]}"; do
+        export "SN_RES_${sc}=${RESULTS[$sc]:-SKIP}"
+        export "SN_DUR_${sc}=${DURATIONS[$sc]:-0}"
+        export "SN_NET_${sc}=${NETEM_USED[$sc]:-}"
+    done
+
+    # Emit JSON via python so strings are properly quoted/escaped
+    # (bash `printf %q` produces shell-escape form, not JSON).
+    # python3 is already a hard dependency of every scenario
+    # script, so this adds no new build requirement.
+    python3 - "$WALL_START" "$WALL_TOTAL" "$OVERALL_EXIT" "$JSON_OUT" "${SCENARIOS_TO_RUN[@]}" <<'PY'
+import json, os, sys
+
+started   = int(sys.argv[1])
+total     = int(sys.argv[2])
+overall   = int(sys.argv[3])
+out_path  = sys.argv[4]
+scenarios = sys.argv[5:]
+
+out = {
+    "started_at":         started,
+    "finished_at":        started + total,
+    "total_wall_clock_s": total,
+    "overall_exit":       overall,
+    "scenarios": [
+        {
+            "name":          sc,
+            "result":        os.environ.get("SN_RES_" + sc, "SKIP"),
+            "duration_s":    int(os.environ.get("SN_DUR_" + sc, "0")),
+            "netem_profile": os.environ.get("SN_NET_" + sc, ""),
+        }
+        for sc in scenarios
+    ],
+}
+with open(out_path, "w") as f:
+    json.dump(out, f, indent=2)
+    f.write("\n")
+PY
+    log "Wrote JSON summary to $JSON_OUT"
+fi
 echo ""
 echo "Logs: $RESULTS_DIR/"
 echo ""

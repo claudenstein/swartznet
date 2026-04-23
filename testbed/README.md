@@ -42,7 +42,16 @@ scripts/run-testbed.sh s9    # pass-along: kill seeds, late-joiner leech-5 still
 scripts/run-testbed.sh s10   # mid-transfer churn: kill seed-1 at 30% progress, expect convergence
 scripts/run-testbed.sh s11   # vanilla BT interop: anacrolix CLI downloads from SwartzNet using BEP-9/10 only
 scripts/run-testbed.sh swarm # alias: s6 + s7 against one compose lifecycle
+
+# Emit a machine-readable JSON summary in addition to the scoreboard:
+scripts/run-testbed.sh all --json=/tmp/run.json
 ```
+
+The JSON output is one object with a top-level `scenarios` array
+containing `{name, result, duration_s, netem_profile}` per run,
+plus `started_at`, `finished_at`, `total_wall_clock_s`, and
+`overall_exit`. Suitable for CI bots, perf-regression dashboards,
+and trending analysis.
 
 The driver script:
 1. Checks `docker compose version` and `docker info` (fails with a clear message if absent or inaccessible).

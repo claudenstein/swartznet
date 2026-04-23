@@ -155,6 +155,21 @@ engagement from actual users of the v0.x prereleases.
 
 ### Added
 
+  - **Testbed driver: per-scenario timing + JSON output**
+    (`scripts/run-testbed.sh`). The scoreboard now shows a
+    DURATION column alongside SCENARIO and RESULT, so slow
+    trends and flake signals are visible at a glance. A new
+    `--json=<path>` flag writes a structured summary
+    (`{started_at, finished_at, total_wall_clock_s,
+    overall_exit, scenarios:[{name, result, duration_s,
+    netem_profile}]}`) suitable for CI status bots and
+    perf-regression dashboards. JSON is produced via a
+    python3 heredoc (already a hard dependency of every
+    scenario script) rather than hand-quoted bash — bash's
+    `printf %q` produces shell-safe escapes, not JSON-safe
+    ones. Stress-tested: `scripts/run-testbed.sh all` ran
+    4 times back-to-back (3 flake-detection loops + 1 final
+    verify) all PASS, 115-125s each.
   - **s11 — vanilla BT client interop at the wire level**
     (`testbed/scenarios/s11-vanilla-interop.sh`,
     `testbed/Dockerfile.vanilla`,
