@@ -16,30 +16,17 @@ import (
 // asserts the seed's published keyword becomes visible on a
 // different node's /search --dht-equivalent query.
 //
-// # Status (2026-04-23)
-//
-// This test reproduces the s12 docker failure in pure Go, on
-// loopback. The put traversal reports NumAddrsTried=4 with
-// NumResponses=4 and expvar "received put with valid token"
-// increments on the receiver, yet a subsequent BEP-44 get
-// returns "value not found" — matching the symptom in
-// testbed/scenarios/s12-swarm-dht.sh's header. Proves the bug
-// is NOT docker-specific; the engine's DHT wire path silently
-// drops the stored item somewhere between token validation and
-// bep44.Store. A raw-anacrolix 6-node loopback cluster
-// (/tmp/dht6test.go, reproduced by
-// internal/dhtindex.TestVanillaBEP44GetterReadsOurItem)
-// succeeds at the same scenario, so the issue is specific to
-// the engine's torrent-client-hosted DHT server (utpSocket
-// wrapper, 0.0.0.0 default bind, or some other config
-// difference the harness doesn't yet control).
-//
-// Skipped until the underlying bug is fixed. Once fixed,
-// remove the Skip line — this test will then gate regressions
-// on every PR.
+// Historically (prior to the sc.Exp=2h fix in engine.go) this
+// reproduced the s12 BEP-44 "get returns value-not-found after
+// a successful put" failure in-process, which pinned the bug as
+// an expiry-default mismatch between anacrolix/torrent's
+// NewAnacrolixDhtServer and dht.NewDefaultServerConfig. Keeping
+// it in the suite so the Layer-A harness catches any regression
+// of that code path without needing to spin up docker for s12.
 func TestLayerDDHTClusterRoundTrip(t *testing.T) {
-	t.Skip("known-failing: reproduces the s12 BEP-44 get/put bug in-process; " +
-		"unblock once testbed/scenarios/s12-swarm-dht.sh's full put/get passes")
+	if testing.Short() {
+		t.Skip("skipping DHT cluster round-trip in -short mode")
+	}
 
 	const (
 		nSeeds   = 2
@@ -115,12 +102,13 @@ func TestLayerDDHTClusterRoundTrip(t *testing.T) {
 // directly. Same underlying getput.Put/Get as the keyword
 // path, so the failure surface is identical.
 //
-// Skipped alongside TestLayerDDHTClusterRoundTrip — if this
-// one passes but the Layer-D test still fails, the bug is in
-// Publisher/Lookup; if both fail, the bug is in the engine's
-// DHT wire path (which today is what we observe).
+// Pairs with TestLayerDDHTClusterRoundTrip; if that one passes
+// but this one fails (or vice versa), the bug lives in the
+// Publisher/Lookup layer vs the raw pointer put/get layer.
 func TestDHTClusterPointerRoundTrip(t *testing.T) {
-	t.Skip("known-failing: same root cause as TestLayerDDHTClusterRoundTrip")
+	if testing.Short() {
+		t.Skip("skipping DHT cluster pointer round-trip in -short mode")
+	}
 
 	const total = 6
 	c := testlab.NewDHTCluster(t, total)

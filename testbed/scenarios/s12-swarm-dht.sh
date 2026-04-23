@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
-# Scenario S12: Layer-D (DHT keyword index) up to the BEP-44 put
-# stage. Asserts every testable layer that's currently working:
-# DHT formation, sn_search pubkey-gossip cross-registration,
-# publisher warm-up, at least one emitted BEP-44 put, and a
-# /search --dht round-trip that asks every known indexer.
+# Scenario S12: Layer-D (DHT keyword index) full put/get round-
+# trip. Every indexer a leech asks over its /search --dht query
+# must respond and the resulting dht.hits must include the
+# fixture infohash.
 #
-# STATUS (2026-04-23): the full end-to-end round-trip (leech's
-# `/search --dht` returns non-empty hits for a published
-# keyword) does not yet pass in this testbed. Traced so far:
+# Fixes landed in the path to this scenario:
 #
 #  1. Pre-fix: leech reported indexers_asked=0 because
 #     swarm.SetCapabilities was never called after
 #     engine.startPublisher, so caps.Publisher stayed at 0 and
 #     the pubkey-gossip path in sn_search's PeerAnnounce never
-#     fired. Fixed in engine.go this loop: caps.Publisher is
-#     flipped to 1 iff the publisher is actually running.
+#     fired. Fixed in engine.go: caps.Publisher is flipped to 1
+#     iff the publisher is actually running.
 #
 #  2. BEP-44 puts time out on docker bridge (172.29.0.0/24)
 #     because anacrolix's DHT applies BEP-42 node-ID security
 #     by default — container IPs never produce a "secure" ID,
 #     so every target is filtered as "not secure". Fixed in
-#     engine.go + config + cmd_add this loop: new DHTInsecure
-#     config field + --dht-insecure CLI flag → sc.NoSecurity.
+#     engine.go + config + cmd_add: DHTInsecure config field
+#     + --dht-insecure CLI flag → sc.NoSecurity.
 #
 #  3. Scenario was querying "aethergram" which is a
 #     content-level token (Layer L / Bleve), but
@@ -31,51 +28,17 @@
 #     are testbed/swarm/corpus. Fixed by switching the query
 #     to "corpus".
 #
-#  4. Remaining: even with #1..#3 fixed, getput.Get from the
-#     leech returns "value not found" for every indexer
-#     pubkey. A 6-node in-process anacrolix DHT with the same
-#     bootstrap topology + NoSecurity=true PASSES the same
-#     put-then-get in <1s (dht6test_main.go, scratch), so it
-#     is NOT an anacrolix limitation — but the same bug
-#     ALSO reproduces in-process when the DHT servers are
-#     hosted by `engine.Engine` (utpSocket-wrapped UDP,
-#     ConfigureAnacrolixDhtServer callback, etc.). That
-#     reproducer is
-#     `internal/testlab.TestLayerDDHTClusterRoundTrip` plus
-#     its sibling pointer-level probe
-#     `TestDHTClusterPointerRoundTrip`; both are t.Skip'd
-#     today but can be unblocked in a tight Go-only loop
-#     once the underlying cause is pinned. Symptom there
-#     matches s12 exactly: token validation passes on the
-#     receiver ("received put with valid token" expvar
-#     increments), yet a subsequent get returns "value not
-#     found". Candidates: signature re-verify after
-#     interface{} round-trip in the anacrolix put handler
-#     (Wrapper.Put → Check), utpSocket source-address
-#     inconsistencies, or something else in the torrent
-#     client's DHT config that diverges from a naked
-#     dht.NewServer. Deferred to a follow-up loop.
-#
-# What this scenario CURRENTLY asserts (all must pass):
-#   1. All 6 nodes reach /healthz.
-#   2. Seed publishers have total_keywords > 0 (Bleve tokenised
-#      the torrent name → at least one queued publish).
-#   3. Every node has at least one capable_peer (sn_search LTEP
-#      handshake converged).
-#   4. At least one seed publisher has emitted a BEP-44 put
-#      (LastPublished timestamp is set).
-#   5. Leech-1's /search --dht reports indexers_asked >= 2 —
-#      proof that pubkey-gossip via sn_search fired and
-#      leech-1 cross-registered the seed publishers as known
-#      Layer-D indexers. This is the load-bearing check for
-#      the engine.startPublisher caps.Publisher fix.
-#
-# What it does NOT yet assert:
-#   - indexers_responded >= 1
-#   - non-empty dht.hits
-#
-# These two are the last mile that remains blocked on the
-# investigation above.
+#  4. Root cause of "put succeeds, get returns value-not-found":
+#     anacrolix/torrent's NewAnacrolixDhtServer constructs a
+#     dht.ServerConfig from scratch and does NOT copy
+#     dht.NewDefaultServerConfig's Exp=2h default. sc.Exp
+#     lands at 0, bep44.Wrapper.Get then treats every item as
+#     instantly expired (`i.created.Add(0).After(now)` =
+#     false), deletes it, and returns ErrItemNotFound. Pinned
+#     by internal/engine.TestDHTEnginePutReceive and
+#     internal/testlab.TestLayerDDHTClusterRoundTrip. Fixed in
+#     engine.go by setting sc.Exp = 2*time.Hour in the
+#     ConfigureAnacrolixDhtServer callback if upstream didn't.
 #
 # Precondition: docker compose running on docker-compose.dht.yml,
 # a 6-node stack where every node has DHT enabled and bootstraps
@@ -286,12 +249,23 @@ print('no')
 ")
 
 echo "dht stats: asked=$asked responded=$responded hits=$hits_count"
-# Minimum bar: at least the 2 seed pubkeys must be known to
-# leech-1 (via sn_search pubkey-gossip) so Lookup.Query has
-# somewhere to send BEP-44 gets. If this is 0, the caps.Publisher
-# fix in engine.startPublisher has regressed.
+# Three assertions, all load-bearing on different fixes:
+#   1. indexers_asked >= 2: pubkey-gossip via sn_search fired so
+#      leech-1 cross-registered the seed publishers as Layer-D
+#      indexers. Regression signal for the caps.Publisher fix in
+#      engine.startPublisher.
+#   2. indexers_responded >= 1: at least one seed's BEP-44 get
+#      returned a signed item. Regression signal for the sc.Exp
+#      fix in engine.ConfigureAnacrolixDhtServer (without it,
+#      every stored item is instantly expired and the get
+#      returns ErrItemNotFound).
+#   3. dht.hits contains the fixture infohash: the full round-
+#      trip produced the answer we expected. Regression signal
+#      for the end-to-end Layer-D design claim.
 [ "${asked:-0}" -ge 2 ] || { echo "--- response ---"; echo "$resp" | python3 -m json.tool || echo "$resp"; fail "dht.indexers_asked=$asked < 2 — pubkey-gossip regression?"; }
-pass "Layer-D pubkey-gossip cross-registration: indexers_asked=$asked (responded=$responded hits=$hits_count — deferred, see file header)"
+[ "${responded:-0}" -ge 1 ] || { echo "--- response ---"; echo "$resp" | python3 -m json.tool || echo "$resp"; fail "dht.indexers_responded=$responded < 1 — sc.Exp / BEP-44 expiry regression?"; }
+[ "$hit_fixture" = "yes" ] || { echo "--- response ---"; echo "$resp" | python3 -m json.tool || echo "$resp"; fail "fixture infohash $FIXTURE_INFOHASH not in dht.hits — Layer-D round-trip regression?"; }
+pass "Layer-D full round-trip: asked=$asked responded=$responded hits=$hits_count fixture-matched"
 
 echo
-echo "=== S12: DHT formation + publish + pubkey-gossip all PASS (full put-get round-trip deferred, see file header) ==="
+echo "=== S12: Layer-D end-to-end (publish + lookup + hit verification) all PASS ==="

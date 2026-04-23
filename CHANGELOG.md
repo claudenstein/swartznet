@@ -15,6 +15,30 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Fixed
+
+  - **Layer-D BEP-44 put/get round-trip**. anacrolix/torrent's
+    `NewAnacrolixDhtServer` builds a `dht.ServerConfig` from
+    scratch and does NOT copy `dht.NewDefaultServerConfig`'s
+    `Exp=2h` default, so `sc.Exp` landed at 0. `bep44.Wrapper`
+    then treated every stored item as instantly expired
+    (`i.created.Add(0).After(now)` = false for any clock read
+    after the store), deleted it on the next get, and returned
+    `ErrItemNotFound`. Symptom: BEP-44 put succeeds (valid-token
+    expvar increments, put handler replies OK) yet an
+    immediately-following get returns "value not found" — the
+    load-bearing failure in testbed scenario s12 and every
+    downstream Layer-D keyword lookup. Fixed in the engine's
+    `ConfigureAnacrolixDhtServer` callback by pinning
+    `sc.Exp = 2*time.Hour` if upstream didn't set one, matching
+    `dht.NewDefaultServerConfig`. Regression-gated by two new
+    tests: `internal/engine.TestDHTEnginePutReceive` (raw
+    anacrolix probe put → engine DHT store → probe get) and
+    `internal/testlab.TestLayerDDHTClusterRoundTrip` (full
+    engine-hosted 6-node cluster on loopback). The Layer-B s12
+    scenario now asserts `indexers_responded >= 1` and that the
+    fixture infohash appears in `dht.hits`.
+
 ### Added
 
   - **Layer-A DHT cluster harness** (`internal/testlab.NewDHTCluster`).

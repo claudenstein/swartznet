@@ -472,6 +472,26 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		if dhtInsecure {
 			sc.NoSecurity = true
 		}
+		// BEP-44 mutable-item expiry. anacrolix/torrent's
+		// NewAnacrolixDhtServer constructs a dht.ServerConfig
+		// from scratch and does NOT copy defaults from
+		// dht.NewDefaultServerConfig, so sc.Exp lands at 0.
+		// bep44.Wrapper then treats every stored item as
+		// instantly expired (`i.created.Add(0).After(now)`
+		// = false for any clock reading after the store), so
+		// the next Get deletes the item and returns
+		// ErrItemNotFound. Observed symptom: BEP-44 put
+		// succeeds (valid-token expvar increments, put handler
+		// replies OK) yet an immediately-following get returns
+		// "value not found" — the load-bearing failure mode in
+		// testbed scenario s12 and in the in-process
+		// internal/testlab.TestLayerDDHTClusterRoundTrip.
+		// We pin Exp to BEP-44's canonical 2-hour item lifetime
+		// if the upstream didn't set anything, matching
+		// dht.NewDefaultServerConfig.
+		if sc.Exp == 0 {
+			sc.Exp = 2 * time.Hour
+		}
 	}
 
 	// Install mutable rate limiters so Engine.SetUploadLimit /
@@ -2018,6 +2038,20 @@ func (e *Engine) DHTRoutingTableSize() (good int, total int) {
 	}
 	s := srv.Stats()
 	return s.GoodNodes, s.Nodes
+}
+
+// DHTServerForTest returns the underlying anacrolix *dht.Server
+// that the Engine's DHT-facing subsystems (Publisher, Lookup,
+// PointerPutter/Getter) drive. Returns nil if DHT is disabled.
+//
+// As the name implies this is an escape hatch for diagnostic
+// tests that need to poke at internal DHT state (e.g. read the
+// BEP-44 store directly to confirm a put landed). It is NOT
+// intended for production use. Leaking this into the stable
+// API surface would couple SwartzNet's packaging to a specific
+// anacrolix release.
+func (e *Engine) DHTServerForTest() *dht.Server {
+	return e.dhtServer()
 }
 
 
