@@ -254,6 +254,12 @@ func NewMemoryPutterGetter(priv ed25519.PrivateKey) *MemoryPutterGetter {
 	return m
 }
 
+// PubKey returns the public key derived from the private key the
+// memory store was constructed with, as a [32]byte. Used by tests
+// that need to query under the same pubkey the memory store
+// signed puts as.
+func (m *MemoryPutterGetter) PubKey() [32]byte { return m.pub }
+
 // Put stores a value under the (pub, salt) target.
 func (m *MemoryPutterGetter) Put(ctx context.Context, salt []byte, value KeywordValue) error {
 	if _, err := EncodeValue(value); err != nil {
