@@ -20,7 +20,7 @@ alongside each production file. After every code change: rebuild
 | 2 | **P1.2** | `internal/companion/build_btree.go` builds trees | P1.1 | **done** |
 | 3 | **P1.3** | `internal/companion/read_btree.go` prefix walker | P1.1, P1.2 | **done** |
 | 4 | **P2.1** | `internal/dhtindex/ppmi.go` PPMI schema | — | **done** |
-| 5 | **P2.2** | PPMI publisher glue | P2.1 | pending |
+| 5 | **P2.2** | PPMI publisher glue | P2.1 | **done** |
 | 6 | **P2.3** | PPMI reader with legacy fallback | P2.1 | pending |
 | 7 | **P3.1** | `internal/swarmsearch/riblt.go` rateless IBLT | — | **done** |
 | 8 | **P3.2** | sn_search msg_types 4–8 handlers | P3.1 | pending |
