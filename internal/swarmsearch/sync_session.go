@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // SyncRole identifies which side of a session this is.
@@ -61,7 +62,15 @@ type LocalRecord struct {
 }
 
 // SyncSession carries the full state of one RIBLT exchange.
+//
+// Thread safety: every public method takes `mu` so the session
+// can be driven concurrently from the LTEP read-loop goroutine
+// (which invokes Apply* via the handler) and the caller goroutine
+// (which calls Begin / NeedIDs / CloseSync etc.). Without this,
+// the RIBLTDecoder's internal map races against the caller's
+// NeedIDs/Added reads.
 type SyncSession struct {
+	mu      sync.Mutex
 	txid    uint32
 	role    SyncRole
 	phase   SyncSessionPhase
@@ -113,17 +122,25 @@ func NewSyncSession(txid uint32, role SyncRole, records []LocalRecord) *SyncSess
 	}
 }
 
-// TxID returns the session's transaction id.
+// TxID returns the session's transaction id. Immutable after
+// construction; no lock required.
 func (s *SyncSession) TxID() uint32 { return s.txid }
 
 // Phase returns the current state-machine position.
-func (s *SyncSession) Phase() SyncSessionPhase { return s.phase }
+func (s *SyncSession) Phase() SyncSessionPhase {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.phase
+}
 
 // Role returns the role this session was constructed with.
+// Immutable; no lock required.
 func (s *SyncSession) Role() SyncRole { return s.role }
 
 // SetBudgets overrides the default symbol/bytes caps.
 func (s *SyncSession) SetBudgets(maxSymbols, maxBytes int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if maxSymbols > 0 {
 		s.maxSymbols = maxSymbols
 	}
@@ -135,6 +152,8 @@ func (s *SyncSession) SetBudgets(maxSymbols, maxBytes int) {
 // Begin produces the SyncBegin frame for the initiator. Returns
 // an error if the session is in the wrong phase.
 func (s *SyncSession) Begin(filter SyncFilter) (SyncBegin, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.role != RoleInitiator {
 		return SyncBegin{}, errors.New("swarmsearch: Begin on non-initiator session")
 	}
@@ -158,6 +177,8 @@ func (s *SyncSession) Begin(filter SyncFilter) (SyncBegin, error) {
 // After this, callers should call ProduceSymbols to stream RIBLT
 // symbols back.
 func (s *SyncSession) ApplyBegin(m SyncBegin) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.role != RoleResponder {
 		return errors.New("swarmsearch: ApplyBegin on non-responder session")
 	}
@@ -187,6 +208,8 @@ func (s *SyncSession) ApplyBegin(m SyncBegin) error {
 // caller should wrap the result into SyncSymbols and send. Phase
 // advances to PhaseSymbolsFlowing.
 func (s *SyncSession) ProduceSymbols(count int) ([]SyncSymbol, uint32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.phase != PhaseBegun && s.phase != PhaseSymbolsFlowing {
 		return nil, 0, fmt.Errorf("swarmsearch: ProduceSymbols in phase %d", s.phase)
 	}
@@ -223,6 +246,8 @@ func (s *SyncSession) ProduceSymbols(count int) ([]SyncSymbol, uint32, error) {
 // peeling internally; after the call, NeedIDs returns IDs the
 // local side needs records for.
 func (s *SyncSession) ApplySymbols(m SyncSymbols) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.phase != PhaseBegun && s.phase != PhaseSymbolsFlowing {
 		return fmt.Errorf("swarmsearch: ApplySymbols in phase %d", s.phase)
 	}
@@ -249,6 +274,8 @@ func (s *SyncSession) ApplySymbols(m SyncSymbols) error {
 // ApplySymbols, returns the same set. Empty when no decoding has
 // happened yet or when sets are already equal.
 func (s *SyncSession) NeedIDs() [][32]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	added := s.dec.Added()
 	ids := make([][32]byte, 0, len(added))
 	for _, e := range added {
@@ -264,6 +291,8 @@ func (s *SyncSession) NeedIDs() [][32]byte {
 // lacks". Caller may use this to decide whether to ALSO send the
 // peer records (mirror flow).
 func (s *SyncSession) RemovedIDs() [][32]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	removed := s.dec.Removed()
 	out := make([][32]byte, 0, len(removed))
 	for _, e := range removed {
@@ -277,12 +306,18 @@ func (s *SyncSession) RemovedIDs() [][32]byte {
 // Converged reports whether the RIBLT decoder has zeroed out its
 // residual diff — i.e., all differences are enumerated in
 // NeedIDs + RemovedIDs.
-func (s *SyncSession) Converged() bool { return s.dec.Converged() }
+func (s *SyncSession) Converged() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dec.Converged()
+}
 
 // NeedFrame produces the SyncNeed frame requesting records for
 // the given IDs. Phase advances to PhaseNeeded. IDs may be empty
 // to signal "I'm done decoding" per SPEC §2.6.
 func (s *SyncSession) NeedFrame(ids [][32]byte) (SyncNeed, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.phase != PhaseSymbolsFlowing && s.phase != PhaseBegun {
 		return SyncNeed{}, fmt.Errorf("swarmsearch: NeedFrame in phase %d", s.phase)
 	}
@@ -304,6 +339,8 @@ func (s *SyncSession) NeedFrame(ids [][32]byte) (SyncNeed, error) {
 // matching the requested IDs. Unknown IDs (we don't have records
 // for them) land in the `missing` return.
 func (s *SyncSession) ApplyNeed(m SyncNeed) (records []LocalRecord, missing [][32]byte, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if m.TxID != s.txid {
 		return nil, nil, fmt.Errorf("swarmsearch: sync_need txid %d, want %d", m.TxID, s.txid)
 	}
@@ -329,6 +366,8 @@ func (s *SyncSession) ApplyNeed(m SyncNeed) (records []LocalRecord, missing [][3
 // BuildRecordsFrame emits a SyncRecords frame carrying the given
 // records. Caller is responsible for chunking when len > cap.
 func (s *SyncSession) BuildRecordsFrame(recs []LocalRecord, missing [][32]byte) (SyncRecords, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(recs) > MaxRecordsPerMessage {
 		return SyncRecords{}, fmt.Errorf("swarmsearch: %d records exceeds cap %d",
 			len(recs), MaxRecordsPerMessage)
@@ -363,6 +402,8 @@ func (s *SyncSession) BuildRecordsFrame(recs []LocalRecord, missing [][32]byte) 
 // is responsible for verifying per-record signatures + PoW and
 // handing them off to the indexer.
 func (s *SyncSession) ApplyRecords(m SyncRecords) ([]SyncRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if m.TxID != s.txid {
 		return nil, fmt.Errorf("swarmsearch: sync_records txid %d, want %d", m.TxID, s.txid)
 	}
@@ -381,6 +422,8 @@ func (s *SyncSession) ApplyRecords(m SyncRecords) ([]SyncRecord, error) {
 
 // Finish emits a SyncEnd frame terminating the session.
 func (s *SyncSession) Finish(status string) SyncEnd {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.phase = PhaseEnded
 	if status == "" {
 		status = SyncStatusConverged
@@ -396,6 +439,8 @@ func (s *SyncSession) Finish(status string) SyncEnd {
 
 // ApplyEnd consumes an incoming SyncEnd and closes the session.
 func (s *SyncSession) ApplyEnd(m SyncEnd) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if m.TxID != s.txid {
 		return fmt.Errorf("swarmsearch: sync_end txid %d, want %d", m.TxID, s.txid)
 	}
@@ -407,6 +452,8 @@ func (s *SyncSession) ApplyEnd(m SyncEnd) error {
 // element ID, or ok=false if absent. Used by handler.go when a
 // peer sends a sync_need we must respond to.
 func (s *SyncSession) RecordByID(id [32]byte) (LocalRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	r, ok := s.records[id]
 	return r, ok
 }
