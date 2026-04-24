@@ -53,6 +53,20 @@ import (
 // Engine.RecordCache().SetMaxRecords(n); 0 disables the cap.
 const DefaultRecordCacheMax = 100_000
 
+// DefaultRecordCacheMaxAge is how far back in time a record's T
+// field may be before the periodic prune goroutine drops it.
+// 30 days is long enough to absorb normal sync churn while
+// eventually reclaiming space from stale records whose
+// publishers went silent.
+const DefaultRecordCacheMaxAge = 30 * 24 * time.Hour
+
+// DefaultRecordCachePruneInterval is how often the engine's
+// background goroutine scans the cache for expired records.
+// Hourly keeps the total overhead tiny (one prune of ~100k
+// records costs ~7 ms per SPEC §7 bench) while keeping the
+// cache current enough.
+const DefaultRecordCachePruneInterval = 1 * time.Hour
+
 type Engine struct {
 	cfg      config.Config
 	client   *torrent.Client
@@ -745,6 +759,35 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		feelerInterval = swarmsearch.FeelerIntervalRegtest
 	}
 	swarm.StartFeeler(ctx, feelerInterval)
+
+	// Start the Aggregate RecordCache prune goroutine. Runs
+	// until bgCtx is cancelled on Engine.Close. Regtest uses a
+	// much shorter interval so scenario tests can observe the
+	// prune cycle without waiting an hour.
+	pruneInterval := DefaultRecordCachePruneInterval
+	maxAge := DefaultRecordCacheMaxAge
+	if cfg.Regtest {
+		pruneInterval = 200 * time.Millisecond
+		maxAge = 500 * time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(pruneInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-eng.bgCtx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-maxAge).Unix()
+				if dropped := recCache.PruneOlderThan(cutoff); dropped > 0 {
+					log.Debug("engine.record_cache.prune",
+						"dropped", dropped,
+						"cache_size", recCache.Len(),
+					)
+				}
+			}
+		}
+	}()
 
 	// Load the M5 spam-resistance state (Bloom filter + reputation
 	// tracker) before the publisher / lookup so the lookup can be
