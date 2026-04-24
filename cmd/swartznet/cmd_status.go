@@ -178,4 +178,8 @@ func emitAggregateBlock(w io.Writer, a *httpapi.AggregateStatusResponse) {
 	if a.ServicesAdvertised != "" {
 		fmt.Fprintf(w, "  services advertised:  0x%s\n", a.ServicesAdvertised)
 	}
+	if a.Bootstrap != nil {
+		fmt.Fprintf(w, "  bootstrap anchors:    %d\n", a.Bootstrap.Anchors)
+		fmt.Fprintf(w, "  bootstrap admitted:   %d\n", a.Bootstrap.Admitted)
+	}
 }

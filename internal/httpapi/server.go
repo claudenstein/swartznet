@@ -149,8 +149,9 @@ type Server struct {
 	// bootstrapped" apart from "DHT has peers but get-traversal
 	// finds nothing". Leaving it nil omits the field from the
 	// JSON response.
-	dhtStats func() (good, total int)
-	timeout  time.Duration
+	dhtStats  func() (good, total int)
+	bootstrap BootstrapProbe
+	timeout   time.Duration
 
 	httpServer *http.Server
 	listener   net.Listener
@@ -177,6 +178,11 @@ type Options struct {
 	// no DHT (DisableDHT=true) should leave it nil so the field
 	// is omitted from the response.
 	DHTStats func() (good, total int)
+	// Bootstrap is an optional probe into the Aggregate
+	// cold-start orchestrator. Supplied by daemon.New when a
+	// daemon.Bootstrap has been constructed. Nil-safe — a nil
+	// probe simply omits the "bootstrap" field from /aggregate.
+	Bootstrap BootstrapProbe
 }
 
 // New constructs a Server with the legacy index+swarm signature.
@@ -210,6 +216,7 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		control:   opts.Control,
 		companion: opts.Companion,
 		dhtStats:  opts.DHTStats,
+		bootstrap: opts.Bootstrap,
 		timeout:   10 * time.Second,
 	}
 }

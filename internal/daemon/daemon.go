@@ -163,7 +163,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	// --- HTTP API ---
 	if opts.APIAddr != "" {
 		httpapi.SetHealthzVersion(opts.Version)
-		api := httpapi.NewWithOptions(opts.APIAddr, opts.Log, httpapi.Options{
+		apiOpts := httpapi.Options{
 			Index:     d.Index,
 			Swarm:     eng.SwarmSearch(),
 			Publisher: eng.Publisher(),
@@ -175,7 +175,11 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			Control:   &controllerAdapter{eng: eng},
 			Companion: newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile),
 			DHTStats:  eng.DHTRoutingTableSize,
-		})
+		}
+		if d.Bootstrap != nil {
+			apiOpts.Bootstrap = d.Bootstrap
+		}
+		api := httpapi.NewWithOptions(opts.APIAddr, opts.Log, apiOpts)
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
 		} else {

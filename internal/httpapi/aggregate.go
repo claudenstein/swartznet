@@ -53,6 +53,33 @@ type AggregateStatusResponse struct {
 	// 9 (BitSetReconciliation = 0x200) to confirm the sync
 	// protocol is enabled locally.
 	ServicesAdvertised string `json:"services,omitempty"`
+
+	// Bootstrap reports the cold-start orchestrator's state —
+	// number of anchor pubkeys, admitted publishers, pending
+	// candidates awaiting admission. Nil when no Bootstrap is
+	// attached (DHT-off daemon, or legacy daemon lacking the
+	// probe hook).
+	Bootstrap *AggregateBootstrap `json:"bootstrap,omitempty"`
+}
+
+// AggregateBootstrap is the introspection payload for the
+// three-channel cold-start orchestrator (SPEC §3).
+type AggregateBootstrap struct {
+	// Anchors is the count of hardcoded+HTTPS-fetched anchor
+	// pubkeys currently in the bootstrap set.
+	Anchors int `json:"anchors"`
+	// Admitted is the count of publishers admitted via any
+	// channel (A/B/C).
+	Admitted int `json:"admitted"`
+}
+
+// BootstrapProbe is the minimal interface the httpapi layer
+// needs to read Bootstrap state without taking a direct import
+// on internal/daemon (which would create an import cycle).
+// daemon.Bootstrap satisfies it natively.
+type BootstrapProbe interface {
+	AnchorCount() int
+	AdmittedCount() int
 }
 
 // AggregateIndexer is one entry in the Indexers array.
@@ -91,6 +118,13 @@ func (s *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
 
 		services := swarmsearch.DefaultServices()
 		resp.ServicesAdvertised = formatServicesHex(uint64(services))
+	}
+
+	if s.bootstrap != nil {
+		resp.Bootstrap = &AggregateBootstrap{
+			Anchors:  s.bootstrap.AnchorCount(),
+			Admitted: s.bootstrap.AdmittedCount(),
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

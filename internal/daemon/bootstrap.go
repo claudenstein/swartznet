@@ -318,6 +318,15 @@ func (b *Bootstrap) AdmittedCount() int {
 	return len(b.admitted)
 }
 
+// AnchorCount returns the number of hardcoded+HTTPS-fetched
+// anchor pubkeys currently in the bootstrap set. Used by the
+// httpapi /aggregate endpoint via the BootstrapProbe interface.
+func (b *Bootstrap) AnchorCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.anchorKeys)
+}
+
 // admit performs the actual Lookup registration + reputation
 // seeding + admitted bookkeeping. Returns false if we've already
 // admitted this pubkey or hit the MaxTrackedPublishers cap.

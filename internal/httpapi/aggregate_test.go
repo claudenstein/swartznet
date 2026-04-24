@@ -170,6 +170,53 @@ func TestAggregateEndpointCustomRecordSource(t *testing.T) {
 	}
 }
 
+// Bootstrap probe included on the response when attached.
+type fakeBootstrap struct {
+	anchors  int
+	admitted int
+}
+
+func (f fakeBootstrap) AnchorCount() int   { return f.anchors }
+func (f fakeBootstrap) AdmittedCount() int { return f.admitted }
+
+func TestAggregateEndpointReportsBootstrap(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewWithOptions("127.0.0.1:0", log, Options{
+		Bootstrap: fakeBootstrap{anchors: 5, admitted: 12},
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Stop(ctx)
+	}()
+	base := "http://" + srv.Addr()
+
+	got := getAggregate(t, base)
+	if got.Bootstrap == nil {
+		t.Fatal("Bootstrap should be populated when a probe is attached")
+	}
+	if got.Bootstrap.Anchors != 5 {
+		t.Errorf("Anchors = %d, want 5", got.Bootstrap.Anchors)
+	}
+	if got.Bootstrap.Admitted != 12 {
+		t.Errorf("Admitted = %d, want 12", got.Bootstrap.Admitted)
+	}
+}
+
+// Without a probe, the bootstrap block is omitted.
+func TestAggregateEndpointOmitsBootstrapWhenNil(t *testing.T) {
+	base, stop := startAggregateServer(t, nil, nil)
+	defer stop()
+
+	got := getAggregate(t, base)
+	if got.Bootstrap != nil {
+		t.Errorf("Bootstrap should be omitted when probe is nil, got %+v", got.Bootstrap)
+	}
+}
+
 // /aggregate returns JSON content-type.
 func TestAggregateContentType(t *testing.T) {
 	base, stop := startAggregateServer(t, nil, nil)
