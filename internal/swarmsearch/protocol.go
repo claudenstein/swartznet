@@ -145,6 +145,14 @@ type Protocol struct {
 	// dropped.
 	recordSink RecordSink
 
+	// publisherObserver receives one call per distinct publisher
+	// pubkey observed during sync-record ingestion. The daemon's
+	// Bootstrap implements this to feed the admission policy:
+	// pubkeys seen repeatedly AND signing records the receiver
+	// chose to accept are treated as candidate indexers. Nil is
+	// valid — observations are then no-ops.
+	publisherObserver PublisherObserver
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -243,6 +251,16 @@ type RecordSink interface {
 	Add(r LocalRecord)
 }
 
+// PublisherObserver is notified about publisher pubkeys carried
+// in sync_records deliveries. Implementations route these into
+// the subscriber's admission policy — a pubkey that keeps
+// appearing in records accepted via sync is a weak but genuine
+// indexer-candidate signal. The daemon.Bootstrap satisfies this
+// interface via a small adapter that calls CandidateFromCrawl.
+type PublisherObserver interface {
+	NotePublisherSeen(pubkey [32]byte)
+}
+
 // SetRecordSource attaches (or detaches) the record provider
 // feeding sync_begin responses. Nil is allowed — the handler
 // falls back to the zero-record converged reply path.
@@ -276,6 +294,23 @@ func (p *Protocol) RecordSink() RecordSink {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.recordSink
+}
+
+// SetPublisherObserver attaches the observer that receives
+// per-publisher-pubkey notifications during sync-record ingestion.
+// Nil disables the notification pipeline. The daemon.Bootstrap
+// is the primary consumer.
+func (p *Protocol) SetPublisherObserver(obs PublisherObserver) {
+	p.mu.Lock()
+	p.publisherObserver = obs
+	p.mu.Unlock()
+}
+
+// PublisherObserver returns the attached observer, or nil.
+func (p *Protocol) PublisherObserver() PublisherObserver {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.publisherObserver
 }
 
 // PeerBook returns the Protocol's tried/new peer book.

@@ -43,6 +43,19 @@ func (a bootstrapEndorsementSink) NoteEndorsement(endorser, candidate [32]byte) 
 	a.boot.IngestEndorsement(endorser, candidate)
 }
 
+// bootstrapPublisherObserver adapts *Bootstrap to the
+// swarmsearch.PublisherObserver interface. When sync-record
+// ingestion observes a new publisher pubkey, we feed it as a
+// candidate with sigValid=true (records already passed per-record
+// ed25519 verification in the swarmsearch handler). Bootstrap's
+// admission policy then decides: Bloom/reputation hit → admit;
+// else → queue as pending for future endorsement rounds.
+type bootstrapPublisherObserver struct{ boot *Bootstrap }
+
+func (a bootstrapPublisherObserver) NotePublisherSeen(pubkey [32]byte) {
+	a.boot.CandidateFromCrawl(pubkey, true)
+}
+
 // Options controls which subsystems daemon.New starts.
 type Options struct {
 	Cfg     config.Config
@@ -157,6 +170,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			// dependency on daemon.Bootstrap.
 			if sw := eng.SwarmSearch(); sw != nil {
 				sw.SetEndorsementSink(bootstrapEndorsementSink{boot: boot})
+				sw.SetPublisherObserver(bootstrapPublisherObserver{boot: boot})
 			}
 			if len(boot.AnchorKeys()) > 0 {
 				go func() {

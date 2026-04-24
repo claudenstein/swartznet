@@ -391,7 +391,18 @@ func (p *Protocol) onSyncRecords(peerAddr string, m SyncRecords) {
 // indicator the peer is spoofing. Other records from the same
 // frame still proceed; per-record failures don't poison the
 // whole frame.
+//
+// After ingestion, the publisher pubkey of each verified record
+// is forwarded (once per distinct pubkey) to the attached
+// PublisherObserver. The observer's Bootstrap can then feed the
+// pubkey to its admission policy — records accepted via sync are
+// a weak but genuine channel-B signal.
 func (p *Protocol) ingestSyncRecords(peerAddr string, sink RecordSink, records []SyncRecord) {
+	p.mu.RLock()
+	obs := p.publisherObserver
+	p.mu.RUnlock()
+
+	seenPubs := make(map[[32]byte]struct{}, len(records))
 	for _, wr := range records {
 		if len(wr.Pk) != 32 || len(wr.Ih) != 20 || len(wr.Sig) != 64 {
 			// Wire-level already filtered these, but defence in
@@ -411,6 +422,13 @@ func (p *Protocol) ingestSyncRecords(peerAddr string, sink RecordSink, records [
 			continue
 		}
 		sink.Add(local)
+
+		if obs != nil {
+			if _, already := seenPubs[local.Pk]; !already {
+				seenPubs[local.Pk] = struct{}{}
+				obs.NotePublisherSeen(local.Pk)
+			}
+		}
 	}
 }
 
