@@ -22,7 +22,7 @@ func TestEmitStatusTextIncludesDHTWhenPresent(t *testing.T) {
 			DHT:   &httpapi.DHTStatus{GoodNodes: 17, Nodes: 42},
 		}
 		var buf bytes.Buffer
-		if code := emitStatusText(&buf, resp); code != exitOK {
+		if code := emitStatusText(&buf, resp, nil); code != exitOK {
 			t.Fatalf("emitStatusText returned %d, want exitOK", code)
 		}
 		out := buf.String()
@@ -43,7 +43,7 @@ func TestEmitStatusTextIncludesDHTWhenPresent(t *testing.T) {
 			// DHT intentionally nil — simulating a DHT-disabled daemon.
 		}
 		var buf bytes.Buffer
-		if code := emitStatusText(&buf, resp); code != exitOK {
+		if code := emitStatusText(&buf, resp, nil); code != exitOK {
 			t.Fatalf("emitStatusText returned %d, want exitOK", code)
 		}
 		out := buf.String()
