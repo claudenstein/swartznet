@@ -136,6 +136,15 @@ type Protocol struct {
 	// wire behavior for nodes that aren't yet publishers.
 	recordSource RecordSource
 
+	// recordSink catches incoming sync_records deliveries. Any
+	// records that pass per-record sig verification land here.
+	// Attach a writable cache (typically the same *RecordCache
+	// that implements RecordSource, since it satisfies both)
+	// to make a subscriber node actually ingest peer-supplied
+	// records. Nil is valid — records are then verified and
+	// dropped.
+	recordSink RecordSink
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -224,6 +233,16 @@ type RecordSource interface {
 	LocalRecords(filter SyncFilter) ([]LocalRecord, error)
 }
 
+// RecordSink accepts incoming sync_records deliveries. Every
+// record has already been sig-verified by the handler before
+// being passed to Add; sinks are free to do additional policy
+// (dedup, admission limits, PoW threshold) and MAY drop records
+// silently — the signature contract is the only wire-level
+// guarantee callers rely on.
+type RecordSink interface {
+	Add(r LocalRecord)
+}
+
 // SetRecordSource attaches (or detaches) the record provider
 // feeding sync_begin responses. Nil is allowed — the handler
 // falls back to the zero-record converged reply path.
@@ -238,6 +257,25 @@ func (p *Protocol) RecordSource() RecordSource {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.recordSource
+}
+
+// SetRecordSink attaches a writable cache that accumulates
+// records delivered via sync_records. Typically the same
+// *RecordCache used as RecordSource (it implements both
+// interfaces), but callers can split them — e.g. feed a
+// disk-backed record store as the sink while serving from
+// an in-memory mirror via RecordSource.
+func (p *Protocol) SetRecordSink(sink RecordSink) {
+	p.mu.Lock()
+	p.recordSink = sink
+	p.mu.Unlock()
+}
+
+// RecordSink returns the attached record sink, or nil.
+func (p *Protocol) RecordSink() RecordSink {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.recordSink
 }
 
 // PeerBook returns the Protocol's tried/new peer book.

@@ -575,6 +575,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// observable state is consistent across all constructor paths.
 	recCache := swarmsearch.NewRecordCache()
 	swarm.SetRecordSource(recCache)
+	swarm.SetRecordSink(recCache)
 
 	// Wire the extension-point callbacks. These are the exact hook points
 	// the integration design depends on.

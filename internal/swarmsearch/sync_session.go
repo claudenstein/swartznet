@@ -21,7 +21,9 @@
 package swarmsearch
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -456,6 +458,26 @@ func (s *SyncSession) RecordByID(id [32]byte) (LocalRecord, bool) {
 	defer s.mu.Unlock()
 	r, ok := s.records[id]
 	return r, ok
+}
+
+// verifyLocalRecordSig returns true iff the record's ed25519
+// signature is valid against its embedded pubkey. The signing
+// message is pk || kw || ih || t_LE || pow_varint, matching
+// companion.RecordSigMessage exactly (duplicated here so the
+// swarmsearch package stays free of an import on companion,
+// which would pull a heavy dependency chain).
+func verifyLocalRecordSig(r LocalRecord) bool {
+	msg := make([]byte, 0, 32+len(r.Kw)+20+8+binary.MaxVarintLen64)
+	msg = append(msg, r.Pk[:]...)
+	msg = append(msg, r.Kw...)
+	msg = append(msg, r.Ih[:]...)
+	var ts [8]byte
+	binary.LittleEndian.PutUint64(ts[:], uint64(r.T))
+	msg = append(msg, ts[:]...)
+	var nonce [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(nonce[:], r.Pow)
+	msg = append(msg, nonce[:n]...)
+	return ed25519.Verify(ed25519.PublicKey(r.Pk[:]), msg, r.Sig[:])
 }
 
 // localRecordID derives the 32-byte RIBLT element ID from a

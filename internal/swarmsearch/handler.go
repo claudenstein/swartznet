@@ -365,9 +365,52 @@ func (p *Protocol) onSyncRecords(peerAddr string, m SyncRecords) {
 			"peer", peerAddr, "txid", m.TxID)
 		return
 	}
-	if _, err := sess.ApplyRecords(m); err != nil {
+	records, err := sess.ApplyRecords(m)
+	if err != nil {
 		p.log.Debug("swarmsearch.sync_records.apply_err",
 			"peer", peerAddr, "err", err)
+		return
+	}
+	// Feed verified records into the sink. Per-record sig and
+	// PoW verification is the sink's responsibility — see
+	// ingestSyncRecord for the defence-in-depth drops. Sink nil
+	// means "drop silently", matching the legacy behavior for
+	// nodes that haven't opted into Aggregate ingestion.
+	p.mu.RLock()
+	sink := p.recordSink
+	p.mu.RUnlock()
+	if sink != nil {
+		p.ingestSyncRecords(peerAddr, sink, records)
+	}
+}
+
+// ingestSyncRecords verifies each SyncRecord's ed25519 signature
+// and hashcash PoW (when configured) before admitting it to the
+// sink. A bad signature bumps the peer's misbehavior score and
+// drops the record — signed-but-wrong-source is a strong
+// indicator the peer is spoofing. Other records from the same
+// frame still proceed; per-record failures don't poison the
+// whole frame.
+func (p *Protocol) ingestSyncRecords(peerAddr string, sink RecordSink, records []SyncRecord) {
+	for _, wr := range records {
+		if len(wr.Pk) != 32 || len(wr.Ih) != 20 || len(wr.Sig) != 64 {
+			// Wire-level already filtered these, but defence in
+			// depth: drop silently.
+			continue
+		}
+		var local LocalRecord
+		copy(local.Pk[:], wr.Pk)
+		local.Kw = wr.Kw
+		copy(local.Ih[:], wr.Ih)
+		local.T = wr.T
+		local.Pow = wr.Pow
+		copy(local.Sig[:], wr.Sig)
+
+		if !verifyLocalRecordSig(local) {
+			p.chargeMisbehavior(peerAddr, ScoreBadRecordSig, "bad_record_sig")
+			continue
+		}
+		sink.Add(local)
 	}
 }
 

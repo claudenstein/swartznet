@@ -118,6 +118,47 @@ func TestScenarioAggregateSyncRoundTrip(t *testing.T) {
 			len(sess.RemovedIDs()))
 	}
 
+	// ----- Step 6: B pulls the actual record bytes -----
+	// SendSyncNeed asks A for the records behind each decoded
+	// ID. A's handler looks them up in its session's
+	// pre-indexed cache (populated at NewSyncSession time from
+	// A's RecordSource) and replies with sync_records. B's
+	// handler then verifies each sig and adds to B's RecordSink
+	// — the same *RecordCache B reads from for future sync
+	// sessions.
+	bCache := nodeB.Eng.RecordCache()
+	if bCache.Len() != 0 {
+		t.Fatalf("node B cache should be empty before sync_need, got %d", bCache.Len())
+	}
+
+	if err := nodeB.Eng.SwarmSearch().SendSyncNeed(peerAddrFromB, sess, needs); err != nil {
+		t.Fatalf("SendSyncNeed: %v", err)
+	}
+
+	// Wait for A's sync_records reply to land in B's cache.
+	gotRecords := false
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if bCache.Len() >= len(wantIDs) {
+			gotRecords = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !gotRecords {
+		c.DumpLogs(t)
+		t.Fatalf("node B cache has %d records after SendSyncNeed, want %d",
+			bCache.Len(), len(wantIDs))
+	}
+	t.Logf("node B ingested %d records from peer A", bCache.Len())
+
+	// Verify every record in B's cache is one A minted.
+	for _, r := range bCache.Snapshot() {
+		if !wantIDs[recordID(r)] {
+			t.Errorf("B ingested unknown record: kw=%q ih=%x", r.Kw, r.Ih[:4])
+		}
+	}
+
 	// Clean close of the session.
 	if err := nodeB.Eng.SwarmSearch().CloseSync(peerAddrFromB, sess, swarmsearch.SyncStatusConverged); err != nil {
 		t.Logf("CloseSync: %v", err)
