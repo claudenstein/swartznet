@@ -16,10 +16,10 @@ alongside each production file. After every code change: rebuild
 
 | # | Phase | Deliverable | Deps | Status |
 |---|---|---|---|---|
-| 1 | **P1.1** | `internal/companion/btree.go` page encode/decode | — | pending |
-| 2 | **P1.2** | `internal/companion/build.go` builds trees | P1.1 | pending |
+| 1 | **P1.1** | `internal/companion/btree.go` page encode/decode | — | **done** `8aa333b` |
+| 2 | **P1.2** | `internal/companion/build_btree.go` builds trees | P1.1 | **done** |
 | 3 | **P1.3** | `internal/companion/subscriber.go` prefix walker | P1.1, P1.2 | pending |
-| 4 | **P2.1** | `internal/dhtindex/ppmi.go` PPMI schema | — | pending |
+| 4 | **P2.1** | `internal/dhtindex/ppmi.go` PPMI schema | — | **done** |
 | 5 | **P2.2** | PPMI publisher glue | P2.1 | pending |
 | 6 | **P2.3** | PPMI reader with legacy fallback | P2.1 | pending |
 | 7 | **P3.1** | `internal/swarmsearch/riblt.go` library wrap | — | pending |
