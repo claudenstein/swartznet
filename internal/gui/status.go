@@ -99,13 +99,16 @@ func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 	// DHT card pattern: one label per field, order matches the
 	// CLI status renderer so operators can read the same info
 	// in either surface.
-	st.aggLabels = makeLabelGroup(4)
+	st.aggLabels = makeLabelGroup(7)
 	st.aggCard = widget.NewCard("Aggregate (v0.5)", "",
 		container.NewVBox(
 			labelRow("PPMI enabled:", st.aggLabels[0]),
 			labelRow("Known indexers:", st.aggLabels[1]),
 			labelRow("Record source:", st.aggLabels[2]),
 			labelRow("Cache size:", st.aggLabels[3]),
+			labelRow("Bootstrap anchors:", st.aggLabels[4]),
+			labelRow("Bootstrap admitted:", st.aggLabels[5]),
+			labelRow("Bootstrap pending:", st.aggLabels[6]),
 		),
 	)
 
@@ -242,11 +245,18 @@ func (st *statusTab) refresh() {
 	var aggKnownIndexers int
 	aggSourceKind := "-"
 	var aggCacheSize int
+	var aggAnchors, aggAdmitted, aggPending int
 	if lookup := st.d.Eng.Lookup(); lookup != nil {
 		if lookup.PPMIGetter() != nil {
 			aggPPMI = "yes"
 		}
 		aggKnownIndexers = len(lookup.Indexers())
+	}
+	// Bootstrap counts, when the daemon has one wired.
+	if b := st.d.Bootstrap; b != nil {
+		aggAnchors = b.AnchorCount()
+		aggAdmitted = b.AdmittedCount()
+		aggPending = b.PendingCount()
 	}
 	if sw := st.d.Eng.SwarmSearch(); sw != nil {
 		if src := sw.RecordSource(); src != nil {
@@ -321,6 +331,9 @@ func (st *statusTab) refresh() {
 		st.aggLabels[1].SetText(fmt.Sprintf("%d", aggKnownIndexers))
 		st.aggLabels[2].SetText(aggSourceKind)
 		st.aggLabels[3].SetText(fmt.Sprintf("%d", aggCacheSize))
+		st.aggLabels[4].SetText(fmt.Sprintf("%d", aggAnchors))
+		st.aggLabels[5].SetText(fmt.Sprintf("%d", aggAdmitted))
+		st.aggLabels[6].SetText(fmt.Sprintf("%d", aggPending))
 
 		st.pubLabels[0].SetText(fmt.Sprintf("%d", pubKeywords))
 		st.pubLabels[1].SetText(fmt.Sprintf("%d", pubHits))

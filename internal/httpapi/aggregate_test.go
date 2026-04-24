@@ -174,15 +174,17 @@ func TestAggregateEndpointCustomRecordSource(t *testing.T) {
 type fakeBootstrap struct {
 	anchors  int
 	admitted int
+	pending  int
 }
 
 func (f fakeBootstrap) AnchorCount() int   { return f.anchors }
 func (f fakeBootstrap) AdmittedCount() int { return f.admitted }
+func (f fakeBootstrap) PendingCount() int  { return f.pending }
 
 func TestAggregateEndpointReportsBootstrap(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := NewWithOptions("127.0.0.1:0", log, Options{
-		Bootstrap: fakeBootstrap{anchors: 5, admitted: 12},
+		Bootstrap: fakeBootstrap{anchors: 5, admitted: 12, pending: 3},
 	})
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
@@ -203,6 +205,9 @@ func TestAggregateEndpointReportsBootstrap(t *testing.T) {
 	}
 	if got.Bootstrap.Admitted != 12 {
 		t.Errorf("Admitted = %d, want 12", got.Bootstrap.Admitted)
+	}
+	if got.Bootstrap.Pending != 3 {
+		t.Errorf("Pending = %d, want 3", got.Bootstrap.Pending)
 	}
 }
 

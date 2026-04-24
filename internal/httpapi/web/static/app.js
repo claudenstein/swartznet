@@ -536,6 +536,13 @@
       if (agg.record_cache_size > 0) {
         aggRows.push(['cache size', String(agg.record_cache_size)]);
       }
+      if (agg.bootstrap) {
+        aggRows.push(['anchors', String(agg.bootstrap.anchors || 0)]);
+        aggRows.push(['admitted', String(agg.bootstrap.admitted || 0)]);
+        if (agg.bootstrap.pending > 0) {
+          aggRows.push(['pending', String(agg.bootstrap.pending)]);
+        }
+      }
       grid.appendChild(card('Aggregate (v0.5)', aggRows));
     }
 

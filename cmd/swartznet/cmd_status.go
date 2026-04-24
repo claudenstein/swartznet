@@ -181,5 +181,8 @@ func emitAggregateBlock(w io.Writer, a *httpapi.AggregateStatusResponse) {
 	if a.Bootstrap != nil {
 		fmt.Fprintf(w, "  bootstrap anchors:    %d\n", a.Bootstrap.Anchors)
 		fmt.Fprintf(w, "  bootstrap admitted:   %d\n", a.Bootstrap.Admitted)
+		if a.Bootstrap.Pending > 0 {
+			fmt.Fprintf(w, "  bootstrap pending:    %d\n", a.Bootstrap.Pending)
+		}
 	}
 }

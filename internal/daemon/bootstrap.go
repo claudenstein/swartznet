@@ -341,6 +341,31 @@ func (b *Bootstrap) AnchorCount() int {
 	return len(b.anchorKeys)
 }
 
+// PendingCount returns the number of pubkeys the bootstrap has
+// observed (via channel B crawl/sync or channel C endorsements)
+// but not yet admitted. Useful for operators to see whether a
+// fresh daemon is collecting signals or sitting idle. Dedupes
+// across the endorsements and observed sets so a pubkey in both
+// counts once.
+func (b *Bootstrap) PendingCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	seen := make(map[[32]byte]struct{}, len(b.endorsements)+len(b.observed))
+	for k := range b.endorsements {
+		if _, admitted := b.admitted[k]; admitted {
+			continue
+		}
+		seen[k] = struct{}{}
+	}
+	for k := range b.observed {
+		if _, admitted := b.admitted[k]; admitted {
+			continue
+		}
+		seen[k] = struct{}{}
+	}
+	return len(seen)
+}
+
 // admit performs the actual Lookup registration + reputation
 // seeding + admitted bookkeeping. Returns false if we've already
 // admitted this pubkey or hit the MaxTrackedPublishers cap.

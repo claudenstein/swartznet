@@ -71,6 +71,11 @@ type AggregateBootstrap struct {
 	// Admitted is the count of publishers admitted via any
 	// channel (A/B/C).
 	Admitted int `json:"admitted"`
+	// Pending is the count of publishers observed (via channel
+	// B crawl/sync or channel C endorsements) but not yet
+	// admitted. Distinct pubkeys — a pubkey in both sets counts
+	// once.
+	Pending int `json:"pending"`
 }
 
 // BootstrapProbe is the minimal interface the httpapi layer
@@ -80,6 +85,7 @@ type AggregateBootstrap struct {
 type BootstrapProbe interface {
 	AnchorCount() int
 	AdmittedCount() int
+	PendingCount() int
 }
 
 // AggregateIndexer is one entry in the Indexers array.
@@ -124,6 +130,7 @@ func (s *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
 		resp.Bootstrap = &AggregateBootstrap{
 			Anchors:  s.bootstrap.AnchorCount(),
 			Admitted: s.bootstrap.AdmittedCount(),
+			Pending:  s.bootstrap.PendingCount(),
 		}
 	}
 
