@@ -23,13 +23,14 @@ import (
 // always call Close when done. Fields are exported so callers
 // (CLI, GUI) can reach the subsystems directly.
 type Daemon struct {
-	Eng     *engine.Engine
-	Index   *indexer.Index              // nil when NoIndex is set
-	CompPub *companion.Publisher        // nil when conditions unmet
-	CompSub *companion.SubscriberWorker // nil when conditions unmet
-	API     *httpapi.Server             // nil when APIAddr is empty
-	Cfg     config.Config
-	Log     *slog.Logger
+	Eng       *engine.Engine
+	Index     *indexer.Index              // nil when NoIndex is set
+	CompPub   *companion.Publisher        // nil when conditions unmet
+	CompSub   *companion.SubscriberWorker // nil when conditions unmet
+	API       *httpapi.Server             // nil when APIAddr is empty
+	Bootstrap *Bootstrap                  // v0.5 Aggregate bootstrap; nil when Lookup unavailable
+	Cfg       config.Config
+	Log       *slog.Logger
 }
 
 // Options controls which subsystems daemon.New starts.
@@ -115,6 +116,39 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 				}
 				compSub.Start()
 				d.CompSub = compSub
+			}
+		}
+	}
+
+	// --- Aggregate bootstrap (P4.1) ---
+	// Construct the three-channel cold-start orchestrator when the
+	// engine has a Lookup (i.e. DHT is enabled). Runs channel A
+	// (anchor PPMI fetch) in a background goroutine so daemon.New
+	// doesn't block on the 5-anchor parallel fetch. Channel B
+	// (BEP-51 crawl) and channel C (peer_announce endorsement
+	// gossip) stay pluggable — they need future engine hooks.
+	if eng.Lookup() != nil {
+		bootOpts := DefaultBootstrapOptions()
+		boot, err := NewBootstrap(
+			eng.Lookup(),
+			eng.PointerGetter(), // AnacrolixGetter implements PPMIGetter via GetPPMI
+			eng.KnownGoodBloom(),
+			eng.ReputationTracker(),
+			bootOpts,
+			opts.Log,
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: aggregate bootstrap init failed: %v\n", err)
+		} else {
+			d.Bootstrap = boot
+			if len(boot.AnchorKeys()) > 0 {
+				go func() {
+					succeeded, errs := boot.RunAnchors(ctx)
+					if opts.Log != nil {
+						opts.Log.Info("daemon.aggregate_bootstrap.anchors",
+							"succeeded", succeeded, "errors", len(errs))
+					}
+				}()
 			}
 		}
 	}
