@@ -25,7 +25,7 @@ alongside each production file. After every code change: rebuild
 | 7 | **P3.1** | `internal/swarmsearch/riblt.go` rateless IBLT | — | **done** |
 | 8 | **P3.2** | sn_search msg_types 4–8 handlers | P3.1 | pending |
 | 9 | **P4.1** | `internal/daemon/bootstrap.go` three channels | P2.3, P3.2 | pending |
-| 10 | **P5.1** | Hashcash + double-hashed salt + misbehavior | P2.1, P3.2 | pending |
+| 10 | **P5.1** | Hashcash + double-hashed salt + misbehavior | P2.1, P3.2 | **done** (ingest wiring pending P3.2) |
 | 11 | **P5.2** | HTTPS anchor fallback | P4.1 | pending |
 | 12 | **Final** | Wire-compat matrix + regression gates | all above | pending |
 
