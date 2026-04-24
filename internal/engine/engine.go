@@ -49,8 +49,9 @@ type Engine struct {
 	log      *slog.Logger
 	idx      *indexer.Index        // nil-safe; may be unset for headless tests
 	pipeline *indexer.Pipeline     // nil iff idx == nil
-	swarm    *swarmsearch.Protocol // always non-nil after New
-	peers    *peerTracker          // addr → *torrent.PeerConn, for swarmSender
+	swarm    *swarmsearch.Protocol   // always non-nil after New
+	recCache *swarmsearch.RecordCache // Aggregate (v0.5) record source; always non-nil after New
+	peers    *peerTracker            // addr → *torrent.PeerConn, for swarmSender
 
 	identity      *identity.Identity        // ed25519 publisher keypair, nil for tests
 	publisher     *dhtindex.Publisher       // nil if no DHT or no identity
@@ -168,6 +169,14 @@ func (pt *peerTracker) get(addr string) (*torrent.PeerConn, bool) {
 	pc, ok := pt.conns[addr]
 	return pc, ok
 }
+
+// RecordCache returns the engine's Aggregate record cache. Never
+// nil; callers (publisher hot-paths, CLI build subcommand, tests)
+// Add() signed records to make them visible to sync-session
+// responders. Attached as the swarm protocol's RecordSource at
+// engine construction so the /aggregate endpoint reports non-
+// zero cache_size once records land here.
+func (e *Engine) RecordCache() *swarmsearch.RecordCache { return e.recCache }
 
 // SwarmSearch returns the engine's sn_search protocol handle. Callers
 // (the CLI, future REST layer) use this to issue outbound swarm
@@ -512,6 +521,16 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// owns the per-peer state the callbacks will populate.
 	swarm := swarmsearch.New(log)
 
+	// Attach an empty Aggregate RecordCache as the swarm's
+	// RecordSource. Publishers call RecordCache() to add freshly
+	// signed records; sync-session responders pull matching
+	// records on every sync_begin. Attached even in headless
+	// test setups because the cache is cheap (empty map) and
+	// keeping this wiring unconditional means the engine's
+	// observable state is consistent across all constructor paths.
+	recCache := swarmsearch.NewRecordCache()
+	swarm.SetRecordSource(recCache)
+
 	// Wire the extension-point callbacks. These are the exact hook points
 	// the integration design depends on.
 	tc.Callbacks.StatusUpdated = append(tc.Callbacks.StatusUpdated,
@@ -644,6 +663,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		client:    cl,
 		log:       log,
 		swarm:     swarm,
+		recCache:  recCache,
 		handles:   make(map[metainfo.Hash]*Handle),
 		peers:     peers,
 		ulLimiter: ulLimiter,
