@@ -238,27 +238,64 @@ func (p *Protocol) handleSyncFrame(peerAddr string, hdr messageHeader, payload [
 	}
 }
 
-// onSyncBegin creates a responder session and emits a sync_end
-// reply. A record-source hook isn't plumbed yet (lands with engine
-// integration), so for now the node behaves as a publisher with
-// zero records to share: ack the session, close it. This is
-// correct wire behavior — SPEC §2 allows zero-symbol sessions to
-// complete immediately.
+// onSyncBegin creates a responder session and either streams an
+// initial batch of RIBLT symbols (when a RecordSource is attached
+// and has matching records) or immediately emits sync_end
+// converged (zero-record session — still correct wire behavior per
+// SPEC §2).
 func (p *Protocol) onSyncBegin(peerAddr string, m SyncBegin, reply ReplyFunc) {
-	// Create a responder session for bookkeeping. When the engine
-	// plumbs a record source in, this is where we'd load matching
-	// local records.
-	sess := NewSyncSession(m.TxID, RoleResponder, nil)
+	// Query the record source for records matching the peer's
+	// filter. A nil source or a nil-returning LocalRecords call
+	// is treated as "no records to share" — not an error.
+	p.mu.RLock()
+	src := p.recordSource
+	p.mu.RUnlock()
+
+	var localRecords []LocalRecord
+	if src != nil {
+		recs, err := src.LocalRecords(m.Filter)
+		if err != nil {
+			p.log.Debug("swarmsearch.sync_begin.record_source_err",
+				"peer", peerAddr, "err", err)
+		} else {
+			localRecords = recs
+		}
+	}
+
+	sess := NewSyncSession(m.TxID, RoleResponder, localRecords)
 	if err := sess.ApplyBegin(m); err != nil {
 		p.log.Debug("swarmsearch.sync_begin.apply_err", "peer", peerAddr, "err", err)
 		return
 	}
 	p.registerSyncSession(peerAddr, sess)
 
-	// No records source yet → immediately emit sync_end converged.
-	end := sess.Finish(SyncStatusConverged)
-	p.sendSyncEnd(reply, end)
-	p.releaseSyncSession(peerAddr, m.TxID)
+	if len(localRecords) == 0 {
+		// Zero-record session: emit sync_end converged immediately.
+		end := sess.Finish(SyncStatusConverged)
+		p.sendSyncEnd(reply, end)
+		p.releaseSyncSession(peerAddr, m.TxID)
+		return
+	}
+
+	// Produce an initial batch of symbols and stream them.
+	// Subsequent batches fire when the initiator sends
+	// sync_need or a heartbeat sync_symbols. v0.5 ships a
+	// one-batch responder; richer streaming lands when the
+	// engine exposes a dedicated goroutine to drive it.
+	syms, baseIdx, err := sess.ProduceSymbols(MaxSymbolsPerMessage)
+	if err != nil {
+		p.log.Debug("swarmsearch.sync_begin.produce_err",
+			"peer", peerAddr, "err", err)
+		end := sess.Finish(SyncStatusAborted)
+		p.sendSyncEnd(reply, end)
+		p.releaseSyncSession(peerAddr, m.TxID)
+		return
+	}
+	p.sendSyncSymbols(reply, SyncSymbols{
+		TxID:    m.TxID,
+		Symbols: syms,
+		Index:   baseIdx,
+	})
 }
 
 func (p *Protocol) onSyncSymbols(peerAddr string, m SyncSymbols) {
@@ -281,16 +318,17 @@ func (p *Protocol) onSyncNeed(peerAddr string, m SyncNeed, reply ReplyFunc) {
 			"peer", peerAddr, "txid", m.TxID)
 		return
 	}
-	// Without a records source we always report every requested
-	// id as missing. Per SPEC §2.7 the peer tolerates `missing`
-	// entries gracefully.
-	missing := make([][32]byte, 0, len(m.IDs))
-	for _, raw := range m.IDs {
-		var id [32]byte
-		copy(id[:], raw)
-		missing = append(missing, id)
+	// ApplyNeed looks up the requested IDs against the session's
+	// pre-indexed local records (populated at NewSyncSession time
+	// from the RecordSource). Unknown IDs land in `missing`;
+	// known ones come back as LocalRecords ready to ship.
+	records, missing, err := sess.ApplyNeed(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.sync_need.apply_err",
+			"peer", peerAddr, "err", err)
+		return
 	}
-	frame, err := sess.BuildRecordsFrame(nil, missing)
+	frame, err := sess.BuildRecordsFrame(records, missing)
 	if err != nil {
 		p.log.Debug("swarmsearch.sync_need.build_err",
 			"peer", peerAddr, "err", err)
@@ -337,6 +375,18 @@ func (p *Protocol) sendSyncRecords(reply ReplyFunc, m SyncRecords) {
 	raw, err := EncodeSyncRecords(m)
 	if err != nil {
 		p.log.Debug("swarmsearch.send_sync_records.encode_err", "err", err)
+		return
+	}
+	if reply != nil {
+		_ = reply(raw)
+	}
+}
+
+// sendSyncSymbols serialises and forwards a SyncSymbols frame.
+func (p *Protocol) sendSyncSymbols(reply ReplyFunc, m SyncSymbols) {
+	raw, err := EncodeSyncSymbols(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.send_sync_symbols.encode_err", "err", err)
 		return
 	}
 	if reply != nil {

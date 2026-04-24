@@ -127,6 +127,15 @@ type Protocol struct {
 	// peers that never sync.
 	syncSessions map[string]map[uint32]*SyncSession
 
+	// recordSource feeds the Aggregate sync responder: on
+	// sync_begin the handler queries LocalRecords(filter) and
+	// pre-populates the session so subsequent ProduceSymbols /
+	// ApplyNeed calls have something to share. Nil until
+	// SetRecordSource is called — the handler then ships a
+	// zero-record converged reply, which is correct (and quiet)
+	// wire behavior for nodes that aren't yet publishers.
+	recordSource RecordSource
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -182,6 +191,37 @@ func New(log *slog.Logger) *Protocol {
 // HitCache returns the Protocol's LRU hit cache. Callers can
 // inspect cache size for /status output.
 func (p *Protocol) HitCache() *HitCache { return p.hitCache }
+
+// RecordSource exposes the local set of Aggregate records the
+// node is willing to share via sync_begin-initiated set
+// reconciliation. Implementations are typically backed by the
+// publisher's in-memory record cache or a live query against
+// the companion index subsystem.
+//
+// LocalRecords MUST return a snapshot — callers store the slice
+// in a SyncSession and index by record ID. It is safe for the
+// implementation to filter by the supplied SyncFilter (pubkeys,
+// since, prefix) or to return everything and let the peer's
+// RIBLT decoder throw away what doesn't interest it.
+type RecordSource interface {
+	LocalRecords(filter SyncFilter) ([]LocalRecord, error)
+}
+
+// SetRecordSource attaches (or detaches) the record provider
+// feeding sync_begin responses. Nil is allowed — the handler
+// falls back to the zero-record converged reply path.
+func (p *Protocol) SetRecordSource(src RecordSource) {
+	p.mu.Lock()
+	p.recordSource = src
+	p.mu.Unlock()
+}
+
+// RecordSource returns the attached record provider, or nil.
+func (p *Protocol) RecordSource() RecordSource {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.recordSource
+}
 
 // PeerBook returns the Protocol's tried/new peer book.
 // Callers can use it to inspect the tried/new split for
