@@ -121,6 +121,12 @@ type Protocol struct {
 	// will build on this cache for the short-ID dedup path.
 	hitCache *HitCache
 
+	// syncSessions is the per-peer set of active Aggregate sync
+	// sessions (SPEC §2). Keyed by peer-addr → txid → session.
+	// Lazily initialised by handleSyncFrame; no wake-up cost on
+	// peers that never sync.
+	syncSessions map[string]map[uint32]*SyncSession
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32

@@ -168,10 +168,216 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 			"services", pa.Services,
 			"pk_gossiped", havePk,
 		)
+	case MsgTypeSyncBegin, MsgTypeSyncSymbols, MsgTypeSyncNeed,
+		MsgTypeSyncRecords, MsgTypeSyncEnd:
+		p.handleSyncFrame(peerAddr, hdr, payload, reply)
 	default:
 		p.log.Debug("swarmsearch.unknown_msg_type",
 			"peer", peerAddr, "msg_type", hdr.MsgType)
 		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "unknown_msg_type")
+	}
+}
+
+// handleSyncFrame is the dispatch hub for Aggregate sync-session
+// messages (msg_types 4..8 per SPEC §2). Every frame first clears
+// the capability gate — a peer that hasn't advertised
+// BitSetReconciliation in its peer_announce gets reject code 2
+// and no state changes. Per-peer session state is keyed by
+// (peerAddr, txid) so one peer can run multiple sessions
+// sequentially; concurrent sessions on the same peer are not yet
+// supported (SPEC §2.9).
+func (p *Protocol) handleSyncFrame(peerAddr string, hdr messageHeader, payload []byte, reply ReplyFunc) {
+	// Capability gate.
+	p.mu.RLock()
+	ps, known := p.peers[peerAddr]
+	p.mu.RUnlock()
+	hasCap := known && ps.Services.Has(BitSetReconciliation)
+	if !hasCap {
+		p.sendReject(reply, peerAddr, hdr.TxID, RejectUnsupportedScope,
+			"sync_not_supported")
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "sync_without_cap")
+		return
+	}
+
+	switch hdr.MsgType {
+	case MsgTypeSyncBegin:
+		m, err := DecodeSyncBegin(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_begin")
+			return
+		}
+		p.onSyncBegin(peerAddr, m, reply)
+	case MsgTypeSyncSymbols:
+		m, err := DecodeSyncSymbols(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_symbols")
+			return
+		}
+		p.onSyncSymbols(peerAddr, m)
+	case MsgTypeSyncNeed:
+		m, err := DecodeSyncNeed(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_need")
+			return
+		}
+		p.onSyncNeed(peerAddr, m, reply)
+	case MsgTypeSyncRecords:
+		m, err := DecodeSyncRecords(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_records")
+			return
+		}
+		p.onSyncRecords(peerAddr, m)
+	case MsgTypeSyncEnd:
+		m, err := DecodeSyncEnd(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_end")
+			return
+		}
+		p.onSyncEnd(peerAddr, m)
+	}
+}
+
+// onSyncBegin creates a responder session and emits a sync_end
+// reply. A record-source hook isn't plumbed yet (lands with engine
+// integration), so for now the node behaves as a publisher with
+// zero records to share: ack the session, close it. This is
+// correct wire behavior — SPEC §2 allows zero-symbol sessions to
+// complete immediately.
+func (p *Protocol) onSyncBegin(peerAddr string, m SyncBegin, reply ReplyFunc) {
+	// Create a responder session for bookkeeping. When the engine
+	// plumbs a record source in, this is where we'd load matching
+	// local records.
+	sess := NewSyncSession(m.TxID, RoleResponder, nil)
+	if err := sess.ApplyBegin(m); err != nil {
+		p.log.Debug("swarmsearch.sync_begin.apply_err", "peer", peerAddr, "err", err)
+		return
+	}
+	p.registerSyncSession(peerAddr, sess)
+
+	// No records source yet → immediately emit sync_end converged.
+	end := sess.Finish(SyncStatusConverged)
+	p.sendSyncEnd(reply, end)
+	p.releaseSyncSession(peerAddr, m.TxID)
+}
+
+func (p *Protocol) onSyncSymbols(peerAddr string, m SyncSymbols) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess == nil {
+		p.log.Debug("swarmsearch.sync_symbols.unknown_session",
+			"peer", peerAddr, "txid", m.TxID)
+		return
+	}
+	if err := sess.ApplySymbols(m); err != nil {
+		p.log.Debug("swarmsearch.sync_symbols.apply_err",
+			"peer", peerAddr, "err", err)
+	}
+}
+
+func (p *Protocol) onSyncNeed(peerAddr string, m SyncNeed, reply ReplyFunc) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess == nil {
+		p.log.Debug("swarmsearch.sync_need.unknown_session",
+			"peer", peerAddr, "txid", m.TxID)
+		return
+	}
+	// Without a records source we always report every requested
+	// id as missing. Per SPEC §2.7 the peer tolerates `missing`
+	// entries gracefully.
+	missing := make([][32]byte, 0, len(m.IDs))
+	for _, raw := range m.IDs {
+		var id [32]byte
+		copy(id[:], raw)
+		missing = append(missing, id)
+	}
+	frame, err := sess.BuildRecordsFrame(nil, missing)
+	if err != nil {
+		p.log.Debug("swarmsearch.sync_need.build_err",
+			"peer", peerAddr, "err", err)
+		return
+	}
+	p.sendSyncRecords(reply, frame)
+}
+
+func (p *Protocol) onSyncRecords(peerAddr string, m SyncRecords) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess == nil {
+		p.log.Debug("swarmsearch.sync_records.unknown_session",
+			"peer", peerAddr, "txid", m.TxID)
+		return
+	}
+	if _, err := sess.ApplyRecords(m); err != nil {
+		p.log.Debug("swarmsearch.sync_records.apply_err",
+			"peer", peerAddr, "err", err)
+	}
+}
+
+func (p *Protocol) onSyncEnd(peerAddr string, m SyncEnd) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess != nil {
+		_ = sess.ApplyEnd(m)
+	}
+	p.releaseSyncSession(peerAddr, m.TxID)
+}
+
+// sendSyncEnd serialises and forwards a SyncEnd frame.
+func (p *Protocol) sendSyncEnd(reply ReplyFunc, m SyncEnd) {
+	raw, err := EncodeSyncEnd(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.send_sync_end.encode_err", "err", err)
+		return
+	}
+	if reply != nil {
+		_ = reply(raw)
+	}
+}
+
+// sendSyncRecords serialises and forwards a SyncRecords frame.
+func (p *Protocol) sendSyncRecords(reply ReplyFunc, m SyncRecords) {
+	raw, err := EncodeSyncRecords(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.send_sync_records.encode_err", "err", err)
+		return
+	}
+	if reply != nil {
+		_ = reply(raw)
+	}
+}
+
+// registerSyncSession stores a session indexed by (peer, txid).
+func (p *Protocol) registerSyncSession(peerAddr string, sess *SyncSession) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.syncSessions == nil {
+		p.syncSessions = make(map[string]map[uint32]*SyncSession)
+	}
+	m, ok := p.syncSessions[peerAddr]
+	if !ok {
+		m = make(map[uint32]*SyncSession)
+		p.syncSessions[peerAddr] = m
+	}
+	m[sess.TxID()] = sess
+}
+
+// lookupSyncSession returns the session for (peer, txid) or nil.
+func (p *Protocol) lookupSyncSession(peerAddr string, txid uint32) *SyncSession {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if m, ok := p.syncSessions[peerAddr]; ok {
+		return m[txid]
+	}
+	return nil
+}
+
+// releaseSyncSession drops the session entry. No-op if absent.
+func (p *Protocol) releaseSyncSession(peerAddr string, txid uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if m, ok := p.syncSessions[peerAddr]; ok {
+		delete(m, txid)
+		if len(m) == 0 {
+			delete(p.syncSessions, peerAddr)
+		}
 	}
 }
 

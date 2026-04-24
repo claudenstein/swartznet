@@ -15,6 +15,64 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Added — "Aggregate" distributed-layer redesign
+
+A multi-commit series inverts Layer-D from per-keyword BEP-44
+items into per-publisher pointers, moves the real keyword index
+into a piece-aligned B-tree inside a regular BitTorrent
+"companion index torrent", and reconciles updates between peers
+via a new Rateless IBLT set-sync session layered on `sn_search`.
+Design and rationale in
+[`docs/research/PROPOSAL.md`](docs/research/PROPOSAL.md);
+byte-level spec in [`docs/research/SPEC.md`](docs/research/SPEC.md);
+phase-by-phase tracking in
+[`docs/research/ROADMAP.md`](docs/research/ROADMAP.md).
+
+Shipped components:
+
+  - `internal/companion/btree.go` — B-tree page layout
+    (magic `SNAGG\0`, interior/leaf/trailer kinds) with
+    deterministic build, BFS piece assignment, ed25519-signed
+    trailer binding the tree to a publisher.
+  - `internal/companion/read_btree.go` — prefix-query walker
+    with trailer-sig verification and per-record sig re-check
+    on every returned hit.
+  - `internal/companion/pow.go` — hashcash mint +
+    `SignAndMineRecord` convenience (D=20 default).
+  - `internal/dhtindex/ppmi.go` — Publisher Pointer Mutable
+    Item. One BEP-44 item per publisher at the fixed
+    double-hashed salt `SHA256("snet.index")`. Collapses DHT
+    cost from O(publishers × keywords) to O(publishers).
+  - `internal/dhtindex/lookup.go` — `Lookup.Query` resolves
+    PPMIs first, falls back to legacy per-keyword for
+    publishers that haven't migrated. Dual-read migration.
+  - `internal/swarmsearch/riblt.go` — rateless IBLT encoder/
+    decoder (SIGCOMM 2024) with graduated-degree cycle.
+    Converges in ~3d symbols for symmetric difference d.
+  - `internal/swarmsearch/sync_{wire,session}.go` — msg_types
+    4-8 wire format and in-process session state machine.
+  - `internal/swarmsearch/handler.go` — LTEP dispatch for
+    sync msg_types behind the `BitSetReconciliation` (services
+    bit 9) capability gate. Peers without the bit receive
+    `reject code 2`.
+  - `internal/daemon/bootstrap.go` + `bootstrap_https.go` —
+    three-channel cold-start (anchors + BEP-51 candidates +
+    `peer_announce` endorsements) plus last-ditch HTTPS anchor
+    fallback.
+
+Test coverage: ~130 new test functions across the four
+packages, including the capstone `TestAggregateEndToEnd` that
+exercises publisher → PPMI → subscriber → prefix-query in one
+pass.
+
+Still pending for the full v0.5.0 milestone: engine-level
+plumbing of the BEP-51 crawler into
+`Bootstrap.CandidateFromCrawl`, and of a LocalRecord source
+into the sync-session responder path so nodes actually share
+records (current handler ships a zero-record converged reply).
+Both need live DHT / torrent-engine context and will land as
+follow-on integration commits.
+
 ### Fixed
 
   - **Layer-D BEP-44 put/get round-trip**. anacrolix/torrent's
