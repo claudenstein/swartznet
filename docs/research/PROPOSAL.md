@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Date | 2026-04-24 |
-| Status | Draft proposal, not yet accepted |
+| Status | **APPROVED 2026-04-24** — implementation in progress, tracked in `docs/research/ROADMAP.md` |
 | Supersedes in part | §4.3 (Layer D), §5 (sn_search v1) of `docs/05-integration-design.md` |
 | Amends | `docs/07-bep-dht-keyword-index-draft.md`, `docs/06-bep-sn_search-draft.md` |
 | Companion research | `docs/research/{A,B,C,D}-*.md` |
