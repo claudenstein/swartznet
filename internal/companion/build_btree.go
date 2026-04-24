@@ -126,10 +126,10 @@ func BuildBTree(in BuildBTreeInput) (BuildBTreeOutput, error) {
 		return compareRecords(records[i], records[j]) < 0
 	})
 
+	// MinPoWBits == 0 is "not enforcing" (test mode). Production
+	// callers should pass MinPoWBitsDefault explicitly; we don't
+	// auto-default here so unit tests don't need to mine nonces.
 	powBits := in.MinPoWBits
-	if powBits == 0 {
-		powBits = MinPoWBitsDefault
-	}
 
 	// Step 1: greedy-pack leaves.
 	leafGroups, err := packLeaves(records, in.PieceSize)
