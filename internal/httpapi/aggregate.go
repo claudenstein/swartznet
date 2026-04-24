@@ -48,6 +48,11 @@ type AggregateStatusResponse struct {
 	// RecordSource when it is a *RecordCache. Zero otherwise.
 	RecordCacheSize int `json:"record_cache_size,omitempty"`
 
+	// RecordCacheMax is the FIFO cap on the RecordCache; 0 means
+	// unlimited. Lets operators see both current size and the
+	// ceiling at a glance.
+	RecordCacheMax int `json:"record_cache_max,omitempty"`
+
 	// ServicesAdvertised is the hex-encoded ServiceBits this
 	// daemon puts on its peer_announce frames. Clients check bit
 	// 9 (BitSetReconciliation = 0x200) to confirm the sync
@@ -117,6 +122,7 @@ func (s *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
 			if cache, ok := src.(*swarmsearch.RecordCache); ok {
 				resp.RecordSourceKind = "cache"
 				resp.RecordCacheSize = cache.Len()
+				resp.RecordCacheMax = cache.MaxRecords()
 			} else {
 				resp.RecordSourceKind = "custom"
 			}

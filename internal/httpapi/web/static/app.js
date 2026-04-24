@@ -533,8 +533,12 @@
       if (agg.record_source_kind) {
         aggRows.push(['record source', agg.record_source_kind]);
       }
-      if (agg.record_cache_size > 0) {
-        aggRows.push(['cache size', String(agg.record_cache_size)]);
+      if (agg.record_cache_size > 0 || agg.record_cache_max > 0) {
+        if (agg.record_cache_max > 0) {
+          aggRows.push(['cache', String(agg.record_cache_size || 0) + ' / ' + String(agg.record_cache_max)]);
+        } else {
+          aggRows.push(['cache size', String(agg.record_cache_size)]);
+        }
       }
       if (agg.bootstrap) {
         aggRows.push(['anchors', String(agg.bootstrap.anchors || 0)]);

@@ -44,6 +44,15 @@ import (
 // sn_search BEP-10 extension to every peer we connect to and tracks which
 // remote peers speak it back. External packages reach the protocol via
 // Engine.SwarmSearch().
+
+// DefaultRecordCacheMax is the FIFO cap applied to the engine's
+// Aggregate RecordCache at engine.New time. 100 000 records at
+// ~170 bytes/record is ~17 MB steady-state memory — reasonable
+// for a desktop daemon that sits between a publisher role and
+// a subscriber role. Operators can override via
+// Engine.RecordCache().SetMaxRecords(n); 0 disables the cap.
+const DefaultRecordCacheMax = 100_000
+
 type Engine struct {
 	cfg      config.Config
 	client   *torrent.Client
@@ -573,7 +582,14 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// test setups because the cache is cheap (empty map) and
 	// keeping this wiring unconditional means the engine's
 	// observable state is consistent across all constructor paths.
+	// 100k records at ~170 bytes/record caps memory at ~17 MB,
+	// which is reasonable for a desktop daemon holding its own
+	// publications plus absorbed-from-sync records. Operators
+	// who want a different cap can call
+	// Engine.RecordCache().SetMaxRecords(n) at any time; 0
+	// disables.
 	recCache := swarmsearch.NewRecordCache()
+	recCache.SetMaxRecords(DefaultRecordCacheMax)
 	swarm.SetRecordSource(recCache)
 	swarm.SetRecordSink(recCache)
 

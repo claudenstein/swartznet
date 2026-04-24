@@ -172,8 +172,13 @@ func emitAggregateBlock(w io.Writer, a *httpapi.AggregateStatusResponse) {
 	if a.RecordSourceKind != "" {
 		fmt.Fprintf(w, "  record source:        %s\n", a.RecordSourceKind)
 	}
-	if a.RecordCacheSize > 0 {
-		fmt.Fprintf(w, "  record cache size:    %d\n", a.RecordCacheSize)
+	if a.RecordCacheSize > 0 || a.RecordCacheMax > 0 {
+		if a.RecordCacheMax > 0 {
+			fmt.Fprintf(w, "  record cache:         %d / %d\n",
+				a.RecordCacheSize, a.RecordCacheMax)
+		} else {
+			fmt.Fprintf(w, "  record cache size:    %d\n", a.RecordCacheSize)
+		}
 	}
 	if a.ServicesAdvertised != "" {
 		fmt.Fprintf(w, "  services advertised:  0x%s\n", a.ServicesAdvertised)
