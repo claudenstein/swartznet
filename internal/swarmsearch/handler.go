@@ -128,16 +128,45 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_peer_announce")
 			return
 		}
+		// Wire-compat §8.4-C: if the peer gossiped a 32-byte
+		// publisher pubkey, stash it on their PeerState AND
+		// forward it to any attached IndexerSink so the DHT
+		// lookup layer picks it up for future fan-out. The
+		// all-zero pubkey is rejected because it cannot
+		// correspond to a real ed25519 identity — accepting it
+		// would let a misbehaving peer silently add a useless
+		// key to the indexer fan-out set on every reconnect.
+		var (
+			gotPubkey [32]byte
+			havePk    bool
+			sink      IndexerSink
+		)
+		if len(pa.Pubkey) == 32 {
+			copy(gotPubkey[:], pa.Pubkey)
+			if gotPubkey != ([32]byte{}) {
+				havePk = true
+			}
+		}
 		p.mu.Lock()
 		if ps, ok := p.peers[peerAddr]; ok {
 			ps.Services = ServiceBits(pa.Services)
 			ps.Version = pa.Version
+			if havePk {
+				ps.PublisherPubkey = gotPubkey
+			}
 		}
+		sink = p.indexerSink
 		p.mu.Unlock()
+		if havePk && sink != nil {
+			// Label the indexer with the peer's address so ops
+			// logs can tell where the pubkey came from.
+			sink.NoteGossipIndexer(gotPubkey, "gossip:"+peerAddr)
+		}
 		p.log.Info("swarmsearch.rx_peer_announce",
 			"peer", peerAddr,
 			"version", pa.Version,
 			"services", pa.Services,
+			"pk_gossiped", havePk,
 		)
 	default:
 		p.log.Debug("swarmsearch.unknown_msg_type",
@@ -194,6 +223,17 @@ func (p *Protocol) handleQuery(peerAddr string, payload []byte, reply ReplyFunc)
 	// Respect ShareLocal = 0: not serving queries.
 	if searcher == nil || caps.ShareLocal == 0 {
 		p.sendReject(reply, peerAddr, q.TxID, RejectShuttingDown, "searcher_disabled")
+		return
+	}
+
+	// Wire-compat §8.4-B: if the querier explicitly asked for a
+	// scope level we don't support (e.g. 'c' content hits on a
+	// C0 node), send RejectUnsupportedScope rather than silently
+	// downgrade. An empty scope means "responder's choice" and
+	// is always accepted. 'n' is always accepted too — every
+	// node can serve torrent-name matches.
+	if msg, ok := unsupportedScopeReason(q.Scope, caps); ok {
+		p.sendReject(reply, peerAddr, q.TxID, RejectUnsupportedScope, msg)
 		return
 	}
 
@@ -326,6 +366,25 @@ func (p *Protocol) sendReject(reply ReplyFunc, peerAddr string, txid uint32, cod
 		p.log.Debug("swarmsearch.send_reject_err",
 			"peer", peerAddr, "err", err)
 	}
+}
+
+// unsupportedScopeReason returns ("missing_f_hits"/"missing_c_hits",
+// true) when scope asks for a level the responder's capabilities
+// do not cover. Empty scope is treated as "responder's choice"
+// and never triggers a reject. Unknown letters are ignored — the
+// spec only defines 'n', 'f', 'c', and new letters added later
+// must be forward-compatible.
+func unsupportedScopeReason(scope string, caps Capabilities) (string, bool) {
+	if scope == "" {
+		return "", false
+	}
+	if strings.ContainsRune(scope, 'c') && caps.ContentHits == 0 {
+		return "unsupported_scope_c", true
+	}
+	if strings.ContainsRune(scope, 'f') && caps.FileHits == 0 {
+		return "unsupported_scope_f", true
+	}
+	return "", false
 }
 
 // _ is a compile-time assertion that LocalHit still has the

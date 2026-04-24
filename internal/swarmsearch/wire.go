@@ -198,10 +198,19 @@ func DecodeReject(payload []byte) (Reject, error) {
 // M15b invariant. Old peers that don't send PeerAnnounce are
 // treated as "services unknown" (zero mask), which is fine —
 // they're still queried normally; they just can't be filtered.
+//
+// Pubkey is the sender's own 32-byte ed25519 Layer-D publisher
+// identity. Absent when the sender isn't running the keyword
+// publisher. This is the gossip primitive for §4.3's "gossip-
+// discovered indexer pubkeys": a receiver that also runs the
+// publisher adds `pk` to its Lookup's known-indexer set so
+// subsequent DHT keyword GETs fan out to it too. Closes wire-
+// compat matrix row 8.4-C.
 type PeerAnnounce struct {
 	MsgType  int    `bencode:"msg_type"`
 	Version  int    `bencode:"v"`                  // ProtocolVersion
 	Services uint64 `bencode:"services,omitempty"` // ServiceBits as uint64
+	Pubkey   []byte `bencode:"pk,omitempty"`       // 32-byte ed25519 publisher key
 }
 
 // EncodePeerAnnounce serialises a PeerAnnounce message.

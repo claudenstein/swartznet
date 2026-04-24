@@ -23,6 +23,8 @@ type statusTab struct {
 	indexLabels    []*widget.Label
 	swarmCard      *widget.Card
 	swarmLabels    []*widget.Label
+	dhtCard        *widget.Card
+	dhtLabels      []*widget.Label
 	pubCard        *widget.Card
 	pubLabels      []*widget.Label
 	bloomCard      *widget.Card
@@ -79,6 +81,17 @@ func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 		),
 	)
 
+	// DHT routing-table card. good_nodes is the cheapest
+	// signal for "this node can put/get BEP-44 items"; a
+	// daemon with DHT disabled sees "-" here.
+	st.dhtLabels = makeLabelGroup(2)
+	st.dhtCard = widget.NewCard("DHT Routing", "",
+		container.NewVBox(
+			labelRow("Good nodes:", st.dhtLabels[0]),
+			labelRow("Total nodes:", st.dhtLabels[1]),
+		),
+	)
+
 	// Publisher card.
 	st.pubLabels = makeLabelGroup(3)
 	st.pubCard = widget.NewCard("DHT Publisher", "",
@@ -124,6 +137,7 @@ func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 		st.torrentsCard,
 		st.indexCard,
 		st.swarmCard,
+		st.dhtCard,
 		st.pubCard,
 		st.bloomCard,
 	)
@@ -196,6 +210,11 @@ func (st *statusTab) refresh() {
 		}
 	}
 
+	// DHT routing table. Engine.DHTRoutingTableSize returns
+	// (0, 0) when DisableDHT was set, which the label
+	// formatter renders as "-" to match other empty cards.
+	dhtGood, dhtTotal := st.d.Eng.DHTRoutingTableSize()
+
 	// Publisher.
 	var pubKeywords, pubHits int
 	var pubKey string
@@ -250,6 +269,9 @@ func (st *statusTab) refresh() {
 
 		st.swarmLabels[0].SetText(fmt.Sprintf("%d", knownPeers))
 		st.swarmLabels[1].SetText(fmt.Sprintf("%d", capablePeers))
+
+		st.dhtLabels[0].SetText(fmt.Sprintf("%d", dhtGood))
+		st.dhtLabels[1].SetText(fmt.Sprintf("%d", dhtTotal))
 
 		st.pubLabels[0].SetText(fmt.Sprintf("%d", pubKeywords))
 		st.pubLabels[1].SetText(fmt.Sprintf("%d", pubHits))

@@ -142,7 +142,15 @@ type Server struct {
 	adder     TorrentAdder
 	control   TorrentController
 	companion CompanionController
-	timeout   time.Duration
+	// dhtStats is an optional probe into the embedded anacrolix
+	// DHT's routing-table occupancy. When non-nil, /status's
+	// "dht" object is populated with (good, total) node counts
+	// — the cheapest health signal that tells "DHT never
+	// bootstrapped" apart from "DHT has peers but get-traversal
+	// finds nothing". Leaving it nil omits the field from the
+	// JSON response.
+	dhtStats func() (good, total int)
+	timeout  time.Duration
 
 	httpServer *http.Server
 	listener   net.Listener
@@ -162,6 +170,13 @@ type Options struct {
 	Adder     TorrentAdder
 	Control   TorrentController
 	Companion CompanionController
+	// DHTStats is an optional probe — when supplied, /status's
+	// "dht" field is populated with (good, total) node counts
+	// from the caller's DHT routing table. The daemon supplies
+	// engine.(*Engine).DHTRoutingTableSize here. Callers with
+	// no DHT (DisableDHT=true) should leave it nil so the field
+	// is omitted from the response.
+	DHTStats func() (good, total int)
 }
 
 // New constructs a Server with the legacy index+swarm signature.
@@ -194,6 +209,7 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		adder:     opts.Adder,
 		control:   opts.Control,
 		companion: opts.Companion,
+		dhtStats:  opts.DHTStats,
 		timeout:   10 * time.Second,
 	}
 }
@@ -531,8 +547,24 @@ type StatusResponse struct {
 	Local      LocalStatus     `json:"local"`
 	Swarm      SwarmStatus     `json:"swarm"`
 	Publisher  PublisherStatus `json:"publisher"`
+	DHT        *DHTStatus      `json:"dht,omitempty"`
 	Bloom      *BloomStatus    `json:"bloom,omitempty"`
 	Reputation *ReputationStat `json:"reputation,omitempty"`
+}
+
+// DHTStatus is the mainline-DHT routing-table view. Populated
+// only when the daemon was started with DHT enabled (so the
+// dhtStats probe is wired in by the daemon's engine hook-up).
+// Two counts per anacrolix's ServerStats: GoodNodes (peers
+// that responded in the last 15 min) and Nodes (total table
+// occupancy including questionable entries). A cluster where
+// Nodes > 0 but GoodNodes == 0 indicates isolation — peers
+// are known but none are answering queries — the common
+// failure mode behind a DHT-enabled node that never resolves
+// any infohashes.
+type DHTStatus struct {
+	GoodNodes int `json:"good_nodes"`
+	Nodes     int `json:"nodes"`
 }
 
 // BloomStatus is the M5 known-good Bloom filter view.
@@ -651,6 +683,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			}
 			out.Publisher.Keywords = append(out.Publisher.Keywords, entry)
 		}
+	}
+	if s.dhtStats != nil {
+		good, total := s.dhtStats()
+		out.DHT = &DHTStatus{GoodNodes: good, Nodes: total}
 	}
 	if s.bloom != nil {
 		out.Bloom = &BloomStatus{

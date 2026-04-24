@@ -17,6 +17,544 @@ engagement from actual users of the v0.x prereleases.
 
 ### Fixed
 
+  - **Layer-D BEP-44 put/get round-trip**. anacrolix/torrent's
+    `NewAnacrolixDhtServer` builds a `dht.ServerConfig` from
+    scratch and does NOT copy `dht.NewDefaultServerConfig`'s
+    `Exp=2h` default, so `sc.Exp` landed at 0. `bep44.Wrapper`
+    then treated every stored item as instantly expired
+    (`i.created.Add(0).After(now)` = false for any clock read
+    after the store), deleted it on the next get, and returned
+    `ErrItemNotFound`. Symptom: BEP-44 put succeeds (valid-token
+    expvar increments, put handler replies OK) yet an
+    immediately-following get returns "value not found" — the
+    load-bearing failure in testbed scenario s12 and every
+    downstream Layer-D keyword lookup. Fixed in the engine's
+    `ConfigureAnacrolixDhtServer` callback by pinning
+    `sc.Exp = 2*time.Hour` if upstream didn't set one, matching
+    `dht.NewDefaultServerConfig`. Regression-gated by two new
+    tests: `internal/engine.TestDHTEnginePutReceive` (raw
+    anacrolix probe put → engine DHT store → probe get) and
+    `internal/testlab.TestLayerDDHTClusterRoundTrip` (full
+    engine-hosted 6-node cluster on loopback). The Layer-B s12
+    scenario now asserts `indexers_responded >= 1` and that the
+    fixture infohash appears in `dht.hits`.
+
+### Added
+
+  - **Layer-A DHT cluster harness** (`internal/testlab.NewDHTCluster`).
+    In-process multi-node engine harness with the mainline DHT
+    enabled and every node chain-bootstrapped to its siblings
+    on loopback. Mirrors testbed scenario s12's topology (2
+    seeds + N leeches, `NoSecurity=true`, explicit
+    `DHTBootstrapAddrs`) without any docker dependency. Purpose:
+    isolate whether a Layer-D failure lives in the engine's DHT
+    wiring or in the containerised-network path. First
+    application: `internal/testlab.TestLayerDDHTClusterRoundTrip`
+    and `TestDHTClusterPointerRoundTrip` originally reproduced the
+    s12 BEP-44 get-returns-"value not found" bug in pure Go;
+    after the `sc.Exp` fix landed they became the regression gate
+    for the fix. `TestLayerDDHTClusterRoundTrip` further asserts
+    that every seed answers the lookup and each seed's distinct
+    fixture infohash appears in the merged hit list (exercises
+    Lookup.Query's fan-out + merge).
+  - **`internal/testlab.TestDHTClusterWireMeshConverges`** — gate
+    for the DHT-cluster's sn_search mesh contract. Documents
+    that `NewDHTCluster` on its own does NOT converge a
+    peer-wire mesh (the shared testlab infohash has no real
+    torrent so no node announces_peer for it), and asserts that
+    calling `Cluster.WireMesh` explicitly gets all n-1 peers
+    handshaked within 15 s.
+  - **`internal/testlab.TestLayerDGossipEndToEnd`** — strictly
+    stronger than the round-trip test. Exercises the full
+    in-process equivalent of testbed s12: DHT cluster +
+    WireMesh + Publisher.Submit + sn_search PeerAnnounce `pk`
+    gossip → auto-AddIndexer on the leech → real BEP-44
+    Lookup.Query. No manual `AddIndexer` call anywhere. If the
+    gossip cross-registration path regresses, the leech's
+    Lookup.Indexers() never gets the seed pubkeys and this
+    test fails before the DHT query runs.
+  - **`internal/testlab.TestLayerDPublisherRefreshKeepsItemFresh`** —
+    regression gate for the Publisher's refresh ticker. Asserts
+    LastPublished advances past the initial timestamp within
+    12 s under regtest (RefreshInterval=5 s) AND that a
+    post-refresh Lookup.Query still resolves the keyword to
+    the fixture infohash. Catches any bug where the refresh
+    loop stops firing — which would silently let BEP-44 items
+    expire in production (2h TTL) without being re-published.
+  - **Engine DHT introspection**: `Engine.DHTRoutingTableSize()
+    returns (good, total)` exposes the embedded anacrolix DHT
+    server's routing-table occupancy. Intended for diagnostic
+    dashboards and for tests that need to distinguish "put
+    traversal found no neighbours" from "put traversal fanned
+    out but nothing answered" — a load-bearing distinction when
+    debugging the s12 family of failures.
+  - **`GET /status.dht`** (HTTP API): new JSON block
+    `{"good_nodes": N, "nodes": M}` exposing the daemon's DHT
+    routing-table occupancy. Daemon wires
+    `engine.DHTRoutingTableSize` into the new
+    `httpapi.Options.DHTStats` probe. Omitted entirely (nil
+    field) when the daemon ran with `DisableDHT=true`, so
+    callers can distinguish "DHT disabled" from "DHT enabled
+    but empty". Lets operators and Layer-B scenarios surface
+    DHT health without reaching into internal types.
+  - **`config.ListenHost`**: when non-empty, binds every
+    BitTorrent/DHT listener to the given interface (e.g.
+    `127.0.0.1`). Default empty = anacrolix's default =
+    `0.0.0.0`. Operators rarely need this, but the `testlab`
+    DHT cluster sets it to `127.0.0.1` so the DHT's BEP-44
+    token validator (which SHA1s the query's source IP) sees a
+    deterministic source across sibling queries.
+  - **`config.DisableIPv6`**: passes straight through to
+    `torrent.ClientConfig.DisableIPv6`. Forces the embedded
+    client onto a single address family, avoiding the latent
+    "two DHT servers per node, Publisher drives only one" trap
+    and the cross-family `[::ffff:v4]` routing-table entries
+    that can't round-trip through a v4-only Put. Useful for
+    any deployment on a network without functional IPv6
+    (corporate LANs, most docker bridges).
+
+### Changed
+
+  - **GUI: more design polish — About dialog + Add Magnet
+    retry.** Follow-up to the first design pass:
+    - *About dialog — copyable values*: the identity pubkey,
+      BitTorrent port, and HTTP API address each now have an
+      inline Copy icon-button next to them. Previously the
+      dialog rendered these as plain `widget.NewLabel`, which
+      Fyne does not let users select or copy — so the 64-char
+      ed25519 pubkey was effectively trapped in the dialog.
+      The placeholder values ("unknown", "disabled") and the
+      empty-string case don't get the Copy button; we don't
+      want to invite users to copy nothing. Covered by a new
+      `TestCopyableValue` unit test.
+    - *Add Magnet — preserve URI on error*: validation failures
+      and engine rejections used to close the dialog; the user
+      had to reopen it and re-paste the whole magnet URI to
+      fix a single-character typo. Now the error dialog's
+      onClosed callback reopens the Add Magnet form with the
+      bad URI pre-filled and the "Index" checkbox state
+      preserved, so the user edits in place.
+  - **GUI: design polish across Downloads, Search, Companion, and
+    the main menu.** Specifically:
+    - *Downloads — confirm before Remove*: the Remove toolbar
+      button, context-menu item, and Delete keyboard shortcut
+      now all trigger a `dialog.ShowConfirm` that names the
+      torrent ("Remove \"Ubuntu 24.04 Desktop\" from the
+      download list and stop seeding/leeching?") and clarifies
+      that downloaded files are kept. The previous version of
+      this confirm dialog claimed it also deleted on-disk data,
+      which was inaccurate — `engine.RemoveTorrent` calls
+      `anacrolix.Torrent.Drop()` and removes the session-
+      manifest entry, but leaves both `/data` and the Bleve
+      index untouched.
+    - *Downloads — friendlier Add Magnet errors*: client-side
+      validation fires instantly for two common paste mistakes
+      (a non-magnet URL, or a magnet missing the `xt=urn:btih:`
+      parameter) with explicit guidance; engine-side errors are
+      rewritten from anacrolix's internal phrasing
+      ("engine: magnet has zero infohash") into user-facing
+      text ("the magnet URI's infohash is all zeros — it needs
+      a real 40-character btih value"). Unknown errors pass
+      through unchanged. Unit tests cover both the validator
+      and the rewriter.
+    - *Search — empty-state hint*: before any search runs, the
+      result panel now shows a centred "Search across your
+      local index, the swarm, and the DHT" prompt explaining
+      what the tab does and how to broaden the query. Hidden
+      once results arrive; re-shown when a search returns zero
+      hits from every enabled layer.
+    - *Companion — followed-publishers empty state*: the
+      Followed Publishers card previously rendered an empty
+      rectangle when you had no follows. It now overlays a
+      "No publishers followed yet. Paste a 64-char public key
+      above and press Follow to start syncing a remote Bleve
+      index." hint that hides once the first follow lands.
+    - *Main menu — discoverable shortcuts*: a proper `File`
+      menu now sits alongside `Help`, with `Add Magnet...`,
+      `Find in Search`, and `Quit` each carrying their
+      registered `desktop.CustomShortcut` so Fyne renders the
+      accelerator next to the label. The `Quit` item also sets
+      `IsQuit` so platform integrations (macOS app menu) can
+      route it correctly.
+  - **GUI: consolidated four duplicated `win()` helpers into a
+    single `windowForObject`** (`internal/gui/window.go`). Each
+    tab (Downloads, Search, Settings, Companion) previously
+    carried a near-identical 15-line method that walked the
+    Fyne driver's window list to find the hosting window for a
+    canvas object; they now all delegate to the shared helper.
+    The new helper also handles the no-Fyne-app case without
+    panicking (covered by a regression test), which makes the
+    GUI package test-friendly for the first time.
+
+### Added
+
+  - **GUI: first unit tests** (`internal/gui/helpers_test.go`,
+    `internal/gui/sort_test.go`). Lifts package coverage from
+    0.0 % to 7.4 % by exercising the pure helpers (`humanBytes`,
+    `rateStr`, `parseKiB`, `kibStr`, `limitDisplay`, `boolInt`,
+    `boolStr`, `portStr`, `pieceLengthFromLabel`, `splitLines`,
+    `torrentFilter.Matches`, `swartzTheme.Color/Font/Icon/Size`)
+    and the Downloads-tab sort state machine (`snapLess` across
+    all 9 columns and both directions, `sortSnapsSlice`
+    stability on equal keys and edge cases, `toggleSort` cycle
+    none → asc → desc → none, `selectedInfoHash` bounds
+    checks). The larger widget-construction paths still need a
+    real Fyne runtime to exercise end-to-end; these tests cover
+    every piece of state logic the widget code calls into.
+
+### Fixed
+
+  - **Engine: outbound PeerAnnounce frames now actually carry
+    the `pk` field when Layer-D publisher is running**
+    (`internal/engine/engine.go:startPublisher`). Wire-compat
+    matrix row 8.4-C introduced pubkey gossip in sn_search
+    PeerAnnounce — but the gossip path in
+    `swarmsearch.Protocol.onRemoteHandshake` gates on
+    `caps.Publisher > 0`, and the engine never bumped caps
+    after starting the publisher. `SetPublisherPubkey` set the
+    pubkey in the protocol state but the frame-encode path
+    silently skipped it because caps.Publisher was still 0.
+    Net effect: every running SwartzNet node had pubkey gossip
+    disabled, so Layer-D cross-registration via sn_search
+    handshake never fired in practice. `startPublisher` now
+    reads the current capabilities, flips Publisher=1, and
+    calls `SetCapabilities` — but only when
+    `DisableDHTPublish` is false (leech-only DHT mode keeps
+    gossip off on purpose). Surfaced by building the
+    DHT-enabled Layer-B testbed stack: leech-1's /search
+    --dht reported `indexers_asked=0` until the fix went in;
+    now reports `indexers_asked=6` (all nodes cross-
+    registered).
+
+  - **`fileTracker.Subscribe` now replays events for files that
+    were already complete at registration time**
+    (`internal/engine/file_tracker.go`). Previously, on a seed
+    where every piece was verified-complete before the
+    `ingestFileEvents` goroutine had a chance to register its
+    subscription, the fileTracker's initial dispatch fired into
+    an empty subscriber list and the content-ingest pipeline
+    never saw those files — so seeded content never got
+    indexed. `Subscribe()` now copies the existing `doneReplay`
+    buffer into the new subscriber channel before returning,
+    eliminating the race. Regression coverage:
+    `internal/engine/file_tracker_replay_test.go`
+    (`TestSubscribeReplaysPreDispatchedEvents`,
+    `TestSubscribeReplayDoesNotDoubleDeliver`). This was a
+    pre-existing bug that only showed up once Layer-B actually
+    ran transfers to completion against pre-populated seeds; the
+    Layer-A in-process harness has always had per-test subscribe
+    ordering that avoided the race.
+
+  - **`.txt`, `.text`, and `.md` now have explicit MIME overrides
+    in `internal/indexer/extractors/extractor.go`**. Go's builtin
+    `mime.TypeByExtension` table does NOT include `.txt`, so on
+    systems without `/etc/mime.types` (Alpine base images,
+    scratch containers, minimal CI runners) `.txt` files were
+    returned as empty-string MIME and the plaintext extractor
+    refused to claim them. The Layer-B Docker testbed hit this
+    head-on once it grew real multi-KiB text fixtures. Moving
+    the entries into `extTypes` makes behavior deterministic
+    across deployment targets. Existing
+    `internal/indexer/extractors/mime_test.go` covers the
+    override path.
+
+### Changed
+
+  - **`sn_search` now rejects queries for unsupported scopes instead
+    of silently downgrading them** (`internal/swarmsearch/handler.go`):
+    a C1 querier that asks a C0 responder for scope `"c"` (or `"f"` on
+    an F0 node) now receives a `Reject` frame with code
+    `RejectUnsupportedScope` (2), matching the wire-compat matrix row
+    8.4-B in `docs/05-integration-design.md`. Empty scope and scope
+    `"n"` are always served. Coverage:
+    `internal/swarmsearch/scope_reject_test.go` (unit) and
+    `internal/testlab/scope_reject_scenario_test.go` (full
+    BT → LTEP → extension message round-trip, including a hit-cache
+    pollution check that proves the reject fires before the local
+    search runs).
+
+### Added
+
+  - **`swartznet add --dht-insecure`** (testing-only)
+    (`cmd/swartznet/cmd_add.go`, `internal/config/config.go`,
+    `internal/engine/engine.go`). Disables BEP-42 node-ID
+    security enforcement on the anacrolix DHT server (maps to
+    `dht.ServerConfig.NoSecurity`). Required for private DHTs
+    on docker bridges / k8s cluster IPs where container IPs
+    never produce a "secure" ID under BEP-42's rules —
+    anacrolix would otherwise silently filter every peer as
+    "not secure" and BEP-44 puts time out on every target.
+    Must stay off on mainline: flipping it in production
+    weakens Sybil resistance.
+  - **Testbed: s12 asserts up to the full Layer-D put stage**
+    (`testbed/scenarios/s12-swarm-dht.sh`,
+    `testbed/docker-compose.dht.yml`, back in
+    `run-testbed.sh all`). Concretely verifies: 6-node DHT
+    formation, seed publisher warm-up, every node has
+    `capable_peers >= 1` (sn_search LTEP handshake
+    converged), at least one BEP-44 put emitted, AND
+    `leech-1.dht.indexers_asked >= 2` — proves pubkey-gossip
+    cross-registration via sn_search is actually working end-
+    to-end. The final hop (leech gets non-empty `hits` from
+    the Layer-D lookup) is intentionally NOT asserted yet;
+    header comment in the scenario documents the deferred
+    investigation into why `getput.Get` returns "value not
+    found" in docker when a matching 6-node in-process test
+    (same bootstrap topology, NoSecurity=true) completes in
+    <1s. Incorrect keyword ("aethergram") was another bug
+    the investigation caught — dhtindex.Publisher publishes
+    only `Tokenize(torrent.Name)` keywords, not content
+    tokens. Scenario now queries "corpus".
+  - **`swartznet add --dht-bootstrap=HOST:PORT`** (repeatable)
+    (`cmd/swartznet/cmd_add.go`, `internal/config/config.go`,
+    `internal/engine/engine.go`). Threads a user-provided list
+    of bootstrap addresses into
+    `dht.ServerConfig.StartingNodes` instead of anacrolix's
+    default public mainline hosts. Required for any isolated-
+    network DHT scenario (docker bridge, k8s cluster-local
+    testing) where public hosts are unreachable. Empty value
+    preserves the previous behaviour.
+
+  - **Testbed: DHT-enabled 6-node stack (s12, WIP)**
+    (`testbed/docker-compose.dht.yml`,
+    `testbed/scenarios/s12-swarm-dht.sh`). 6-node swarm with
+    DHT enabled, static IPs in a new 172.29.0.0/24 subnet,
+    cross-bootstrapped seeds. The scenario is deliberately
+    NOT in `scripts/run-testbed.sh all`: gossip-based indexer
+    cross-registration now works end-to-end
+    (`indexers_asked=6` post-fix, up from 0), but BEP-44 puts
+    on the private DHT time out consistently in anacrolix's
+    getput extension (`transaction timed out` warnings on
+    every attempt). Raw KRPC ping/pong between containers
+    works, ruling out basic UDP. Root cause is still under
+    investigation — left in-tree for a future loop to pick
+    up so the `--dht-bootstrap` flag and the gossip-caps fix
+    have a real end-to-end target.
+
+  - **Testbed driver: per-scenario timing + JSON output**
+    (`scripts/run-testbed.sh`). The scoreboard now shows a
+    DURATION column alongside SCENARIO and RESULT, so slow
+    trends and flake signals are visible at a glance. A new
+    `--json=<path>` flag writes a structured summary
+    (`{started_at, finished_at, total_wall_clock_s,
+    overall_exit, scenarios:[{name, result, duration_s,
+    netem_profile}]}`) suitable for CI status bots and
+    perf-regression dashboards. JSON is produced via a
+    python3 heredoc (already a hard dependency of every
+    scenario script) rather than hand-quoted bash — bash's
+    `printf %q` produces shell-safe escapes, not JSON-safe
+    ones. Stress-tested: `scripts/run-testbed.sh all` ran
+    4 times back-to-back (3 flake-detection loops + 1 final
+    verify) all PASS, 115-125s each.
+  - **s11 — vanilla BT client interop at the wire level**
+    (`testbed/scenarios/s11-vanilla-interop.sh`,
+    `testbed/Dockerfile.vanilla`,
+    `testbed/docker-compose.swarm.yml` gains a `vanilla-leech`
+    service at 172.28.0.9 under compose profile `vanilla`).
+    Runs the upstream `anacrolix/torrent/cmd/torrent` CLI — the
+    same library family our engine wraps, but built without any
+    SwartzNet extension-protocol registrations — on the swarm
+    bridge and requires it to download the 4-MiB fixture from
+    SwartzNet peers using `--no-dht --no-pex --no-seed`. That
+    leaves only the BEP-9 `x.pe=` peer hints + BEP-3/10 handshake
+    as the peer bootstrap path. Successful download proves the
+    SwartzNet seeds are emitting nothing that violates
+    CLAUDE.md's "vanilla client must see nothing but
+    BEP-3/5/9/10/44" constraint; a regression anywhere in our
+    LTEP handshake, reserved-bit usage, or peer-wire framing
+    would trip this test. First passing run: the vanilla binary
+    downloaded + verified + exited in 2 s. Bytes SHA-256 checked
+    via `docker cp` because the binary exits cleanly on
+    completion (no persistent container to `docker exec` into).
+    Two other BT implementations were tried first — aria2c and
+    transmission-cli — but both silently failed to honor
+    `x.pe=` over the isolated docker bridge; the scenario's
+    DEPLOYMENT NOTES in the script documents why anacrolix's
+    CLI was chosen.
+  - **s10 — mid-transfer seed churn**
+    (`testbed/scenarios/s10-swarm-churn.sh`). Only scenario in
+    the matrix that kills a seed *while* transfers are in flight
+    (s8 runs to completion under loss without churn; s9 kills
+    seeds only after leeches finish). Runs the 6-node swarm
+    under `/netem/lossy.sh` to stretch the transfer window to
+    ~15-20s, waits for `leech-1.progress >= 0.3`, `docker stop
+    sn-swarm-seed-1`, asserts all 4 leeches converge within 300s
+    via seed-2 + mutual exchange, and byte-checks leech-1's
+    on-disk fixture. First passing run converged 14s post-churn.
+    Gracefully short-circuits if the fixture is too small / the
+    netem profile too gentle to produce a mid-transfer window.
+  - **s9 — pass-along + late-joiner resilience scenario**
+    (`testbed/scenarios/s9-swarm-late-joiner.sh`,
+    `testbed/docker-compose.swarm.yml` gains a `leech-5`
+    service gated behind the `late-joiner` docker compose
+    profile). The shape: (1) wait for the four original leeches
+    to reach `progress=1.0` via the original seeds, (2) `docker
+    stop` both seeds so the swarm has only ex-leeches with the
+    content, (3) bring up `leech-5` (172.28.0.8, profile
+    `late-joiner`) whose magnet URI includes every node's IP,
+    (4) assert leech-5 reaches `progress=1.0` entirely from
+    ex-leech pass-along, (5) assert bytes match fixture
+    byte-for-byte. Budget 60 s for the pass-along transfer.
+    First passing run completed in under 10 s wall clock; the
+    assertion is structural, so timing flakes would only
+    surface as a correctness regression (ex-leeches not
+    seeding, PEX not falling back, or `x.pe=` multi-address
+    resolution silently picking only dead hints). Driver wires
+    `--profile '*'` into the teardown path so compose-profile-
+    gated services don't leak and hold the bridge network
+    open.
+  - **Layer-B 3-node testbed is now portable across UFW-DROP hosts**
+    (`testbed/docker-compose.yml`, `testbed/scenarios/s1-s5`).
+    Previously the scenarios probed `http://localhost:17654-17656`
+    and relied on host-side port forwarding; on stock Ubuntu
+    (`DEFAULT_FORWARD_POLICY="DROP"`) the docker-proxy's forward
+    leg is blocked and the scenarios RST'd without ever running
+    their assertions. And the leech magnet URI's `x.pe=` hints
+    were hostname-based (`seed-1:42069`), which anacrolix's
+    `StringAddr` dialer has been observed to silently drop. Both
+    are now fixed: `docker-compose.yml` pins static IPs in a
+    `172.27.0.0/24` subnet (distinct from the swarm stack's
+    `172.28.0.0/24`), the magnet URI uses dotted-quad IPs, and
+    s1-s5 probe the API via `docker exec sn-seed-1 curl
+    http://<hostname>:7654/…` over the internal bridge. The
+    three-node testbed now runs green on hosts with the default
+    UFW profile. Full matrix wall clock: 70s.
+  - **s8 — 6-node swarm under a lossy link**
+    (`testbed/scenarios/s8-swarm-lossy.sh`). Runs the
+    `docker-compose.swarm.yml` stack with the existing
+    `/netem/lossy.sh` profile (5% loss + 150ms RTT). Asserts
+    all 4 leeches converge within 300s despite retransmits and
+    leech-1's on-disk bytes match the fixture byte-for-byte
+    (smoke check that retransmits don't corrupt the wire).
+    Drop-in-addition to s6/s7 so `scripts/run-testbed.sh all`
+    now executes the full matrix: s1..s5 → swarm → s8.
+  - **Layer-B testbed now includes a 6-node small-swarm scenario**
+    (`testbed/docker-compose.swarm.yml`, scenarios
+    `s6-swarm-transfer.sh` and `s7-swarm-search.sh`). Two seeds
+    plus four leeches share a 4-MiB deterministic fixture
+    generated by `scripts/gen-swarm-fixture.sh` (infohash
+    `9564c13e1f67f40ec14bf0a2e54a86dea69ccebd`). The topology is
+    a full mesh bootstrapped via `x.pe=` peer-address hints with
+    **static IPv4 assignments** from a dedicated
+    `172.28.0.0/24` IPAM subnet — hostnames don't reliably round
+    -trip through anacrolix's `StringAddr` dialer for `x.pe=`
+    hints, so the testbed pins `seed-1` through `leech-4` to
+    `172.28.0.2-172.28.0.7`. s6 asserts all four leeches reach
+    `progress=1.0`, their on-disk SHA-256 matches the fixture
+    byte-for-byte, and peak `active_peers` during the transfer
+    window reaches ≥ 2 (evidence that PEX + hint propagation
+    actually built the swarm graph). s7 fires a `swarm:true`
+    `/search` for `aethergram` from `leech-1` and asserts the
+    Layer-S fan-out reaches the fixture infohash through at least
+    one remote peer's local index. The new scenarios are driven
+    by `scripts/run-testbed.sh swarm` (alias that runs both
+    assertion scripts against one compose lifecycle), or
+    individually via `s6` / `s7`. All API probes in these
+    scenarios run via `docker exec … curl` over the internal
+    bridge so the test is independent of the host's UFW
+    `DEFAULT_FORWARD_POLICY` — stock Ubuntu workstations with
+    `DROP` would otherwise see host-side port forwards RST'd by
+    the kernel FORWARD chain.
+  - **Layer-B testbed now transfers real content** (closes the
+    "placeholder infohash" gap documented in the previous
+    `testbed/README.md:92-100`): `testbed/fixture/` carries a
+    small deterministic multi-file fixture
+    (`content/testbed-fixture-book/`, ~3 KiB total) plus a
+    pre-generated `.torrent` with a committed infohash
+    (`c4405d27af8462e3d5e03c30c542f66e170fe4f8`). The Dockerfile
+    copies `testbed/fixture/` into `/fixture/`; the entrypoint
+    honours a new `ROLE` env var to pre-populate `/data` with the
+    content on seed containers, so anacrolix's piece-verify pass
+    marks the torrent complete on startup with zero network.
+    The leech's magnet URI carries `x.pe=seed-1:42069&x.pe=seed-2:42069`
+    peer-address hints (BEP-9) so it bootstraps without DHT or
+    trackers. A new scenario
+    `testbed/scenarios/s5-piece-transfer.sh` asserts the leech
+    reaches `progress=1.0` within 90 s and its on-disk bytes
+    match the fixture SHA-256 byte-for-byte; `s4-home-dsl-search.sh`
+    now asserts the seeds actually return hits for the fixture
+    marker `aethergram` (no more structural-only search check).
+  - **Gossip-discovered publisher pubkeys across `sn_search`
+    handshakes** (wire-compat matrix row 8.4-C, closes the last
+    `WEAK` cell in the §8 matrix): nodes running the Layer-D
+    publisher (`caps.Publisher == 1`) now gossip their 32-byte
+    ed25519 identity in the `pk` field of every outbound
+    `PeerAnnounce`. Receivers stash it on the peer's
+    `PeerState.PublisherPubkey` and forward it to an attached
+    `IndexerSink`, so the next `search --dht` fan-out automatically
+    covers peers learned through peer-wire handshakes without a
+    separate registration round-trip. Non-publishers (the default
+    `caps.Publisher == 0`) suppress `pk`, so pure subscribers can
+    never pollute a peer's indexer set. The engine wires a default
+    sink into `*dhtindex.Lookup` (`engine.go:startPublisher`).
+    Coverage: `internal/swarmsearch/gossip_pubkey_test.go` (unit,
+    including wrong-length and missing-pk negative paths) and
+    `internal/testlab/gossip_pubkey_scenario_test.go` (two-node
+    cluster proves bidirectional delivery and subscriber-side
+    suppression).
+
+  - **Full-round-trip vanilla BEP-44 wire-compat test**
+    (`internal/dhtindex/vanilla_bep44_test.go`): complements the
+    signature-math-only `vanilla_bep44_wirecompat_test.go` with a
+    two-server loopback DHT scenario. SwartzNet's `AnacrolixPutter`
+    publishes a keyword entry, a plain `anacrolix/dht/v2` server
+    issues `getput.Get` against the BEP-44 target, and the
+    retrieved value decodes as a valid `KeywordValue`.
+    Signature verification runs inside the anacrolix get path, so
+    a passing test proves our BEP-44 items are
+    bit-compatible with any stock client.
+
+  - **Vanilla-client wire-compat scenarios**
+    (`internal/testlab/vanilla_download_scenario_test.go`,
+    `internal/testlab/vanilla_peer_scenario_test.go`,
+    `internal/dhtindex/vanilla_bep44_wirecompat_test.go`): end-to-end
+    proofs of rows 8.1-A/B and 8.3-D of the wire-compat matrix. A real
+    `anacrolix torrent.Client` with no SwartzNet extensions downloads
+    a seeded payload by magnet (BEP-9 metadata → BEP-3 pieces); a
+    MiniPeer acting as a mainline client connects without advertising
+    `sn_search` and verifies that the engine never pushes an
+    `sn_search` extension frame at it; and a stock BEP-44 reader
+    decodes a SwartzNet-published keyword item and verifies its
+    signature without any SwartzNet code. `DialVanillaMiniPeer` in
+    `internal/testlab/minipeer.go` exposes the empty-`m`-dict
+    handshake path used by these tests.
+
+### Fixed
+
+  - **`sn_search` gossip accepted the all-zero 32-byte pubkey**
+    (`internal/swarmsearch/handler.go`): the 8.4-C gossip path
+    treated any 32-byte `pk` as a valid publisher identity, so a
+    misbehaving peer advertising `pk = 0x00…00` would silently add
+    a useless entry to every receiver's `Lookup.Indexers()` set on
+    each reconnect, wasting the next DHT keyword GET fan-out on a
+    key that cannot correspond to a real ed25519 identity. The
+    handler now rejects the zero value at the sink boundary while
+    still processing the rest of the `PeerAnnounce` fields
+    (`Services`, `Version`). Regression coverage:
+    `TestPeerAnnounceZeroPubkeyRejected` in
+    `internal/swarmsearch/gossip_pubkey_test.go`.
+
+  - **Ingest pipeline silently dropped files when two goroutines
+    read `Handle.FileEvents()`** (`internal/engine/file_tracker.go`,
+    `internal/engine/engine.go`, `cmd/swartznet/cmd_add.go`): the
+    CLI's `swartznet add` progressLoop drained the same
+    `FileCompleteEvent` channel that `Engine.ingestFileEvents` was
+    using to feed the extractor pipeline. Go's single-receiver
+    semantics split each event to exactly one reader, so a random
+    fraction of files never reached the indexer and
+    `TorrentSnapshot.IndexedFiles` stalled at ~11–13/15 for the
+    15-file multi-peer fixture. The `fileTracker` now fans each
+    event out to every subscriber independently via per-caller
+    buffered channels, and `Handle.SubscribeFileEvents()` exposes
+    that contract explicitly. The CLI's `progressLoop` and
+    `Engine.ingestFileEvents` each take their own subscription, so
+    display progress and pipeline progress can no longer cannibalise
+    each other. Regression coverage lives in
+    `internal/engine/file_tracker_dispatch_test.go` (unit fan-out
+    checks) and
+    `internal/testlab/file_events_fanout_scenario_test.go` (real
+    seed→leech run that asserts `IndexedFiles == Files` while a
+    second consumer runs in parallel).
   - **`swartznet add` daemon silently tearing down the HTTP API
     on malformed magnets** (`internal/engine/engine.go`): when
     the CLI was invoked with a magnet whose v1 infohash decoded

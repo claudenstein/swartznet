@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/dht/v2"
+	peer_store "github.com/anacrolix/dht/v2/peer-store"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
@@ -376,8 +378,23 @@ func (h *Handle) PieceEvents() <-chan torrent.PieceStateChange {
 // FileEvents returns a receive-only channel of FileCompleteEvent values,
 // each fired once when a file inside this torrent becomes fully complete.
 // The channel is closed when the Engine is closed.
+//
+// Every call to FileEvents() creates an independent subscription via the
+// underlying fileTracker. Callers MUST bind the result to a local variable
+// and then receive from that variable — evaluating h.FileEvents() inside a
+// for/select loop allocates a new, empty channel on every iteration and the
+// loop will hang forever. Use SubscribeFileEvents() for new code.
 func (h *Handle) FileEvents() <-chan FileCompleteEvent {
-	return h.fileSub.Events()
+	return h.fileSub.Subscribe()
+}
+
+// SubscribeFileEvents is the preferred alias for FileEvents and makes the
+// per-call subscription semantics explicit at the call site. Each caller
+// receives every emitted event independently; the tracker fans out to all
+// subscribers so two consumers (e.g. the CLI progress loop and the ingest
+// pipeline) no longer race for the same single channel.
+func (h *Handle) SubscribeFileEvents() <-chan FileCompleteEvent {
+	return h.fileSub.Subscribe()
 }
 
 // New constructs an Engine with the given config. The config is validated and
@@ -396,11 +413,85 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	tc := torrent.NewDefaultClientConfig()
 	tc.DataDir = cfg.DataDir
 	tc.ListenPort = cfg.ListenPort
+	if cfg.ListenHost != "" {
+		host := cfg.ListenHost
+		tc.ListenHost = func(string) string { return host }
+	}
 	tc.Seed = cfg.Seed
 	tc.NoUpload = cfg.NoUpload
 	tc.NoDHT = cfg.DisableDHT
+	// DisableIPv6 folds straight through to the torrent client.
+	// See internal/config/config.go: the harness flips it to
+	// force a single address family so cross-node DHT
+	// traversal doesn't accumulate [::ffff:v4]-style entries
+	// that puts can't round-trip.
+	tc.DisableIPv6 = cfg.DisableIPv6
 	if cfg.HTTPUserAgent != "" {
 		tc.HTTPUserAgent = cfg.HTTPUserAgent
+	}
+
+	// Give the embedded DHT server a PeerStore. Without one, the
+	// anacrolix server refuses to issue write tokens in its
+	// get_peers replies (server.go: it only fills r.Token when
+	// config.PeerStore is non-nil). That breaks BEP-5 compliance —
+	// any vanilla client doing the canonical get_peers →
+	// announce_peer sequence stalls on the second hop because our
+	// reply had no Token to echo back.
+	//
+	// We plug in peer_store.InMemory, the library's default. This
+	// is the shared instance the DHT hands to every call path,
+	// which means vanilla announce_peer queries correctly
+	// populate our local per-infohash peer table too.
+	peerStore := &peer_store.InMemory{}
+	bootstrapAddrs := append([]string(nil), cfg.DHTBootstrapAddrs...)
+	dhtInsecure := cfg.DHTInsecure
+	tc.ConfigureAnacrolixDhtServer = func(sc *dht.ServerConfig) {
+		if sc.PeerStore == nil {
+			sc.PeerStore = peerStore
+		}
+		// If the caller explicitly pre-seeded the DHT's bootstrap
+		// node list, honour it instead of anacrolix's public
+		// mainline defaults (router.bittorrent.com etc.). Used by
+		// the Layer-B testbed where default bootstrap hosts are
+		// unreachable from the isolated docker bridge. Empty =
+		// defaults.
+		if len(bootstrapAddrs) > 0 {
+			snapshot := append([]string(nil), bootstrapAddrs...)
+			sc.StartingNodes = func() ([]dht.Addr, error) {
+				return dht.ResolveHostPorts(snapshot)
+			}
+		}
+		// Opt out of BEP-42 node-ID security enforcement when the
+		// caller explicitly asked for it. Required for private
+		// DHTs on docker bridges / k8s cluster IPs, where node
+		// IDs can never pass the BEP-42 "tied to your public IP"
+		// check and puts therefore silently filter out every
+		// target as "not secure". See
+		// internal/config/config.go:DHTInsecure for why operators
+		// must never set this on mainline.
+		if dhtInsecure {
+			sc.NoSecurity = true
+		}
+		// BEP-44 mutable-item expiry. anacrolix/torrent's
+		// NewAnacrolixDhtServer constructs a dht.ServerConfig
+		// from scratch and does NOT copy defaults from
+		// dht.NewDefaultServerConfig, so sc.Exp lands at 0.
+		// bep44.Wrapper then treats every stored item as
+		// instantly expired (`i.created.Add(0).After(now)`
+		// = false for any clock reading after the store), so
+		// the next Get deletes the item and returns
+		// ErrItemNotFound. Observed symptom: BEP-44 put
+		// succeeds (valid-token expvar increments, put handler
+		// replies OK) yet an immediately-following get returns
+		// "value not found" — the load-bearing failure mode in
+		// testbed scenario s12 and in the in-process
+		// internal/testlab.TestLayerDDHTClusterRoundTrip.
+		// We pin Exp to BEP-44's canonical 2-hour item lifetime
+		// if the upstream didn't set anything, matching
+		// dht.NewDefaultServerConfig.
+		if sc.Exp == 0 {
+			sc.Exp = 2 * time.Hour
+		}
 	}
 
 	// Install mutable rate limiters so Engine.SetUploadLimit /
@@ -752,7 +843,50 @@ func (e *Engine) startPublisher() error {
 	if e.cfg.MinIndexerScore > 0 {
 		e.lookup.SetMinIndexerScore(e.cfg.MinIndexerScore)
 	}
+
+	// Wire-compat §8.4-C: hand our publisher identity to the
+	// sn_search protocol so outbound PeerAnnounce frames carry
+	// `pk`, and install a sink that feeds gossip-discovered
+	// pubkeys back into the lookup's known-indexer set.
+	e.swarm.SetPublisherPubkey(e.identity.PublicKey)
+	e.swarm.SetIndexerSink(&gossipIndexerSink{lookup: e.lookup})
+	// Flip caps.Publisher to 1 so outgoing PeerAnnounce frames
+	// actually include the `pk` field (the gossip path in
+	// swarmsearch.Protocol.onRemoteHandshake gates on
+	// `caps.Publisher > 0`, not on publisherPubkey being non-
+	// nil). Without this, every running publisher's pubkey stays
+	// invisible to peers and Layer-D cross-registration never
+	// fires. Latent bug since the gossip feature shipped in
+	// wire-compat row 8.4-C — first caught by the Layer-B
+	// s12 scenario, where leech-1's /search --dht found
+	// indexers_asked=0 because nothing gossiped.
+	//
+	// If DisableDHTPublish is set we're running in "leech-only
+	// DHT" mode: the Publisher worker is suppressed above but
+	// the node still has an identity and still lookups via the
+	// DHT. Keeping Publisher=0 in that mode is intentional —
+	// we don't want passive nodes gossiping themselves as
+	// indexers when they aren't actually pushing entries.
+	if !e.cfg.DisableDHTPublish {
+		currentCaps := e.swarm.Capabilities()
+		currentCaps.Publisher = 1
+		e.swarm.SetCapabilities(currentCaps)
+	}
 	return nil
+}
+
+// gossipIndexerSink adapts *dhtindex.Lookup to the
+// swarmsearch.IndexerSink interface. NoteGossipIndexer is a
+// plain AddIndexer (idempotent: re-adds update the label only).
+type gossipIndexerSink struct {
+	lookup *dhtindex.Lookup
+}
+
+func (s *gossipIndexerSink) NoteGossipIndexer(pubkey [32]byte, label string) {
+	if s == nil || s.lookup == nil {
+		return
+	}
+	s.lookup.AddIndexer(pubkey, label)
 }
 
 // dhtServer fishes the *dht.Server out of the anacrolix Client by
@@ -1352,7 +1486,8 @@ func (e *Engine) autoConfirmOnComplete(h *Handle) {
 // lazily open a reader via t.Files()[i].NewReader() only when the
 // extractor actually wants to read the bytes.
 func (e *Engine) ingestFileEvents(h *Handle) {
-	for ev := range h.FileEvents() {
+	events := h.SubscribeFileEvents()
+	for ev := range events {
 		e.mu.Lock()
 		p := e.pipeline
 		closed := e.closed
@@ -1872,6 +2007,53 @@ func (e *Engine) Close() error {
 func (e *Engine) LocalPort() int {
 	return e.client.LocalPort()
 }
+
+// DHTAddr returns the local UDP address of the engine's DHT
+// server (or nil if DHT is disabled). Exposed for wire-compat
+// tests — external KRPC clients need the address to validate
+// that the engine still responds to standard BEP-5 queries.
+// The returned net.Addr is safe to stringify; tests typically
+// resolve it back to *net.UDPAddr via net.ResolveUDPAddr.
+func (e *Engine) DHTAddr() net.Addr {
+	srv := e.dhtServer()
+	if srv == nil {
+		return nil
+	}
+	return srv.Addr()
+}
+
+// DHTRoutingTableSize returns (good, total) — the number of good
+// nodes and the total number of nodes in the engine's DHT
+// routing table. Returns (0, 0) if DHT is disabled. Exposed for
+// tests that need to tell "the put/get traversal found no
+// neighbours" from "the traversal fanned out but nothing
+// answered". In production this is effectively dead code;
+// keeping it exported keeps the surface area wide enough that
+// a diagnostic dashboard or status endpoint can surface DHT
+// health without reaching for internal types.
+func (e *Engine) DHTRoutingTableSize() (good int, total int) {
+	srv := e.dhtServer()
+	if srv == nil {
+		return 0, 0
+	}
+	s := srv.Stats()
+	return s.GoodNodes, s.Nodes
+}
+
+// DHTServerForTest returns the underlying anacrolix *dht.Server
+// that the Engine's DHT-facing subsystems (Publisher, Lookup,
+// PointerPutter/Getter) drive. Returns nil if DHT is disabled.
+//
+// As the name implies this is an escape hatch for diagnostic
+// tests that need to poke at internal DHT state (e.g. read the
+// BEP-44 store directly to confirm a put landed). It is NOT
+// intended for production use. Leaking this into the stable
+// API surface would couple SwartzNet's packaging to a specific
+// anacrolix release.
+func (e *Engine) DHTServerForTest() *dht.Server {
+	return e.dhtServer()
+}
+
 
 // HandleByInfoHash looks up a *Handle by 20-byte infohash.
 // Returns an error if the infohash is not currently registered

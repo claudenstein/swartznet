@@ -11,8 +11,6 @@ import (
 // covering a given file are verified complete. It is the input signal M2.2's
 // text-extractor pipeline will react to: "this file is fully on disk now, go
 // extract its content and feed the Bleve index."
-//
-// M2.1 delivers only the event stream; M2.2 will attach a consumer.
 type FileCompleteEvent struct {
 	InfoHash  string // 40-char hex torrent infohash
 	FileIndex int    // file's index in the upverted file list
@@ -23,50 +21,108 @@ type FileCompleteEvent struct {
 // fileTracker watches a single torrent's piece-state subscription and emits
 // a FileCompleteEvent the first time each file becomes fully complete.
 //
-// Lifecycle:
-//  1. Caller constructs via startFileTracker, which returns immediately.
-//  2. A background goroutine waits for GotInfo, builds the file map, seeds
-//     the remaining-piece counters from current piece state, subscribes to
-//     future piece changes, and runs the main loop.
-//  3. Consumers read events from Events() until Close() or the torrent's
-//     piece subscription closes.
-//
-// Close is safe to call multiple times and unblocks the main loop even if
-// it is still waiting on GotInfo.
+// The tracker fans events out to any number of independent subscribers.
+// Each call to Subscribe() returns a fresh buffered channel; every emitted
+// event is delivered to every subscriber (with a per-subscriber drop-on-full
+// policy so one slow consumer cannot stall the rest). This matters because
+// two unrelated goroutines observe the stream — the CLI progressLoop that
+// renders "file complete" lines, and Engine.ingestFileEvents that feeds the
+// extractor pipeline. The earlier single-channel design silently split events
+// between the two, so some files never reached the indexer.
 type fileTracker struct {
-	log       *slog.Logger
-	t         *torrent.Torrent
-	ihHex     string
-	events    chan FileCompleteEvent
+	log   *slog.Logger
+	t     *torrent.Torrent
+	ihHex string
+
+	mu          sync.Mutex
+	subscribers []chan FileCompleteEvent
+	// doneReplay is the replay buffer for subscribers that register
+	// after run() has already dispatched events for files that were
+	// complete at startup. Without it, ingestFileEvents (spawned as
+	// a separate goroutine from registerLocked) can race the
+	// fileTracker goroutine on a seed whose files are all complete
+	// on-disk at add time: the initial dispatch fires into an empty
+	// subscriber list, and the pipeline never sees the file-complete
+	// events. The replay bounds itself to the torrent's file count,
+	// so memory is O(files), not O(events).
+	doneReplay []FileCompleteEvent
+	closed     bool
+
 	closeCh   chan struct{}
 	closeOnce sync.Once
 }
 
+const fileTrackerSubBuf = 64
+
 // startFileTracker kicks off the tracker goroutine and returns a handle
-// with a buffered events channel. The goroutine waits for torrent metadata
-// before it does any real work, so it is safe to call this even on a
-// freshly-added magnet.
+// with no subscribers attached. Callers use Subscribe() to obtain a stream
+// of events. The goroutine waits for torrent metadata before it does any
+// real work, so it is safe to call this even on a freshly-added magnet.
 func startFileTracker(t *torrent.Torrent, log *slog.Logger) *fileTracker {
 	ft := &fileTracker{
 		log:     log,
 		t:       t,
 		ihHex:   t.InfoHash().HexString(),
-		events:  make(chan FileCompleteEvent, 64),
 		closeCh: make(chan struct{}),
 	}
 	go ft.run()
 	return ft
 }
 
-// Events returns the channel of file-complete events. It is closed when
-// Close() is called or when the underlying piece subscription terminates.
-// Consumers SHOULD drain the channel; if they fall behind, individual events
-// are dropped (see the select in dispatch below).
+// Subscribe returns a fresh receive-only channel of FileCompleteEvent values.
+// Every event emitted by the tracker after this call is delivered to this
+// subscriber. Callers SHOULD drain the channel; if they fall behind past the
+// per-subscriber buffer, individual events for that subscriber are dropped
+// and logged (other subscribers are unaffected).
+//
+// The channel is closed when Close() is called or the tracker's piece
+// subscription terminates. If Subscribe is called after the tracker has
+// already shut down, the returned channel is closed immediately.
+func (ft *fileTracker) Subscribe() <-chan FileCompleteEvent {
+	ch := make(chan FileCompleteEvent, fileTrackerSubBuf)
+	ft.mu.Lock()
+	if ft.closed {
+		ft.mu.Unlock()
+		close(ch)
+		return ch
+	}
+	// Replay events for files already dispatched. If the replay
+	// exceeds the channel buffer, the overflow is dropped — but
+	// the buffer is fileTrackerSubBuf (64), which exceeds any
+	// realistic file-count-at-startup case for content torrents.
+	// Larger torrents that exceed the buffer would simply need
+	// a bigger fileTrackerSubBuf; we don't allocate a side channel
+	// because the only current consumer (the ingest pipeline) has
+	// its own input buffer that would absorb any backlog.
+	for _, ev := range ft.doneReplay {
+		select {
+		case ch <- ev:
+		default:
+			ft.log.Warn("file_tracker.replay.dropped",
+				"info_hash", ft.ihHex,
+				"file_index", ev.FileIndex,
+				"path", ev.Path,
+			)
+		}
+	}
+	ft.subscribers = append(ft.subscribers, ch)
+	ft.mu.Unlock()
+	return ch
+}
+
+// Events returns a receive-only channel of FileCompleteEvent values. This
+// is a thin convenience wrapper around Subscribe(): each call creates a
+// new independent subscription, so callers MUST bind the result to a local
+// variable and range over it. Calling Events() inside a loop's select-case
+// expression leaks a new channel per iteration.
+//
+// New code should prefer Subscribe() for clarity.
 func (ft *fileTracker) Events() <-chan FileCompleteEvent {
-	return ft.events
+	return ft.Subscribe()
 }
 
 // Close detaches from the torrent and shuts down the goroutine. Idempotent.
+// After Close returns, every outstanding subscriber channel is closed.
 func (ft *fileTracker) Close() {
 	ft.closeOnce.Do(func() {
 		close(ft.closeCh)
@@ -77,7 +133,7 @@ func (ft *fileTracker) Close() {
 // on GotInfo, building the file map, seeding the pending counters) can be
 // interrupted by Close() before any real work starts.
 func (ft *fileTracker) run() {
-	defer close(ft.events)
+	defer ft.closeAllSubscribers()
 
 	// Wait for torrent metadata, interruptible by Close().
 	select {
@@ -99,9 +155,6 @@ func (ft *fileTracker) run() {
 	sub := ft.t.SubscribePieceStateChanges()
 	defer sub.Close()
 
-	// remaining[fileIndex] = count of still-pending pieces for that file.
-	// A file whose counter reaches 0 is immediately complete, and we emit
-	// exactly once using the done[] set.
 	remaining := make(map[int]int, len(fm.Files()))
 	done := make(map[int]bool, len(fm.Files()))
 
@@ -117,9 +170,6 @@ func (ft *fileTracker) run() {
 		}
 		remaining[span.Index] = r
 		if r == 0 {
-			// Already complete at subscription time — fire the event now.
-			// This covers resumed downloads and torrents whose pieces were
-			// already on disk when we attached.
 			ft.dispatch(span, done)
 		}
 	}
@@ -135,8 +185,6 @@ func (ft *fileTracker) run() {
 				return
 			}
 			if !(ev.Completion.Complete && ev.Completion.Ok) {
-				// Ignore transient states: hashing, partial, etc. Only
-				// verified-good pieces count toward file completion.
 				continue
 			}
 			for _, fi := range fm.FilesForPiece(ev.Index) {
@@ -154,10 +202,9 @@ func (ft *fileTracker) run() {
 	}
 }
 
-// dispatch marks a file as done and pushes the corresponding event onto the
-// output channel. If the consumer is backed up and the channel is full, the
-// event is dropped and logged — M2.2's indexer will replace this with a
-// proper bounded-queue + retry strategy.
+// dispatch marks a file as done and broadcasts the corresponding event to
+// every current subscriber. A subscriber whose buffer is full gets its
+// event dropped (and logged) rather than blocking the whole fan-out.
 func (ft *fileTracker) dispatch(span fileSpan, done map[int]bool) {
 	if done[span.Index] {
 		return
@@ -169,19 +216,43 @@ func (ft *fileTracker) dispatch(span fileSpan, done map[int]bool) {
 		Path:      span.Path,
 		Size:      span.Size,
 	}
-	select {
-	case ft.events <- ev:
-		ft.log.Info("file.complete",
-			"info_hash", ft.ihHex,
-			"file_index", span.Index,
-			"path", span.Path,
-			"size", span.Size,
-		)
-	default:
-		ft.log.Warn("file.complete.dropped",
-			"info_hash", ft.ihHex,
-			"file_index", span.Index,
-			"path", span.Path,
-		)
+
+	ft.mu.Lock()
+	subs := ft.subscribers
+	// Record the event for replay to late subscribers. See the
+	// doneReplay comment on the struct for why this is needed.
+	ft.doneReplay = append(ft.doneReplay, ev)
+	ft.mu.Unlock()
+
+	ft.log.Info("file.complete",
+		"info_hash", ft.ihHex,
+		"file_index", span.Index,
+		"path", span.Path,
+		"size", span.Size,
+	)
+	for _, ch := range subs {
+		select {
+		case ch <- ev:
+		default:
+			ft.log.Warn("file.complete.dropped",
+				"info_hash", ft.ihHex,
+				"file_index", span.Index,
+				"path", span.Path,
+			)
+		}
+	}
+}
+
+// closeAllSubscribers closes every outstanding subscriber channel and
+// marks the tracker closed so any subsequent Subscribe() gets an already-
+// closed channel. Safe to call exactly once — run() invokes it via defer.
+func (ft *fileTracker) closeAllSubscribers() {
+	ft.mu.Lock()
+	ft.closed = true
+	subs := ft.subscribers
+	ft.subscribers = nil
+	ft.mu.Unlock()
+	for _, ch := range subs {
+		close(ch)
 	}
 }

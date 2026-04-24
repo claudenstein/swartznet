@@ -140,6 +140,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			Adder:     eng,
 			Control:   &controllerAdapter{eng: eng},
 			Companion: newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile),
+			DHTStats:  eng.DHTRoutingTableSize,
 		})
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)

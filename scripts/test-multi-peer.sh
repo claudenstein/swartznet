@@ -317,30 +317,40 @@ done
 for i in 0 1 2; do
     idx=$((i + 1))
     api=${PEER_APIS[$i]}
-    # Give the indexer a moment to pick up newly-completed files.
-    # The pipeline ingests on piece-complete events which arrive
-    # before our integrity-check reads the on-disk tree, but the
-    # handle-to-index chain is batched on a ticker.
-    for _ in $(seq 1 40); do
-        # The HTTP API's SearchRequest uses field "q" (not "query")
-        # and the response is {local:{total,hits:[...]}, swarm:..., dht:...}.
-        hits=$(curl -fsS -XPOST -H 'Content-Type: application/json' \
-            -d '{"q":"photon","limit":20}' "http://${api}/search" \
-            2>/dev/null || echo '{}')
-        count=$(j "${hits}" 'len(d.get("local",{}).get("hits",[])) if d else 0')
-        if [ "${count:-0}" -gt 0 ]; then break; fi
+
+    # Wait for the ingest pipeline to finish processing every file
+    # in the torrent before searching — otherwise the query races
+    # the indexer and the hit count on peer1 consistently trails
+    # peer2/peer3. TorrentSnapshot.IndexedFiles counts files the
+    # pipeline has processed (whether or not they produced text);
+    # when it reaches Files, the indexer is quiescent.
+    for _ in $(seq 1 60); do
+        snap=$(curl -fsS "http://${api}/torrents" 2>/dev/null || echo '{}')
+        total=$(j "${snap}" 'd["torrents"][0].get("files",0)          if d and d.get("torrents") else 0')
+        done_n=$(j "${snap}" 'd["torrents"][0].get("indexed_files",0) if d and d.get("torrents") else 0')
+        if [ "${total:-0}" -gt 0 ] && [ "${done_n:-0}" -ge "${total}" ]; then
+            break
+        fi
         sleep 0.25
     done
-    if [ "${count}" -gt 0 ]; then
-        log "search: peer${idx} indexed 'photon' hits=${count}"
+
+    # The HTTP API's SearchRequest uses field "q" (not "query")
+    # and the response is {local:{total,hits:[...]}, swarm:..., dht:...}.
+    hits=$(curl -fsS -XPOST -H 'Content-Type: application/json' \
+        -d '{"q":"photon","limit":50}' "http://${api}/search" \
+        2>/dev/null || echo '{}')
+    count=$(j "${hits}" 'len(d.get("local",{}).get("hits",[])) if d else 0')
+    if [ "${count:-0}" -gt 0 ]; then
+        log "search: peer${idx} indexed 'photon' hits=${count} (files_done=${done_n}/${total})"
     else
-        fail "peer${idx} search for 'photon' returned no hits"
+        fail "peer${idx} search for 'photon' returned no hits (files_done=${done_n}/${total})"
     fi
 done
 
 # -------------------------------------------------------------
 # 8. Final report
 # -------------------------------------------------------------
+REPORT="${RESULTS}/run-$(date +%Y%m%d-%H%M%S).txt"
 {
     echo "swartznet multi-peer scenario report"
     echo "====================================="
@@ -358,6 +368,7 @@ done
     done
     echo
     echo "STATUS: $( [ "${STATUS}" = 0 ] && echo PASS || echo FAIL )"
-} | tee "${RESULTS}/report.txt"
+} | tee "${REPORT}"
+log "report written to ${REPORT}"
 
 exit "${STATUS}"

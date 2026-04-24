@@ -1,0 +1,222 @@
+# SwartzNet Layer-B testbed — 6-node DHT-enabled scenarios.
+#
+# Companion to docker-compose.yml (3-node) and docker-compose.swarm.yml
+# (6-node, DHT-disabled). This stack's purpose is to exercise
+# Layer-D end-to-end — BEP-44 keyword-index publish and lookup
+# over a private mainline-DHT-compatible DHT formed between the
+# six nodes on an isolated bridge.
+#
+# Why a separate compose file instead of a profile on swarm.yml:
+#   - Different subnet (172.29.0.0/24) so the two stacks can
+#     coexist during debugging without IPAM collisions.
+#   - Every node here runs with DHT ENABLED (no --no-dht), which
+#     inverts the policy of the other two stacks. Keeping
+#     DHT-on scenarios out of the swarm stack means s6..s11 stay
+#     DHT-free and run fast.
+#   - All nodes bootstrap to seed-1 via --dht-bootstrap, a new
+#     swartznet CLI flag added in the same change as this file.
+#     Without the flag, anacrolix's default public bootstrap hosts
+#     (router.bittorrent.com etc.) are unreachable from the docker
+#     bridge, and no DHT ever forms.
+#
+# Usage:
+#   scripts/run-testbed.sh s12   # DHT-formation + Layer-D lookup
+#
+# Ports on localhost:
+#   17680  seed-1 HTTP API  (also acts as DHT bootstrap)
+#   17681  seed-2 HTTP API
+#   17682-17685  leech-1..leech-4 HTTP API
+# (The scenario probes via `docker exec curl` over the internal
+# bridge, same UFW-independent pattern as s6..s11.)
+#
+# --regtest is mandatory here: dhtindex.Publisher's production
+# RefreshInterval is 1h, far too slow for a test scenario.
+# Regtest collapses it to 5s, which lets Layer-D publish +
+# lookup round-trip within a 60s scenario budget.
+
+services:
+  seed-1:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-dht-seed-1
+    hostname: seed-1
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=seed
+    ports:
+      - "17680:7654"
+    volumes:
+      - ./netem:/netem:ro
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    # Seeds cross-bootstrap against each other so neither has a
+    # degenerate "only self in the routing table" starting
+    # state. Self-bootstrap was observed to cause BEP-44 put
+    # transaction timeouts because get_peers replied with the
+    # seed's own entry and the subsequent put raced its own
+    # listen socket.
+    command: >
+      swartznet add --regtest --dht-insecure
+      --dht-bootstrap=172.29.0.3:42069
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      /fixture/fixture.torrent
+    networks:
+      swartznet:
+        ipv4_address: 172.29.0.2
+
+  seed-2:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-dht-seed-2
+    hostname: seed-2
+    depends_on:
+      - seed-1
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=seed
+    ports:
+      - "17681:7654"
+    volumes:
+      - ./netem:/netem:ro
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --dht-insecure
+      --dht-bootstrap=172.29.0.2:42069
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      /fixture/fixture.torrent
+    networks:
+      swartznet:
+        ipv4_address: 172.29.0.3
+
+    # (seed-2 bootstraps against seed-1 only; see the seed-1
+    # comment above on why self-bootstrap is avoided.)
+
+  leech-1:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-dht-leech-1
+    hostname: leech-1
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17682:7654"
+    volumes:
+      - ./netem:/netem:ro
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --dht-insecure
+      --dht-bootstrap=172.29.0.2:42069
+      --dht-bootstrap=172.29.0.3:42069
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.29.0.2:42069&x.pe=172.29.0.3:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.29.0.4
+
+  leech-2:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-dht-leech-2
+    hostname: leech-2
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17683:7654"
+    volumes:
+      - ./netem:/netem:ro
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --dht-insecure
+      --dht-bootstrap=172.29.0.2:42069
+      --dht-bootstrap=172.29.0.3:42069
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.29.0.2:42069&x.pe=172.29.0.3:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.29.0.5
+
+  leech-3:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-dht-leech-3
+    hostname: leech-3
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17684:7654"
+    volumes:
+      - ./netem:/netem:ro
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --dht-insecure
+      --dht-bootstrap=172.29.0.2:42069
+      --dht-bootstrap=172.29.0.3:42069
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.29.0.2:42069&x.pe=172.29.0.3:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.29.0.6
+
+  leech-4:
+    build:
+      context: ..
+      dockerfile: testbed/Dockerfile
+    container_name: sn-dht-leech-4
+    hostname: leech-4
+    depends_on:
+      - seed-1
+      - seed-2
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-}
+      - ROLE=leech
+    ports:
+      - "17685:7654"
+    volumes:
+      - ./netem:/netem:ro
+      - ./fixture-swarm:/fixture:ro
+    cap_add:
+      - NET_ADMIN
+    command: >
+      swartznet add --regtest --dht-insecure
+      --dht-bootstrap=172.29.0.2:42069
+      --dht-bootstrap=172.29.0.3:42069
+      --data-dir=/data --api-addr=0.0.0.0:7654
+      "magnet:?xt=urn:btih:9564c13e1f67f40ec14bf0a2e54a86dea69ccebd&dn=testbed-swarm-corpus&x.pe=172.29.0.2:42069&x.pe=172.29.0.3:42069"
+    networks:
+      swartznet:
+        ipv4_address: 172.29.0.7
+
+networks:
+  swartznet:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.29.0.0/24
+          gateway: 172.29.0.1

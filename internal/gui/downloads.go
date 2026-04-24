@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -486,14 +487,70 @@ func sortSnapsSlice(s []engine.TorrentSnapshot, less func(a, b engine.TorrentSna
 }
 
 func (dl *downloadsTab) showAddMagnetDialog() {
+	dl.showAddMagnetDialogPrefilled("", true)
+}
+
+// showAddMagnetDialogPrefilled opens the Add Magnet dialog with
+// the URI entry pre-populated and the "Index" checkbox
+// initialised to indexChecked. Used both for the first-time
+// "paste a magnet" path (empty prefill) and for the retry-after-
+// error path (prefill = the bad URI) so users can fix a typo
+// without re-pasting the whole string.
+func (dl *downloadsTab) showAddMagnetDialogPrefilled(prefill string, indexChecked bool) {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("magnet:?xt=urn:btih:...")
 	entry.MultiLine = false
+	if prefill != "" {
+		entry.SetText(prefill)
+	}
 
 	indexCheck := widget.NewCheck("Index this torrent's files after download", nil)
-	indexCheck.SetChecked(true)
+	indexCheck.SetChecked(indexChecked)
 
-	d := dialog.NewForm(
+	// Build-and-reopen helper. If validation or the engine
+	// rejects the submitted URI, we close this dialog, show the
+	// error, and call showAddMagnetDialogPrefilled again with
+	// the same URI + checkbox state — so the user can edit the
+	// existing text instead of re-pasting.
+	var d dialog.Dialog
+	submit := func(ok bool) {
+		if !ok {
+			return
+		}
+		uri := strings.TrimSpace(entry.Text)
+		shouldIndex := indexCheck.Checked
+		if uri == "" {
+			showAddMagnetError(dl, "paste a magnet URI starting with \"magnet:?xt=urn:btih:\"", uri, shouldIndex)
+			return
+		}
+		// Shallow client-side validation so the user doesn't
+		// have to wait for the engine to return a cryptic
+		// error for an obviously-malformed paste.
+		if reason := validateMagnetURI(uri); reason != "" {
+			showAddMagnetError(dl, reason, uri, shouldIndex)
+			return
+		}
+		go func() {
+			ih, err := dl.d.Eng.AddMagnetURI(uri)
+			if err != nil {
+				fyne.Do(func() {
+					showAddMagnetError(dl,
+						"Could not add this magnet: "+friendlyAddErr(err),
+						uri, shouldIndex,
+					)
+				})
+				return
+			}
+			if !shouldIndex {
+				// Flip the flag immediately so autoIndex's
+				// 5-minute wait for metadata doesn't index it
+				// when GotInfo fires.
+				_ = dl.d.Eng.SetTorrentIndexing(ih, false)
+			}
+		}()
+	}
+
+	d = dialog.NewForm(
 		"Add Magnet URI",
 		"Add",
 		"Cancel",
@@ -501,32 +558,58 @@ func (dl *downloadsTab) showAddMagnetDialog() {
 			widget.NewFormItem("Magnet URI", entry),
 			widget.NewFormItem("", indexCheck),
 		},
-		func(ok bool) {
-			if !ok || entry.Text == "" {
-				return
-			}
-			uri := entry.Text
-			shouldIndex := indexCheck.Checked
-			go func() {
-				ih, err := dl.d.Eng.AddMagnetURI(uri)
-				if err != nil {
-					fyne.Do(func() {
-						dialog.ShowError(err, dl.win())
-					})
-					return
-				}
-				if !shouldIndex {
-					// Flip the flag immediately so autoIndex's
-					// 5-minute wait for metadata doesn't index it
-					// when GotInfo fires.
-					_ = dl.d.Eng.SetTorrentIndexing(ih, false)
-				}
-			}()
-		},
+		submit,
 		dl.win(),
 	)
 	d.Resize(fyne.NewSize(500, 180))
 	d.Show()
+}
+
+// showAddMagnetError presents an error dialog AND, on dismiss,
+// reopens the Add Magnet dialog with the bad URI pre-filled so
+// the user can edit it instead of starting over. The magnet URI
+// is long enough that re-pasting it would be a real annoyance,
+// and the common cause of errors (wrong scheme, missing btih) is
+// a one- or two-character fix.
+func showAddMagnetError(dl *downloadsTab, msg, uri string, indexChecked bool) {
+	info := dialog.NewInformation("Add Magnet failed", msg, dl.win())
+	info.SetOnClosed(func() {
+		dl.showAddMagnetDialogPrefilled(uri, indexChecked)
+	})
+	info.Show()
+}
+
+// validateMagnetURI runs cheap checks on a pasted magnet string so
+// we can fail fast with a friendly message instead of surfacing
+// anacrolix's internal error text. Returns an empty string when
+// the URI looks acceptable; otherwise the user-facing reason.
+func validateMagnetURI(uri string) string {
+	if !strings.HasPrefix(uri, "magnet:?") {
+		return "magnet URI must start with \"magnet:?\" — did you paste a regular URL?"
+	}
+	if !strings.Contains(uri, "xt=urn:btih:") {
+		return "magnet URI is missing the \"xt=urn:btih:\" infohash parameter"
+	}
+	return ""
+}
+
+// friendlyAddErr rewrites the most common engine error strings
+// into user-facing phrasing. Unknown errors pass through.
+func friendlyAddErr(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "zero infohash"):
+		return "the magnet URI's infohash is all zeros — it needs a real 40-character btih value"
+	case strings.Contains(msg, "parse magnet"):
+		return "the magnet URI is malformed and couldn't be parsed"
+	case strings.Contains(msg, "closed"):
+		return "the engine is shutting down; try again after restart"
+	default:
+		return msg
+	}
 }
 
 func (dl *downloadsTab) showAddFileDialog() {
@@ -614,14 +697,47 @@ func (dl *downloadsTab) removeSelected() {
 	if ih == "" {
 		return
 	}
-	go func() {
-		_ = dl.d.Eng.RemoveTorrent(ih)
-		fyne.Do(func() {
-			dl.mu.Lock()
-			dl.selected = -1
-			dl.mu.Unlock()
-		})
-	}()
+
+	// Remove drops the torrent from the download list and stops
+	// seeding/leeching it. engine.RemoveTorrent calls t.Drop()
+	// under the hood, which does NOT delete on-disk files and
+	// does NOT purge the Bleve content docs — those stay on disk
+	// and in the index until the user removes them manually. The
+	// confirm dialog exists mainly so the Delete key doesn't
+	// silently vanish a row when the user meant to press a
+	// different key.
+	var name string
+	dl.mu.RLock()
+	for _, s := range dl.snaps {
+		if s.InfoHash == ih {
+			name = s.Name
+			break
+		}
+	}
+	dl.mu.RUnlock()
+	label := name
+	if label == "" {
+		label = ih[:16] + "..."
+	}
+
+	dialog.ShowConfirm(
+		"Remove torrent?",
+		fmt.Sprintf("Remove \"%s\" from the download list and stop seeding/leeching?\n\nDownloaded files on disk are kept; the torrent entry in your list is removed.", label),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			go func() {
+				_ = dl.d.Eng.RemoveTorrent(ih)
+				fyne.Do(func() {
+					dl.mu.Lock()
+					dl.selected = -1
+					dl.mu.Unlock()
+				})
+			}()
+		},
+		dl.win(),
+	)
 }
 
 func (dl *downloadsTab) selectedInfoHash() string {
@@ -633,26 +749,8 @@ func (dl *downloadsTab) selectedInfoHash() string {
 	return dl.snaps[dl.selected].InfoHash
 }
 
-// win returns the parent window for dialogs. It walks up from the
-// content canvas object.
-func (dl *downloadsTab) win() fyne.Window {
-	c := fyne.CurrentApp().Driver().CanvasForObject(dl.content)
-	if c == nil {
-		// Fallback: return the first window from the app.
-		for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-			return w
-		}
-		return nil
-	}
-	// The canvas doesn't directly expose the window, but all
-	// current Fyne drivers associate one window per canvas.
-	for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-		if w.Canvas() == c {
-			return w
-		}
-	}
-	return nil
-}
+// win returns the parent window for dialogs.
+func (dl *downloadsTab) win() fyne.Window { return windowForObject(dl.content) }
 
 // torrentFilter limits file dialogs to .torrent files.
 type torrentFilter struct{}

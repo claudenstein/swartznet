@@ -23,15 +23,16 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		dataDir      string
-		indexDir     string
-		port         int
-		noDHT        bool
-		noDHTPublish bool
-		leechOnly    bool
-		noIndex      bool
-		apiAddr      string
-		regtest      bool
+		dataDir         string
+		indexDir        string
+		port            int
+		noDHT           bool
+		noDHTPublish    bool
+		leechOnly       bool
+		noIndex         bool
+		apiAddr         string
+		regtest         bool
+		dhtBootstrapArg stringSliceFlag
 	)
 	fs.StringVar(&dataDir, "data-dir", "", "data directory for downloaded content")
 	fs.StringVar(&indexDir, "index-dir", "", "Bleve index directory (default: ~/.local/share/swartznet/index)")
@@ -42,6 +43,9 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&noIndex, "no-index", false, "don't write this torrent to the local index")
 	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
 	fs.BoolVar(&regtest, "regtest", false, "regtest mode: accelerated publisher/companion timings (TESTING ONLY — never run against mainnet)")
+	fs.Var(&dhtBootstrapArg, "dht-bootstrap", "host:port of a DHT node to bootstrap against (repeat for multiple; empty uses anacrolix defaults)")
+	var dhtInsecure bool
+	fs.BoolVar(&dhtInsecure, "dht-insecure", false, "disable BEP-42 node-ID security (TESTING ONLY; needed for private DHTs on docker bridges / k8s cluster IPs)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -63,6 +67,8 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg.DisableDHT = noDHT
 	cfg.DisableDHTPublish = noDHTPublish
+	cfg.DHTBootstrapAddrs = []string(dhtBootstrapArg)
+	cfg.DHTInsecure = dhtInsecure
 	cfg.NoUpload = leechOnly
 	cfg.Regtest = regtest
 
@@ -164,6 +170,11 @@ func printInfo(w io.Writer, h *engine.Handle) {
 func progressLoop(ctx context.Context, w io.Writer, h *engine.Handle) {
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
+	// Bind the file-event subscription to a local variable so the select
+	// statement does not allocate a fresh subscription per iteration.
+	// SubscribeFileEvents creates an independent fan-out channel so this
+	// display loop does not steal events from the ingest pipeline.
+	fileEvents := h.SubscribeFileEvents()
 	var piecesSeen, filesSeen int
 	for {
 		select {
@@ -171,7 +182,7 @@ func progressLoop(ctx context.Context, w io.Writer, h *engine.Handle) {
 			return
 		case <-h.PieceEvents():
 			piecesSeen++
-		case ev, ok := <-h.FileEvents():
+		case ev, ok := <-fileEvents:
 			if !ok {
 				// Tracker shut down (engine closed); keep the loop alive
 				// until ctx cancels so the UI stops cleanly.

@@ -26,8 +26,9 @@ type companionTab struct {
 	pubInfoHashLbl *widget.Label
 
 	// Follow list.
-	followList *widget.List
-	follows    []followRow
+	followList   *widget.List
+	follows      []followRow
+	followsEmpty *widget.Label // hint shown when the follow list is empty
 }
 
 type followRow struct {
@@ -112,7 +113,21 @@ func newCompanionTab(ctx context.Context, d *daemon.Daemon) *companionTab {
 		followBtn,
 	))
 
-	followCard := widget.NewCard("Followed Publishers", "", ct.followList)
+	// Empty-state hint shown above/instead of the followList when
+	// there are no follows yet. Gives the user an explanation of
+	// what this panel is for rather than an empty rectangle.
+	ct.followsEmpty = widget.NewLabelWithStyle(
+		"No publishers followed yet. Paste a 64-char public key above\n"+
+			"and press Follow to start syncing a remote Bleve index.",
+		fyne.TextAlignCenter,
+		fyne.TextStyle{Italic: true},
+	)
+	ct.followsEmpty.Wrapping = fyne.TextWrapWord
+
+	// Stack the empty hint on top of the list; refresh() flips
+	// visibility based on len(ct.follows).
+	followListArea := container.NewStack(ct.followList, ct.followsEmpty)
+	followCard := widget.NewCard("Followed Publishers", "", followListArea)
 
 	ct.content = container.NewVBox(
 		pubCard,
@@ -194,6 +209,11 @@ func (ct *companionTab) refresh() {
 		}
 		ct.follows = rows
 		ct.followList.Refresh()
+		if len(rows) == 0 {
+			ct.followsEmpty.Show()
+		} else {
+			ct.followsEmpty.Hide()
+		}
 	})
 }
 
@@ -245,18 +265,4 @@ func (ct *companionTab) unfollowAt(idx int) {
 	ct.d.CompSub.Unfollow(pub)
 }
 
-func (ct *companionTab) win() fyne.Window {
-	c := fyne.CurrentApp().Driver().CanvasForObject(ct.content)
-	if c == nil {
-		for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-			return w
-		}
-		return nil
-	}
-	for _, w := range fyne.CurrentApp().Driver().AllWindows() {
-		if w.Canvas() == c {
-			return w
-		}
-	}
-	return nil
-}
+func (ct *companionTab) win() fyne.Window { return windowForObject(ct.content) }

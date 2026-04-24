@@ -181,8 +181,7 @@ func (a *AnacrolixPutter) Put(ctx context.Context, salt []byte, value KeywordVal
 		put.Sign(a.private)
 		return put
 	}
-	_, err = getput.Put(ctx, target, a.server, salt, seqToPut)
-	if err != nil {
+	if _, err := getput.Put(ctx, target, a.server, salt, seqToPut); err != nil {
 		return fmt.Errorf("dhtindex: put traversal: %w", err)
 	}
 	return nil

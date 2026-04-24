@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/swartznet/swartznet/internal/daemon"
@@ -92,12 +93,49 @@ func New(d *daemon.Daemon, version string) *App {
 
 	guiApp.installShortcuts()
 
-	// Main menu: About + Quit.
+	// Main menu with shortcut hints so the user can discover
+	// bindings without poking around. The handlers intentionally
+	// duplicate the canvas-shortcut handlers installed above —
+	// both the accelerator and the menu item trigger the same
+	// action.
+	ctrl := fyne.KeyModifierControl
+
+	addMagnetItem := fyne.NewMenuItem("Add Magnet...", func() {
+		tabs.SelectIndex(0)
+		if guiApp.dl != nil {
+			guiApp.dl.showAddMagnetDialog()
+		}
+	})
+	addMagnetItem.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: ctrl}
+
+	findItem := fyne.NewMenuItem("Find in Search", func() {
+		tabs.SelectIndex(1)
+		if guiApp.sr != nil && guiApp.sr.queryEntry != nil {
+			win.Canvas().Focus(guiApp.sr.queryEntry)
+		}
+	})
+	findItem.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: ctrl}
+
+	quitItem := fyne.NewMenuItem("Quit", func() {
+		cancel()
+		a.Quit()
+	})
+	quitItem.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyQ, Modifier: ctrl}
+	quitItem.IsQuit = true
+
+	fileMenu := fyne.NewMenu("File",
+		addMagnetItem,
+		fyne.NewMenuItemSeparator(),
+		findItem,
+		fyne.NewMenuItemSeparator(),
+		quitItem,
+	)
+
 	aboutItem := fyne.NewMenuItem("About SwartzNet", func() {
 		guiApp.showAbout()
 	})
 	helpMenu := fyne.NewMenu("Help", aboutItem)
-	win.SetMainMenu(fyne.NewMainMenu(helpMenu))
+	win.SetMainMenu(fyne.NewMainMenu(fileMenu, helpMenu))
 
 	win.SetContent(tabs)
 
@@ -228,7 +266,13 @@ func (a *App) setupSystemTray() {
 }
 
 // showAbout presents a modal about dialog with version and
-// identity information.
+// identity information. Each value that a user might want to
+// paste elsewhere (identity pubkey, BitTorrent port, HTTP API
+// address) is rendered with an inline Copy button that writes
+// the value to the system clipboard. Plain text Labels are not
+// selectable in Fyne, so without the Copy buttons these values
+// were effectively locked inside the dialog — which is a real
+// problem for a 64-char ed25519 pubkey users need to share.
 func (a *App) showAbout() {
 	var pubKey string
 	if id := a.daemon.Eng.Identity(); id != nil {
@@ -249,14 +293,31 @@ func (a *App) showAbout() {
 
 	content := widget.NewForm(
 		widget.NewFormItem("Version", widget.NewLabel(a.version)),
-		widget.NewFormItem("Identity", widget.NewLabel(pubKey)),
-		widget.NewFormItem("BitTorrent port", widget.NewLabel(port)),
-		widget.NewFormItem("HTTP API", widget.NewLabel(apiAddr)),
+		widget.NewFormItem("Identity", copyableValue(pubKey)),
+		widget.NewFormItem("BitTorrent port", copyableValue(port)),
+		widget.NewFormItem("HTTP API", copyableValue(apiAddr)),
 		widget.NewFormItem("License", widget.NewLabel("MPL 2.0 (engine) + MIT (SwartzNet code)")),
 	)
 
 	dialog.ShowCustom("About SwartzNet",
 		"Close", content, a.win)
+}
+
+// copyableValue returns a composite widget showing `value` next
+// to a small Copy icon-button that writes the value to the
+// system clipboard when tapped. If the value is empty or a
+// placeholder ("unknown", "disabled"), the Copy button is
+// suppressed so the user isn't invited to copy nothing.
+func copyableValue(value string) fyne.CanvasObject {
+	label := widget.NewLabel(value)
+	if value == "" || value == "unknown" || value == "disabled" {
+		return label
+	}
+	copyBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+		fyne.CurrentApp().Clipboard().SetContent(value)
+	})
+	copyBtn.Importance = widget.LowImportance
+	return container.NewBorder(nil, nil, nil, copyBtn, label)
 }
 
 // titleLoop updates the window title with aggregate download +
