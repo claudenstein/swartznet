@@ -29,6 +29,8 @@ func cmdAggregate(args []string, stdout, stderr io.Writer) int {
 		return cmdAggregateInspect(rest, stdout, stderr)
 	case "find":
 		return cmdAggregateFind(rest, stdout, stderr)
+	case "build":
+		return cmdAggregateBuild(rest, stdout, stderr)
 	case "help", "-h", "--help":
 		printAggregateUsage(stdout)
 		return exitOK
@@ -46,6 +48,7 @@ Usage:
   swartznet aggregate <subcommand> [args]
 
 Subcommands:
+  build  --out=FILE [flags]         Sign + pack JSONL records into a signed B-tree index.
   inspect <index-file>              Print trailer metadata for an Aggregate index.
   find <index-file> <prefix>        List records matching a keyword prefix.
   help                              Print this message.
