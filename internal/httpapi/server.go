@@ -251,6 +251,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /torrents/{infohash}/indexing", s.handleSetTorrentIndexing)
 	mux.HandleFunc("GET /torrents/{infohash}/files", s.handleListTorrentFiles)
 	mux.HandleFunc("POST /torrents/{infohash}/files/{index}/priority", s.handleSetFilePriority)
+	mux.HandleFunc("GET /aggregate", s.handleAggregateStatus)
 	mux.HandleFunc("GET /companion", s.handleCompanionStatus)
 	mux.HandleFunc("POST /companion/refresh", s.handleCompanionRefresh)
 	mux.HandleFunc("POST /companion/follow", s.handleCompanionFollow)
