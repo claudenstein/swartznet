@@ -27,6 +27,7 @@ import (
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/signing"
+	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 	"github.com/swartznet/swartznet/internal/trust"
 )
@@ -177,6 +178,50 @@ func (pt *peerTracker) get(addr string) (*torrent.PeerConn, bool) {
 // engine construction so the /aggregate endpoint reports non-
 // zero cache_size once records land here.
 func (e *Engine) RecordCache() *swarmsearch.RecordCache { return e.recCache }
+
+// MintAggregateRecords signs one LocalRecord per tokenised keyword
+// of `name` and pushes each into the engine's RecordCache so the
+// sync responder can share them. Silent-skip when the engine has
+// no identity (headless tests) or no cache (shouldn't happen
+// after engine.New; defensive). PoW is currently 0 — the dual-
+// read migration window doesn't require miners yet; a future
+// schema bump will set MinPoWBitsDefault here.
+func (e *Engine) MintAggregateRecords(ih [20]byte, name string) {
+	if e.identity == nil || e.recCache == nil {
+		return
+	}
+	tokens := dhtindex.TokenizeAll(name)
+	now := time.Now().Unix()
+	for _, kw := range tokens {
+		rec, err := companion.SignAndMineRecord(
+			e.identity.PrivateKey,
+			e.identity.PublicKey,
+			kw,
+			ih,
+			now,
+			0,
+		)
+		if err != nil {
+			e.log.Debug("engine.agg_record.sign_failed",
+				"info_hash", metainfo.Hash(ih).HexString(),
+				"kw", kw, "err", err)
+			continue
+		}
+		var local swarmsearch.LocalRecord
+		copy(local.Pk[:], rec.Pk[:])
+		local.Kw = rec.Kw
+		copy(local.Ih[:], rec.Ih[:])
+		local.T = rec.T
+		local.Pow = rec.Pow
+		copy(local.Sig[:], rec.Sig[:])
+		e.recCache.Add(local)
+	}
+	e.log.Debug("engine.agg_records.minted",
+		"info_hash", metainfo.Hash(ih).HexString(),
+		"tokens", len(tokens),
+		"cache_size", e.recCache.Len(),
+	)
+}
 
 // SwarmSearch returns the engine's sn_search protocol handle. Callers
 // (the CLI, future REST layer) use this to issue outbound swarm
@@ -1599,6 +1644,11 @@ func (e *Engine) autoIndex(h *Handle) {
 			SizeBytes: doc.SizeBytes,
 		})
 	}
+
+	// Aggregate (v0.5) record mint. Extracted into a method so
+	// tests can exercise it without the full torrent-add flow.
+	ihBytes := h.T.InfoHash()
+	e.MintAggregateRecords(ihBytes, doc.Name)
 
 	// Auto-confirm torrents signed by a trusted publisher. A
 	// trusted publisher's signature is the strongest "this
