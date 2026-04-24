@@ -149,5 +149,6 @@ func DefaultServices() ServiceBits {
 		BitContentHits |
 		BitCompanionPublisher |
 		BitCompanionSubscriber |
-		BitSnippetHighlight
+		BitSnippetHighlight |
+		BitSetReconciliation
 }
