@@ -156,6 +156,12 @@ type Protocol struct {
 	// own publisher (nothing to merge into). Closes wire-compat
 	// §8.4-C.
 	indexerSink IndexerSink
+
+	// endorsementSink receives peer_announce.endorsed entries
+	// so the daemon's Bootstrap can apply its admission policy.
+	// SPEC §3.3 channel-C gossip primitive. Nil when no
+	// Bootstrap is wired.
+	endorsementSink EndorsementSink
 }
 
 // IndexerSink is the narrow interface the Protocol uses to
@@ -168,6 +174,17 @@ type Protocol struct {
 // sn_search read-loop goroutines.
 type IndexerSink interface {
 	NoteGossipIndexer(pubkey [32]byte, label string)
+}
+
+// EndorsementSink receives peer_announce.endorsed entries.
+// An endorser vouches for a candidate publisher pubkey; the
+// daemon's Bootstrap applies its admission policy. Keeps the
+// swarmsearch package ignorant of daemon.Bootstrap internals.
+//
+// Implementations must be safe for concurrent calls from the
+// sn_search read-loop goroutines.
+type EndorsementSink interface {
+	NoteEndorsement(endorser, candidate [32]byte)
 }
 
 // New constructs a Protocol with default capabilities, the
@@ -294,6 +311,23 @@ func (p *Protocol) SetIndexerSink(sink IndexerSink) {
 	p.mu.Lock()
 	p.indexerSink = sink
 	p.mu.Unlock()
+}
+
+// SetEndorsementSink attaches a sink that receives
+// peer_announce.endorsed entries. The daemon's Bootstrap
+// implements this to route endorsements through its admission
+// policy. Nil disables the routing (no-op).
+func (p *Protocol) SetEndorsementSink(sink EndorsementSink) {
+	p.mu.Lock()
+	p.endorsementSink = sink
+	p.mu.Unlock()
+}
+
+// EndorsementSink returns the attached endorsement sink, or nil.
+func (p *Protocol) EndorsementSink() EndorsementSink {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.endorsementSink
 }
 
 // KnownPeers returns a snapshot of every peer the protocol has a

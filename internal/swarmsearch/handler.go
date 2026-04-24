@@ -156,11 +156,32 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 			}
 		}
 		sink = p.indexerSink
+		endoSink := p.endorsementSink
 		p.mu.Unlock()
 		if havePk && sink != nil {
 			// Label the indexer with the peer's address so ops
 			// logs can tell where the pubkey came from.
 			sink.NoteGossipIndexer(gotPubkey, "gossip:"+peerAddr)
+		}
+		// Channel C: route endorsements to the daemon's Bootstrap.
+		// A peer that endorses others without first announcing its
+		// own publisher pubkey still counts — the endorser
+		// identity used for the admission threshold is the
+		// publisher pubkey the peer advertised (havePk == true);
+		// otherwise the endorsements are dropped so a pubkey-less
+		// peer can't influence admission by itself.
+		if havePk && endoSink != nil {
+			for _, raw := range pa.Endorsed {
+				if len(raw) != 32 {
+					continue
+				}
+				var cand [32]byte
+				copy(cand[:], raw)
+				if cand == gotPubkey || cand == ([32]byte{}) {
+					continue // don't endorse yourself; skip all-zero
+				}
+				endoSink.NoteEndorsement(gotPubkey, cand)
+			}
 		}
 		p.log.Info("swarmsearch.rx_peer_announce",
 			"peer", peerAddr,

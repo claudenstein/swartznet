@@ -33,6 +33,16 @@ type Daemon struct {
 	Log       *slog.Logger
 }
 
+// bootstrapEndorsementSink adapts *Bootstrap to the
+// swarmsearch.EndorsementSink interface. Kept as a small typed
+// value (not a func-type adapter) so future extensions — e.g.
+// rate limiting per-endorser, telemetry — slot in cleanly.
+type bootstrapEndorsementSink struct{ boot *Bootstrap }
+
+func (a bootstrapEndorsementSink) NoteEndorsement(endorser, candidate [32]byte) {
+	a.boot.IngestEndorsement(endorser, candidate)
+}
+
 // Options controls which subsystems daemon.New starts.
 type Options struct {
 	Cfg     config.Config
@@ -141,6 +151,13 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			fmt.Fprintf(stderr, "warning: aggregate bootstrap init failed: %v\n", err)
 		} else {
 			d.Bootstrap = boot
+			// Route peer_announce.endorsed gossip (channel C)
+			// into the Bootstrap's admission policy. An adapter
+			// closure keeps swarmsearch free of a direct
+			// dependency on daemon.Bootstrap.
+			if sw := eng.SwarmSearch(); sw != nil {
+				sw.SetEndorsementSink(bootstrapEndorsementSink{boot: boot})
+			}
 			if len(boot.AnchorKeys()) > 0 {
 				go func() {
 					succeeded, errs := boot.RunAnchors(ctx)
