@@ -17,38 +17,104 @@ import (
 // Implements the RecordSource interface so it can be attached via
 // Protocol.SetRecordSource.
 //
-// Bounded-size eviction is not implemented yet — the cache grows
-// until callers explicitly Remove entries. The typical publisher
-// holds O(10k-100k) records, which at ~170 bytes/record is
-// ~2-20 MB of steady-state memory. Acceptable for v0.5.
+// Bounded-size eviction via SetMaxRecords: when the cap is
+// reached, the oldest-inserted record is evicted FIFO-style
+// before the new one lands. Zero means unlimited (default).
+// Callers may also call PruneOlderThan periodically to trim
+// records past a T threshold.
 type RecordCache struct {
-	mu   sync.RWMutex
-	byID map[[32]byte]LocalRecord
+	mu    sync.RWMutex
+	byID  map[[32]byte]LocalRecord
+	order [][32]byte // insertion order for FIFO eviction
+	max   int        // 0 = unlimited
 }
 
-// NewRecordCache returns an empty cache.
+// NewRecordCache returns an empty cache with no size cap.
 func NewRecordCache() *RecordCache {
 	return &RecordCache{
 		byID: make(map[[32]byte]LocalRecord),
 	}
 }
 
+// SetMaxRecords sets the soft cap for Add. Zero disables the
+// cap; any positive value triggers FIFO eviction of the
+// oldest-inserted record when Len would otherwise exceed cap.
+//
+// Setting a cap below Len DOES NOT proactively evict — the next
+// Add does the eviction. Callers that need an immediate drain
+// should call PruneOldestTo afterward.
+func (c *RecordCache) SetMaxRecords(n int) {
+	c.mu.Lock()
+	c.max = n
+	c.mu.Unlock()
+}
+
+// MaxRecords returns the current cap (0 = unlimited).
+func (c *RecordCache) MaxRecords() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.max
+}
+
 // Add inserts a record. Idempotent: re-adding the same record
 // (identical pk/kw/ih/t) is a no-op because the ID is deterministic.
 // Re-adding under a new timestamp produces a new ID and a distinct
-// cache entry.
+// cache entry. When MaxRecords is set and Len is at the cap, Add
+// evicts the oldest-inserted record before writing the new one.
 func (c *RecordCache) Add(r LocalRecord) {
 	id := cacheRecordID(r)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.byID[id]; !exists {
+		// New record — enforce cap before writing.
+		if c.max > 0 && len(c.byID) >= c.max {
+			c.evictOldestLocked()
+		}
+		c.order = append(c.order, id)
+	}
 	c.byID[id] = r
-	c.mu.Unlock()
+}
+
+// evictOldestLocked drops the FIFO-head record. Caller must
+// hold c.mu. The head may have already been removed by a prior
+// Remove; skip ahead until we find a live entry or the queue
+// empties.
+func (c *RecordCache) evictOldestLocked() {
+	for len(c.order) > 0 {
+		head := c.order[0]
+		c.order = c.order[1:]
+		if _, ok := c.byID[head]; ok {
+			delete(c.byID, head)
+			return
+		}
+		// Already-removed entry in the queue — skip.
+	}
 }
 
 // Remove deletes a record by its ID. No-op if absent.
 func (c *RecordCache) Remove(id [32]byte) {
 	c.mu.Lock()
 	delete(c.byID, id)
+	// Leave c.order alone — evictOldestLocked tolerates stale
+	// queue entries. Periodically rebuilding the queue would
+	// cost more than the occasional skip.
 	c.mu.Unlock()
+}
+
+// PruneOlderThan removes every record whose T field is less
+// than `since`. Returns the count of records dropped. Safe for
+// concurrent callers.
+func (c *RecordCache) PruneOlderThan(since int64) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dropped := 0
+	for id, r := range c.byID {
+		if r.T < since {
+			delete(c.byID, id)
+			dropped++
+		}
+	}
+	return dropped
 }
 
 // RemoveByRecord is a convenience: compute the ID for r and delete.
