@@ -100,6 +100,7 @@ type Bootstrap struct {
 	anchorKeys     [][32]byte
 	admitted       map[[32]byte]struct{}
 	endorsements   map[[32]byte]map[[32]byte]struct{} // candidate → endorsers
+	observed       map[[32]byte]struct{}              // pubkeys from channel B that didn't clear bloomPolicy
 	candidateQueue []candidate
 }
 
@@ -148,6 +149,7 @@ func NewBootstrap(lookup *dhtindex.Lookup, ppmi dhtindex.PPMIGetter, bloom *repu
 		opts:         opts,
 		admitted:     make(map[[32]byte]struct{}),
 		endorsements: make(map[[32]byte]map[[32]byte]struct{}),
+		observed:     make(map[[32]byte]struct{}),
 	}
 
 	for _, s := range opts.AnchorHexes {
@@ -264,10 +266,16 @@ func (b *Bootstrap) IngestEndorsement(endorser, cand [32]byte) bool {
 }
 
 // CandidateFromCrawl processes one publisher pubkey discovered
-// via channel B (BEP-51 sample_infohashes + metainfo inspection).
-// The caller is responsible for verifying the torrent's
-// snet.sig before passing the pubkey in. Admission is subject
-// to bloom + endorsement policy.
+// via channel B (BEP-51 sample_infohashes + metainfo inspection,
+// or sync-record ingestion via PublisherObserver). The caller is
+// responsible for verifying the torrent's snet.sig (or record's
+// sig) before passing the pubkey in. Admission is subject to
+// bloom + endorsement policy.
+//
+// Pubkeys that don't clear the admission gate are recorded in
+// the observed set so IsPending returns true. They can be
+// admitted later if endorsements accumulate or if the Bloom
+// filter starts matching their hits.
 func (b *Bootstrap) CandidateFromCrawl(cand [32]byte, sigValid bool) bool {
 	if !sigValid {
 		// SPEC §3.2 requires a valid snet.sig before admission.
@@ -278,13 +286,14 @@ func (b *Bootstrap) CandidateFromCrawl(cand [32]byte, sigValid bool) bool {
 		b.mu.Unlock()
 		return true
 	}
+	b.observed[cand] = struct{}{}
 	b.mu.Unlock()
 	if b.bloomPolicy(cand) {
 		return b.admit(cand, "crawled", "bep51")
 	}
-	// No immediate admission — could be admitted later if more
-	// endorsements arrive. Tests can observe the held state via
-	// IsPending.
+	// No immediate admission — observed entry stays so
+	// IsPending reflects reality, and a future endorsement round
+	// or Bloom update can promote the candidate.
 	return false
 }
 
@@ -299,14 +308,19 @@ func (b *Bootstrap) IsAdmitted(cand [32]byte) bool {
 
 // IsPending returns whether a candidate has been seen (via
 // channel B or C) but not yet admitted. Useful for operator
-// diagnostics and tests.
+// diagnostics and tests. A candidate is "pending" if it has
+// ANY endorsement OR has been observed via a crawl/sync signal
+// but hasn't cleared the admission gate.
 func (b *Bootstrap) IsPending(cand [32]byte) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.admitted[cand]; ok {
 		return false
 	}
-	_, ok := b.endorsements[cand]
+	if _, ok := b.endorsements[cand]; ok {
+		return true
+	}
+	_, ok := b.observed[cand]
 	return ok
 }
 
