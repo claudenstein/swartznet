@@ -41,6 +41,25 @@ func TestCreateTorrentFileRenameFailure(t *testing.T) {
 	}
 }
 
+// TestCreateTorrentFileMissingRootPropagates covers the
+// `mi, err := e.CreateTorrent(opts); if err != nil` arm in
+// CreateTorrentFile. Pass an opts.Root that doesn't exist so
+// CreateTorrent fails on os.Stat — the wrapping function must
+// surface the error without writing any file.
+func TestCreateTorrentFileMissingRootPropagates(t *testing.T) {
+	t.Parallel()
+	eng := newTestEngine(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no-such-root")
+	out := filepath.Join(dir, "out.torrent")
+	if _, _, err := eng.CreateTorrentFile(engine.CreateTorrentOptions{Root: missing}, out); err == nil {
+		t.Error("CreateTorrentFile should fail when Root is missing")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf(".torrent should not exist after failure, stat err = %v", err)
+	}
+}
+
 // TestCreateTorrentFileBadSigningKeyPropagatesError covers the
 // "sign:" wrapped error branch in CreateTorrentFile: SignWith
 // receives a private key of wrong length so signing.SignBytes
