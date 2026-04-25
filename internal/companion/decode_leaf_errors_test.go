@@ -93,3 +93,18 @@ func TestEncodeTrailerBadVersion(t *testing.T) {
 		t.Error("EncodeTrailer should reject TrailerVersion=2")
 	}
 }
+
+// TestDecodeTrailerBadVersion — DecodeTrailer must reject a
+// trailer whose first payload byte (TrailerVersion) is not
+// 0x01. Hand-build the page since EncodeTrailer rejects bad
+// versions before we ever reach DecodeTrailer in the round
+// trip.
+func TestDecodeTrailerBadVersion(t *testing.T) {
+	t.Parallel()
+	body := make([]byte, TrailerPayloadSize)
+	body[0] = 0x02 // unsupported future version
+	page := makeInteriorPage(t, PageKindTrailer, body, MinPieceSize)
+	if _, err := DecodeTrailer(page); err == nil {
+		t.Error("DecodeTrailer should reject TrailerVersion=2 in payload")
+	}
+}
