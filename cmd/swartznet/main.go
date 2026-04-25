@@ -99,7 +99,7 @@ Commands:
   index <infohash> <on|off>         Toggle per-torrent indexing on a running daemon.
   files <infohash> [<idx> <prio>]   List files in a torrent, or set file priority (none/normal/high).
   trust <list|add|remove> ...       Manage the local publisher trust list.
-  aggregate <inspect|find> ...      Inspect/query Aggregate (v0.5) index files.
+  aggregate <inspect|find|build>    Inspect/query/build Aggregate (v0.5) index files.
   crawl-probe --addr <host:port>    One-shot BEP-51 sample_infohashes probe (ops tool).
   version                           Print the version and exit.
   help                              Print this message.
