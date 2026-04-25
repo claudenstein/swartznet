@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swartznet/swartznet/internal/reputation"
 )
 
 // TestNewHTTPSFallbackClientUsesProvidedTimeout verifies that
@@ -112,6 +114,55 @@ func TestBootstrapAnchorCount(t *testing.T) {
 	}
 	if got := b.AnchorCount(); got != 1 {
 		t.Errorf("post-fallback AnchorCount = %d, want 1", got)
+	}
+}
+
+// TestNewBootstrapNilLookup covers the
+// `if lookup == nil { return error }` guard. Without a Lookup
+// the orchestrator has nothing to admit publishers into, so
+// constructor must reject the call rather than build a
+// half-wired struct.
+func TestNewBootstrapNilLookup(t *testing.T) {
+	t.Parallel()
+	if _, err := NewBootstrap(nil, nil, nil, nil, DefaultBootstrapOptions(), nil); err == nil {
+		t.Error("NewBootstrap(nil lookup) should error")
+	}
+}
+
+// TestIngestEndorsementOnAdmittedFreshEndorser covers the
+// second `if _, ok := b.endorsements[cand]; !ok { make(...) }`
+// arm — the admitted-but-no-prior-endorsements case. Pre-admit
+// a candidate via the bloom-policy path (so endorsements[cand]
+// is still empty), then call IngestEndorsement and verify it
+// stores the endorser without panicking on the missing map.
+func TestIngestEndorsementOnAdmittedFreshEndorser(t *testing.T) {
+	t.Parallel()
+	lookup := newTestLookup()
+	// Use a permissive bloom filter so any first crawl admits
+	// directly via bloomPolicy without needing endorsements.
+	bf := reputation.NewBloomFilter(16, 0.01)
+	tr := reputation.NewTracker()
+	b, err := NewBootstrap(lookup, nil, bf, tr, DefaultBootstrapOptions(), nil)
+	if err != nil {
+		t.Fatalf("NewBootstrap: %v", err)
+	}
+
+	cand := pubkeyBytes("admitted-no-endorsers")
+	// Seed the bloom so bloomPolicy(cand) → true on first crawl.
+	bf.Add(cand[:])
+	if !b.CandidateFromCrawl(cand, true) {
+		t.Fatal("expected immediate admission via bloom policy")
+	}
+	if !b.IsAdmitted(cand) {
+		t.Fatal("cand not admitted")
+	}
+
+	// First-ever endorser arrives AFTER admission. The fresh-map
+	// guard inside the admitted branch must allocate the
+	// endorsers set rather than nil-deref it.
+	endorser := pubkeyBytes("endorser-X")
+	if !b.IngestEndorsement(endorser, cand) {
+		t.Error("IngestEndorsement on admitted cand should report admitted=true")
 	}
 }
 
