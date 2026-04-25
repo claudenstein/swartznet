@@ -2,6 +2,7 @@ package dhtindex_test
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -149,5 +150,151 @@ func TestSampleInfohashesParsesResponse(t *testing.T) {
 		t.Errorf("Nodes len = %d, want 1", len(got.Nodes))
 	} else if got.Nodes[0].ID != nodeA.ID {
 		t.Errorf("Nodes[0].ID = %x, want %x", got.Nodes[0].ID, nodeA.ID)
+	}
+}
+
+// TestSampleInfohashesErrorResponse covers the
+// `if err := res.ToError(); err != nil` arm. Responder sends a
+// KRPC error message (`y: "e"`) instead of a normal reply;
+// SampleInfohashes must surface that error.
+func TestSampleInfohashesErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	respConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer respConn.Close()
+
+	type errReply struct {
+		T string        `bencode:"t"`
+		Y string        `bencode:"y"`
+		E []interface{} `bencode:"e"`
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 2048)
+		_ = respConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, from, err := respConn.ReadFrom(buf)
+		if err != nil {
+			t.Errorf("responder ReadFrom: %v", err)
+			return
+		}
+		var q krpc.Msg
+		if err := bencode.Unmarshal(buf[:n], &q); err != nil {
+			t.Errorf("responder decode: %v", err)
+			return
+		}
+		out, err := bencode.Marshal(errReply{
+			T: q.T,
+			Y: "e",
+			E: []interface{}{int64(201), "generic test error"},
+		})
+		if err != nil {
+			t.Errorf("responder marshal: %v", err)
+			return
+		}
+		if _, err := respConn.WriteTo(out, from); err != nil {
+			t.Errorf("responder WriteTo: %v", err)
+		}
+	}()
+
+	srv := newIsolatedDHTServer(t)
+	addr := dht.NewAddr(respConn.LocalAddr())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err = dhtindex.SampleInfohashes(ctx, srv, addr, krpc.ID{})
+	<-done
+	if err == nil {
+		t.Error("expected error from KRPC error response, got nil")
+	}
+}
+
+// TestSampleInfohashesNodes6 covers the
+// `for _, n := range r.Nodes6` loop. Responder includes a
+// non-empty nodes6 string (38-byte compact IPv6 entries).
+// SampleInfohashes must merge the IPv6 nodes into Nodes.
+func TestSampleInfohashesNodes6(t *testing.T) {
+	t.Parallel()
+
+	respConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer respConn.Close()
+
+	// Build one compact-IPv6 entry: 20-byte ID + 16-byte IPv6 + 2-byte port.
+	v6 := net.ParseIP("::1").To16()
+	if len(v6) != 16 {
+		t.Fatalf("expected 16-byte IPv6, got %d", len(v6))
+	}
+	id := krpc.ID{0xCC}
+	entry := make([]byte, 0, 38)
+	entry = append(entry, id[:]...)
+	entry = append(entry, v6...)
+	portBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBytes, 6881)
+	entry = append(entry, portBytes...)
+
+	type rPart struct {
+		ID     krpc.ID `bencode:"id"`
+		Nodes6 string  `bencode:"nodes6"`
+	}
+	type customReply struct {
+		T string `bencode:"t"`
+		Y string `bencode:"y"`
+		R rPart  `bencode:"r"`
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 2048)
+		_ = respConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, from, err := respConn.ReadFrom(buf)
+		if err != nil {
+			t.Errorf("responder ReadFrom: %v", err)
+			return
+		}
+		var q krpc.Msg
+		if err := bencode.Unmarshal(buf[:n], &q); err != nil {
+			t.Errorf("responder decode: %v", err)
+			return
+		}
+		out, err := bencode.Marshal(customReply{
+			T: q.T,
+			Y: "r",
+			R: rPart{
+				ID:     krpc.ID{0x42},
+				Nodes6: string(entry),
+			},
+		})
+		if err != nil {
+			t.Errorf("responder marshal: %v", err)
+			return
+		}
+		if _, err := respConn.WriteTo(out, from); err != nil {
+			t.Errorf("responder WriteTo: %v", err)
+		}
+	}()
+
+	srv := newIsolatedDHTServer(t)
+	addr := dht.NewAddr(respConn.LocalAddr())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := dhtindex.SampleInfohashes(ctx, srv, addr, krpc.ID{})
+	<-done
+	if err != nil {
+		t.Fatalf("SampleInfohashes: %v", err)
+	}
+	if len(got.Nodes) != 1 {
+		t.Fatalf("Nodes len = %d, want 1 (the IPv6 entry)", len(got.Nodes))
+	}
+	if got.Nodes[0].ID[0] != 0xCC {
+		t.Errorf("Nodes[0].ID[0] = %x, want 0xCC", got.Nodes[0].ID[0])
 	}
 }
