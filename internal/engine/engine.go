@@ -1082,6 +1082,7 @@ func (e *Engine) AddMagnet(uri string) (*Handle, error) {
 	h := e.registerLocked(t)
 	e.mu.Unlock()
 	e.persistAdd(h, "magnet", uri, "")
+	go e.upgradeMagnetSession(h)
 	return h, nil
 }
 
@@ -1162,6 +1163,7 @@ func (e *Engine) AddInfoHash(infoHash [20]byte) (*Handle, error) {
 	h := e.registerLocked(t)
 	e.mu.Unlock()
 	e.persistAdd(h, "infohash", "", "")
+	go e.upgradeMagnetSession(h)
 	return h, nil
 }
 
@@ -1308,7 +1310,11 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 	go e.autoIndex(h)
 	go e.ingestFileEvents(h)
 	go e.autoConfirmOnComplete(h)
-	go e.upgradeMagnetSession(h)
+	// upgradeMagnetSession is started by AddMagnet/AddInfoHash
+	// only — see those callers. AddTorrentFile and
+	// AddTorrentMetaInfo carry the metainfo bytes directly and
+	// run writeTorrentCopy from their own callsite, so a parallel
+	// upgrader on those paths would race for the same .tmp file.
 	return h
 }
 
@@ -1382,6 +1388,19 @@ func (e *Engine) persistState(h *Handle) {
 // On the next restart the engine can re-add by file directly,
 // skipping the ut_metadata fetch round trip.
 //
+// Only meaningful for adds that started with no metainfo on disk —
+// AddMagnet and AddInfoHash paths. AddTorrentFile and
+// AddTorrentMetaInfo write the .torrent themselves before
+// persistAdd, so a parallel upgradeMagnetSession goroutine for
+// those paths would race against the main writeTorrentCopy with
+// the same target file (and worse, write a *re-marshalled*
+// metainfo that may have a slightly different byte sequence —
+// metainfo.Load then rejects it with "expected EOF" on restore).
+// The check below skips entries that already carry a TorrentFile
+// AND entries whose AddedVia is "file" — defence-in-depth against
+// the persistAdd-ordering race documented in the test
+// TestSessionRoundTrip.
+//
 // No-op for already-file entries, sessionless engines, and
 // torrents whose metadata never arrives.
 func (e *Engine) upgradeMagnetSession(h *Handle) {
@@ -1396,7 +1415,13 @@ func (e *Engine) upgradeMagnetSession(h *Handle) {
 	ih := h.T.InfoHash().HexString()
 	e.sess.mu.Lock()
 	entry, ok := e.sess.entries[ih]
-	already := ok && entry.TorrentFile != ""
+	// Skip if the .torrent file is already on disk OR if the
+	// AddedVia indicates this entry was added with metainfo
+	// already (file/torrent-meta-info paths). Both branches
+	// indicate writeTorrentCopy already ran (or is about to) on
+	// the main path and we'd be racing with it for the same
+	// .torrent.tmp file.
+	already := ok && (entry.TorrentFile != "" || entry.AddedVia == "file" || entry.AddedVia == "metainfo")
 	e.sess.mu.Unlock()
 	if already {
 		return
@@ -1527,6 +1552,13 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 	h.queueMu.Lock()
 	h.queueOrder = entry.QueueOrder
 	h.queueMu.Unlock()
+	// Magnet/infohash entries can still benefit from the metainfo
+	// upgrade once metadata arrives — spawn the goroutine for
+	// those branches only. File entries already have their
+	// .torrent on disk so the goroutine would just race itself.
+	if entry.AddedVia != "file" && entry.AddedVia != "metainfo" {
+		go e.upgradeMagnetSession(h)
+	}
 	return nil
 }
 
