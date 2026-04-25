@@ -152,4 +152,20 @@ func TestBootstrapPendingCount(t *testing.T) {
 	if got := b.PendingCount(); got != 2 {
 		t.Errorf("post-dedup PendingCount = %d, want 2 (no double-count)", got)
 	}
+
+	// Drive cand1 to admission via the EndorsementThreshold path.
+	// EndorsementThreshold=3 (default) so two more distinct endorsers
+	// push cand1 over the line. Without a tracker, every endorser is
+	// counted as strong (see countStrongEndorsers).
+	b.IngestEndorsement(pubkeyBytes("endorser-B"), cand1)
+	b.IngestEndorsement(pubkeyBytes("endorser-C"), cand1)
+	if !b.IsAdmitted(cand1) {
+		t.Fatal("expected cand1 to be admitted after 3 endorsers")
+	}
+	// cand1 stays in both endorsements and observed maps but
+	// PendingCount must filter it out via the admitted check.
+	// Only cand2 remains pending.
+	if got := b.PendingCount(); got != 1 {
+		t.Errorf("post-admission PendingCount = %d, want 1 (cand2 only)", got)
+	}
 }
