@@ -205,6 +205,47 @@ func TestVerifyFingerprintDetectsTamperedLeaf(t *testing.T) {
 	}
 }
 
+// TestFindDropsRecordsWithBadSig covers Find's
+// `if err := VerifyRecordSig(rec); err != nil { continue }`
+// arm. Build records normally, corrupt one record's signature
+// before passing to BuildBTree (the trailer is signed over the
+// resulting fingerprint, so OpenBTree still succeeds), and
+// observe that Find returns one fewer hit than the input set.
+func TestFindDropsRecordsWithBadSig(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	recs := makeRecords(t, pub, priv, 5, []string{"ubuntu"})
+	// Corrupt the third record's signature. The leaf decode
+	// still succeeds because Sig is just 64 raw bytes, but
+	// VerifyRecordSig will fail.
+	recs[2].Sig[0] ^= 0xFF
+
+	var pk [32]byte
+	copy(pk[:], pub)
+	out, err := BuildBTree(BuildBTreeInput{
+		Records:   recs,
+		PubKey:    pk,
+		PrivKey:   priv,
+		Seq:       1,
+		PieceSize: MinPieceSize,
+		CreatedTs: 1712649600,
+	})
+	if err != nil {
+		t.Fatalf("BuildBTree: %v", err)
+	}
+	src := &BytesPageSource{Data: out.Bytes, PieceSize: MinPieceSize}
+	r, err := OpenBTree(src)
+	if err != nil {
+		t.Fatalf("OpenBTree: %v", err)
+	}
+	hits, err := r.Find("ubuntu")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if len(hits) != 4 {
+		t.Errorf("Find returned %d hits, want 4 (one record dropped due to bad sig)", len(hits))
+	}
+}
+
 // TestFindDropsRecordsBelowMinPoW covers Find's
 // `if err := VerifyRecordPoW(rec, ...); err != nil { continue }`
 // arm. Build a tree with no PoW (records minted with tiny
