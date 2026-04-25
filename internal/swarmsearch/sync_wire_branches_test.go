@@ -61,10 +61,10 @@ func TestDecodeSyncSymbolsRejectsEmptySymbolsField(t *testing.T) {
 	// symbols. EncodeSyncSymbols rejects this, so we marshal a
 	// custom struct.
 	type custom struct {
-		MsgType int           `bencode:"msg_type"`
-		TxID    uint32        `bencode:"txid"`
-		Symbols []SyncSymbol  `bencode:"symbols"`
-		Index   uint32        `bencode:"idx"`
+		MsgType int          `bencode:"msg_type"`
+		TxID    uint32       `bencode:"txid"`
+		Symbols []SyncSymbol `bencode:"symbols"`
+		Index   uint32       `bencode:"idx"`
 	}
 	raw, err := bencode.Marshal(custom{
 		MsgType: MsgTypeSyncSymbols,

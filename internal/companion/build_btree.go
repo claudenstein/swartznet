@@ -301,9 +301,9 @@ func BuildBTree(in BuildBTreeInput) (BuildBTreeOutput, error) {
 // an interior page's child indices aren't known until after the
 // top-down BFS layout pass.
 type pageBuild struct {
-	level      int  // 0 = leaf; larger = closer to root
-	isLeaf     bool // true iff records != nil
-	isRoot     bool // true iff single page at the highest level
+	level  int  // 0 = leaf; larger = closer to root
+	isLeaf bool // true iff records != nil
+	isRoot bool // true iff single page at the highest level
 
 	// Only for leaves:
 	records []Record

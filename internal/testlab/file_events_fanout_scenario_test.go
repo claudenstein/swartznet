@@ -30,8 +30,8 @@ import (
 // The test constructs a seed → leech pair with a 12-file torrent,
 // attaches a second goroutine that drains Handle.SubscribeFileEvents
 // just like the CLI does, and then asserts:
-//   1. The ingest pipeline processed *every* file (IndexedFiles == Files).
-//   2. The side consumer also saw every file.
+//  1. The ingest pipeline processed *every* file (IndexedFiles == Files).
+//  2. The side consumer also saw every file.
 func TestScenarioFileEventsFanOutPipelineCoverage(t *testing.T) {
 	c := testlab.NewCluster(t, 2)
 	seed := c.Nodes[0]

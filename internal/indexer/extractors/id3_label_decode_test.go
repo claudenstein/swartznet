@@ -104,7 +104,7 @@ func TestDecodeID3TextCOMMSkipsLangAndDescriptor(t *testing.T) {
 	t.Parallel()
 	// enc=0, lang="eng", descriptor="title\0", payload="hello world".
 	body := []byte{0}
-	body = append(body, 'e', 'n', 'g')         // lang
+	body = append(body, 'e', 'n', 'g')              // lang
 	body = append(body, 't', 'i', 't', 'l', 'e', 0) // descriptor + NUL
 	body = append(body, []byte("hello world")...)
 	if got := decodeID3Text(body, "COMM"); got != "hello world" {
@@ -121,9 +121,9 @@ func TestDecodeID3TextCOMMUTF16Descriptor(t *testing.T) {
 	// BOM (€ ensures the trailing-NUL trim doesn't eat the last
 	// char's pad byte).
 	body := []byte{1}
-	body = append(body, 'e', 'n', 'g')                              // lang
-	body = append(body, 'a', 0, 'b', 0, 0, 0)                       // descriptor + NUL16
-	body = append(body, 0xff, 0xfe, 'H', 0, 'i', 0, 0xac, 0x20)     // payload
+	body = append(body, 'e', 'n', 'g')                          // lang
+	body = append(body, 'a', 0, 'b', 0, 0, 0)                   // descriptor + NUL16
+	body = append(body, 0xff, 0xfe, 'H', 0, 'i', 0, 0xac, 0x20) // payload
 	if got := decodeID3Text(body, "USLT"); got != "Hi€" {
 		t.Errorf("decodeID3Text(USLT) = %q, want \"Hi€\"", got)
 	}

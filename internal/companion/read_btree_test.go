@@ -210,7 +210,10 @@ func TestVerifyFingerprintDetectsTamperedLeaf(t *testing.T) {
 func TestRoundTripRecordContents(t *testing.T) {
 	r, recs, _, _ := buildTestTree(t, 40, []string{"zeta", "alpha"}, MinPieceSize)
 
-	type pair struct{ kw string; ih [20]byte }
+	type pair struct {
+		kw string
+		ih [20]byte
+	}
 	byKw := make(map[string][][20]byte)
 	for _, rec := range recs {
 		byKw[rec.Kw] = append(byKw[rec.Kw], rec.Ih)

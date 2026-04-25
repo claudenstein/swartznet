@@ -28,15 +28,15 @@ func TestAggregateCardPresentInBundle(t *testing.T) {
 	js := readEmbedded(t, "static/app.js")
 
 	wants := []string{
-		"/aggregate",            // fetch path
-		"Aggregate (v0.5)",      // card title
-		"PPMI enabled",          // row label
-		"record source",         // row label
-		"cache size",            // row label
-		"agg.ppmi_enabled",      // field read
-		"agg.known_indexers",    // field read
-		"agg.record_source_kind",// field read
-		"agg.record_cache_size", // field read
+		"/aggregate",             // fetch path
+		"Aggregate (v0.5)",       // card title
+		"PPMI enabled",           // row label
+		"record source",          // row label
+		"cache size",             // row label
+		"agg.ppmi_enabled",       // field read
+		"agg.known_indexers",     // field read
+		"agg.record_source_kind", // field read
+		"agg.record_cache_size",  // field read
 	}
 	for _, w := range wants {
 		if !strings.Contains(js, w) {

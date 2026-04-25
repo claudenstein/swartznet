@@ -30,10 +30,10 @@ func TestStatusTextOmitsAggregateWhenNil(t *testing.T) {
 
 func TestStatusTextRendersAggregateBlock(t *testing.T) {
 	agg := &httpapi.AggregateStatusResponse{
-		PPMIEnabled:      true,
-		KnownIndexers:    3,
-		RecordSourceKind: "cache",
-		RecordCacheSize:  42,
+		PPMIEnabled:        true,
+		KnownIndexers:      3,
+		RecordSourceKind:   "cache",
+		RecordCacheSize:    42,
 		ServicesAdvertised: "00000000000002ef",
 	}
 	var buf bytes.Buffer

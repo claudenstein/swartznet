@@ -27,7 +27,7 @@ func TestNewWithOptionsDefaults(t *testing.T) {
 	}
 }
 
-// TestAddrEmptyBeforeStart pins the documented "Addr returns ''
+// TestAddrEmptyBeforeStart pins the documented "Addr returns ”
 // until Start has been called" behaviour. The other Addr tests
 // implicitly only exercise the post-Start path.
 func TestAddrEmptyBeforeStart(t *testing.T) {

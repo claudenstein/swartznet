@@ -28,7 +28,7 @@ func TestSearchCapsLimitAtMax(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := idx.Search(indexer.SearchRequest{Query:"ubuntu", Limit: 999_999})
+	resp, err := idx.Search(indexer.SearchRequest{Query: "ubuntu", Limit: 999_999})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestSearchSignedByFiltersByPublisher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := idx.Search(indexer.SearchRequest{Query:"ubuntu", SignedBy: pubA})
+	resp, err := idx.Search(indexer.SearchRequest{Query: "ubuntu", SignedBy: pubA})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestSearchEmptyQueryRejected(t *testing.T) {
 	}
 	defer idx.Close()
 
-	if _, err := idx.Search(indexer.SearchRequest{Query:""}); err == nil {
+	if _, err := idx.Search(indexer.SearchRequest{Query: ""}); err == nil {
 		t.Error("Search with empty query should error")
 	}
 }

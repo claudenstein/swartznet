@@ -242,7 +242,7 @@ func decodeHeader(page []byte) (PageHeader, error) {
 
 // InteriorChild is one entry in an interior or root page.
 type InteriorChild struct {
-	Separator []byte // smallest key in the subtree rooted at ChildIndex
+	Separator  []byte // smallest key in the subtree rooted at ChildIndex
 	ChildIndex uint32 // piece index within the torrent
 }
 

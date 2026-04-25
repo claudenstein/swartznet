@@ -63,7 +63,7 @@ func TestVerifyBytesBadPubKeyLength(t *testing.T) {
 		"info": map[string]interface{}{
 			"name": "x", "piece length": 16384, "pieces": string(make([]byte, 20)), "length": 4,
 		},
-		"snet.pubkey": "short",                   // not 32 bytes
+		"snet.pubkey": "short",                  // not 32 bytes
 		"snet.sig":    string(make([]byte, 64)), // 64 byte placeholder
 	}
 	raw, _ := bencode.Marshal(mi)

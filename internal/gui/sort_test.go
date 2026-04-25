@@ -53,13 +53,13 @@ func TestSnapLessByColumn(t *testing.T) {
 	// directions. Names are chosen so there's a clean ordering
 	// in every column.
 	cases := map[int]wantOrder{
-		0: {asc: []string{"apple", "banana", "cherry"}, desc: []string{"cherry", "banana", "apple"}},                // Name
-		1: {asc: []string{"apple", "cherry", "banana"}, desc: []string{"banana", "cherry", "apple"}},                // Status: metadata, paused, seeding
-		2: {asc: []string{"apple", "cherry", "banana"}, desc: []string{"banana", "cherry", "apple"}},                // Progress 0.25 < 0.5 < 1.0
-		3: {asc: []string{"apple", "banana", "cherry"}, desc: []string{"cherry", "banana", "apple"}},                // Size 500 < 1000 < 2000
-		4: {asc: []string{"apple", "banana", "cherry"}, desc: []string{"cherry", "banana", "apple"}},                // Peers 2 < 5 < 10
-		5: {asc: []string{"banana", "cherry", "apple"}, desc: []string{"apple", "cherry", "banana"}},                // Download 0 < 50 < 100
-		6: {asc: []string{"apple", "cherry", "banana"}, desc: []string{"banana", "cherry", "apple"}},                // Upload 0 < 50 < 200
+		0: {asc: []string{"apple", "banana", "cherry"}, desc: []string{"cherry", "banana", "apple"}}, // Name
+		1: {asc: []string{"apple", "cherry", "banana"}, desc: []string{"banana", "cherry", "apple"}}, // Status: metadata, paused, seeding
+		2: {asc: []string{"apple", "cherry", "banana"}, desc: []string{"banana", "cherry", "apple"}}, // Progress 0.25 < 0.5 < 1.0
+		3: {asc: []string{"apple", "banana", "cherry"}, desc: []string{"cherry", "banana", "apple"}}, // Size 500 < 1000 < 2000
+		4: {asc: []string{"apple", "banana", "cherry"}, desc: []string{"cherry", "banana", "apple"}}, // Peers 2 < 5 < 10
+		5: {asc: []string{"banana", "cherry", "apple"}, desc: []string{"apple", "cherry", "banana"}}, // Download 0 < 50 < 100
+		6: {asc: []string{"apple", "cherry", "banana"}, desc: []string{"banana", "cherry", "apple"}}, // Upload 0 < 50 < 200
 	}
 
 	for col, want := range cases {

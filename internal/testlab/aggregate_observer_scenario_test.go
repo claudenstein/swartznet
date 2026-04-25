@@ -24,19 +24,19 @@ func (a publisherObserverAdapter) NotePublisherSeen(pubkey [32]byte) {
 // TestScenarioPublisherObservedViaSync validates the full
 // sync → observer → Bootstrap-admission pipeline end to end:
 //
-//   1. Node A mints Aggregate records under its identity.
-//   2. Node B has a manually-wired Bootstrap with no anchors,
-//      no bloom, no tracker — a cold subscriber.
-//   3. B syncs from A; A's records land in B's cache.
-//   4. On every ingested record, the attached
-//      PublisherObserver forwards A's pubkey to B's
-//      Bootstrap via CandidateFromCrawl.
-//   5. Without a bloom/tracker signal the pubkey stays
-//      pending (not auto-admitted) — Bootstrap's admission
-//      policy correctly gates on stronger signals.
-//   6. The scenario asserts A's pubkey is IsPending on B —
-//      the admission-path plumbing is alive, the policy just
-//      hasn't cleared the gate yet.
+//  1. Node A mints Aggregate records under its identity.
+//  2. Node B has a manually-wired Bootstrap with no anchors,
+//     no bloom, no tracker — a cold subscriber.
+//  3. B syncs from A; A's records land in B's cache.
+//  4. On every ingested record, the attached
+//     PublisherObserver forwards A's pubkey to B's
+//     Bootstrap via CandidateFromCrawl.
+//  5. Without a bloom/tracker signal the pubkey stays
+//     pending (not auto-admitted) — Bootstrap's admission
+//     policy correctly gates on stronger signals.
+//  6. The scenario asserts A's pubkey is IsPending on B —
+//     the admission-path plumbing is alive, the policy just
+//     hasn't cleared the gate yet.
 //
 // Why Bootstrap is constructed here rather than relied on via
 // daemon.New: testlab runs with DisableDHT=true so

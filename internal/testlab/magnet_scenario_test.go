@@ -22,15 +22,15 @@ import (
 // loopback, which keeps the test hermetic and fast.
 //
 // Why this is load-bearing:
-//  - It is the only test in the project that drives the full
-//    metainfo-from-magnet fetch path end-to-end. Existing multi-
-//    node tests (companion_scenario_test.go) pre-share the infohash
-//    and let the subscriber call AddInfoHash directly, so they
-//    never exercise magnet parsing + DHT-free metainfo exchange.
-//  - It guards the CLI's real user flow: `swartznet add <magnet>`.
-//    Without this test, a regression in client.AddMagnet or the
-//    LTEP metadata-fetch extension would only surface when a human
-//    ran the binary.
+//   - It is the only test in the project that drives the full
+//     metainfo-from-magnet fetch path end-to-end. Existing multi-
+//     node tests (companion_scenario_test.go) pre-share the infohash
+//     and let the subscriber call AddInfoHash directly, so they
+//     never exercise magnet parsing + DHT-free metainfo exchange.
+//   - It guards the CLI's real user flow: `swartznet add <magnet>`.
+//     Without this test, a regression in client.AddMagnet or the
+//     LTEP metadata-fetch extension would only surface when a human
+//     ran the binary.
 //
 // Runtime budget: < 5s on a modern laptop. The payload is ~96 KiB
 // across 4 pieces so both hashing and transfer are near-instant.

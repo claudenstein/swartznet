@@ -89,6 +89,7 @@ func TestSetFilePriorityPreMetadataErrors(t *testing.T) {
 // TestSetFilePriorityOutOfRangeAndUnknownValue exercises:
 //   - the file-index range check
 //   - the toAnacrolix unknown-priority branch
+//
 // We use a real single-file torrent so the metadata gate passes.
 func TestSetFilePriorityOutOfRangeAndUnknownValue(t *testing.T) {
 	t.Parallel()

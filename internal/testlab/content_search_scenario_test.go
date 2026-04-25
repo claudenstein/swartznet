@@ -20,16 +20,16 @@ import (
 // end-to-end on a single test run.
 //
 // What the scenario walks through:
-//   1. Seeder writes a .txt payload containing a unique keyword
-//      that no other test ever uses.
-//   2. Seeder builds + adds a real .torrent, verifies pieces.
-//   3. Leecher fetches by magnet URI, completes download.
-//   4. Leecher's ingest goroutine (engine.ingestFileEvents)
-//      forwards the on-disk file to the plaintext extractor via
-//      the indexer.Pipeline.
-//   5. Extractor emits a ContentDoc into the leecher's Bleve
-//      index.
-//   6. A local search for the unique keyword returns a hit.
+//  1. Seeder writes a .txt payload containing a unique keyword
+//     that no other test ever uses.
+//  2. Seeder builds + adds a real .torrent, verifies pieces.
+//  3. Leecher fetches by magnet URI, completes download.
+//  4. Leecher's ingest goroutine (engine.ingestFileEvents)
+//     forwards the on-disk file to the plaintext extractor via
+//     the indexer.Pipeline.
+//  5. Extractor emits a ContentDoc into the leecher's Bleve
+//     index.
+//  6. A local search for the unique keyword returns a hit.
 //
 // This is the first test in the project that asserts the
 // extract-and-index path runs automatically after a real swarm

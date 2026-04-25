@@ -31,17 +31,17 @@ var ErrSyncPeerUnknown = errors.New("swarmsearch: peer not known to swarm")
 // RemovedIDs / Converged as the exchange progresses.
 //
 // Flow:
-//   1. Verify the peer advertised BitSetReconciliation — refusing
-//      early is cheaper than shipping a sync_begin that gets
-//      rejected with code 2.
-//   2. Pick a fresh txid, construct an initiator session over
-//      localRecords, call Begin(filter) to produce the sync_begin
-//      frame.
-//   3. Register the session with the Protocol so inbound
-//      sync_symbols / sync_records / sync_end route back to it
-//      via handleSyncFrame's lookup.
-//   4. Encode + send the sync_begin through the attached Sender.
-//   5. Return the session handle to the caller.
+//  1. Verify the peer advertised BitSetReconciliation — refusing
+//     early is cheaper than shipping a sync_begin that gets
+//     rejected with code 2.
+//  2. Pick a fresh txid, construct an initiator session over
+//     localRecords, call Begin(filter) to produce the sync_begin
+//     frame.
+//  3. Register the session with the Protocol so inbound
+//     sync_symbols / sync_records / sync_end route back to it
+//     via handleSyncFrame's lookup.
+//  4. Encode + send the sync_begin through the attached Sender.
+//  5. Return the session handle to the caller.
 //
 // The caller is responsible for eventually calling Finish() on
 // the session and for sending a sync_end frame. A helper method

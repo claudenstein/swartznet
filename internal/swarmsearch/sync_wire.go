@@ -26,9 +26,9 @@ const (
 
 // SyncEnd.Status values.
 const (
-	SyncStatusConverged      = "converged"
-	SyncStatusLimitExceeded  = "limit_exceeded"
-	SyncStatusAborted        = "aborted"
+	SyncStatusConverged     = "converged"
+	SyncStatusLimitExceeded = "limit_exceeded"
+	SyncStatusAborted       = "aborted"
 )
 
 // Defaults tuned for the SPEC §2.9 rate-limit policy.
@@ -67,7 +67,7 @@ type SyncFilter struct {
 type SyncBegin struct {
 	MsgType     int        `bencode:"msg_type"`
 	TxID        uint32     `bencode:"txid"`
-	Algo        string     `bencode:"algo"`   // "riblt-v1" today
+	Algo        string     `bencode:"algo"` // "riblt-v1" today
 	Filter      SyncFilter `bencode:"filter"`
 	ElementSize int        `bencode:"element_size"` // 32
 	LocalCount  int        `bencode:"local_count"`  // sender's set size hint

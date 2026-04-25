@@ -38,12 +38,12 @@ func cmdAggregateBuild(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("aggregate build", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		inPath     string
-		outPath    string
-		keyPath    string
-		seq        uint64
-		pieceSize  int
-		powBits    uint
+		inPath    string
+		outPath   string
+		keyPath   string
+		seq       uint64
+		pieceSize int
+		powBits   uint
 	)
 	fs.StringVar(&inPath, "in", "-",
 		"JSONL input file; '-' reads from stdin")

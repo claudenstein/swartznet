@@ -12,15 +12,15 @@ import (
 // TestScenarioAggregateSyncRoundTrip exercises the full Aggregate
 // sync flow between two real engines:
 //
-//   1. Node A mints 20 Aggregate records (one per keyword-token)
-//      into its RecordCache.
-//   2. Both nodes LTEP-handshake via the cluster's WireMesh.
-//   3. Node B calls Protocol.StartSync against node A's address.
-//   4. Node A's handler responds with sync_symbols carrying
-//      RIBLT symbols encoded over A's record-ID set.
-//   5. Node B's decoder converges and NeedIDs returns the IDs A
-//      has that B lacks.
-//   6. Assert the decoded need-set matches the records A minted.
+//  1. Node A mints 20 Aggregate records (one per keyword-token)
+//     into its RecordCache.
+//  2. Both nodes LTEP-handshake via the cluster's WireMesh.
+//  3. Node B calls Protocol.StartSync against node A's address.
+//  4. Node A's handler responds with sync_symbols carrying
+//     RIBLT symbols encoded over A's record-ID set.
+//  5. Node B's decoder converges and NeedIDs returns the IDs A
+//     has that B lacks.
+//  6. Assert the decoded need-set matches the records A minted.
 //
 // This is the first integration test where sync frames actually
 // traverse the LTEP transport — every earlier sync test ran

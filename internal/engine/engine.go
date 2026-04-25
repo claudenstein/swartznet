@@ -21,13 +21,13 @@ import (
 	pp "github.com/anacrolix/torrent/peer_protocol"
 	"golang.org/x/time/rate"
 
+	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/identity"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/signing"
-	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 	"github.com/swartznet/swartznet/internal/trust"
 )
@@ -71,11 +71,11 @@ type Engine struct {
 	cfg      config.Config
 	client   *torrent.Client
 	log      *slog.Logger
-	idx      *indexer.Index        // nil-safe; may be unset for headless tests
-	pipeline *indexer.Pipeline     // nil iff idx == nil
-	swarm    *swarmsearch.Protocol   // always non-nil after New
+	idx      *indexer.Index           // nil-safe; may be unset for headless tests
+	pipeline *indexer.Pipeline        // nil iff idx == nil
+	swarm    *swarmsearch.Protocol    // always non-nil after New
 	recCache *swarmsearch.RecordCache // Aggregate (v0.5) record source; always non-nil after New
-	peers    *peerTracker            // addr → *torrent.PeerConn, for swarmSender
+	peers    *peerTracker             // addr → *torrent.PeerConn, for swarmSender
 
 	identity      *identity.Identity        // ed25519 publisher keypair, nil for tests
 	publisher     *dhtindex.Publisher       // nil if no DHT or no identity

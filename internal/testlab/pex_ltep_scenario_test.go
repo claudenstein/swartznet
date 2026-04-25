@@ -150,19 +150,19 @@ func testPEXPassthrough(t *testing.T) {
 //
 // Three assertions:
 //
-//  A. The engine DOES advertise sn_search in its own LTEP handshake
-//     m-dict (positive check: the engine broadcasts its capabilities
-//     to ALL peers, including vanilla ones).
+//	A. The engine DOES advertise sn_search in its own LTEP handshake
+//	   m-dict (positive check: the engine broadcasts its capabilities
+//	   to ALL peers, including vanilla ones).
 //
-//  B. The RemoteExtIDs map (what the ENGINE sent to the MiniPeer)
-//     contains exactly sn_search — confirming the engine includes
-//     it in its outgoing handshake and that the MiniPeer parser
-//     correctly captured it.
+//	B. The RemoteExtIDs map (what the ENGINE sent to the MiniPeer)
+//	   contains exactly sn_search — confirming the engine includes
+//	   it in its outgoing handshake and that the MiniPeer parser
+//	   correctly captured it.
 //
-//  C. The engine sends 0 sn_search extension frames to the vanilla
-//     peer in a 2-second observation window. Because the vanilla
-//     MiniPeer sent m:{} (no sn_search), the engine must not choose
-//     an sn_search ext_id to use when writing to this connection.
+//	C. The engine sends 0 sn_search extension frames to the vanilla
+//	   peer in a 2-second observation window. Because the vanilla
+//	   MiniPeer sent m:{} (no sn_search), the engine must not choose
+//	   an sn_search ext_id to use when writing to this connection.
 func testLTEPKeysIgnoredByVanilla(t *testing.T) {
 	t.Helper()
 
