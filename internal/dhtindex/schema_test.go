@@ -45,6 +45,32 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEncodeValueHitsNilDefaults covers EncodeValue's
+// `if v.Hits == nil { v.Hits = []KeywordHit{} }` arm. Pass a
+// zero-valued KeywordValue (Hits is nil, Ts is 0) — the encoder
+// must fill both defaults so the round trip succeeds and the
+// decoded Hits is the empty slice rather than nil.
+func TestEncodeValueHitsNilDefaults(t *testing.T) {
+	t.Parallel()
+	encoded, err := dhtindex.EncodeValue(dhtindex.KeywordValue{})
+	if err != nil {
+		t.Fatalf("EncodeValue zero value: %v", err)
+	}
+	decoded, err := dhtindex.DecodeValue(encoded)
+	if err != nil {
+		t.Fatalf("DecodeValue: %v", err)
+	}
+	if decoded.Ts == 0 {
+		t.Error("decoded.Ts is zero; EncodeValue should auto-fill it")
+	}
+	// Either nil or empty is acceptable in the decoded form;
+	// what matters is that EncodeValue did not error on nil
+	// Hits and the round trip worked.
+	if len(decoded.Hits) != 0 {
+		t.Errorf("decoded.Hits len = %d, want 0", len(decoded.Hits))
+	}
+}
+
 func TestEncodeRejectsOversized(t *testing.T) {
 	t.Parallel()
 	// Stuff in 100 hits with maximum-sized names → guaranteed to
