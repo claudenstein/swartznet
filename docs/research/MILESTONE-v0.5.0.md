@@ -270,11 +270,29 @@ and the three UI surfaces.
   `httpapi/`, `cmd/swartznet/`, `gui/`, `engine/`).
 - `go test -race ./... -count=1 -short` runs clean across all
   15 packages.
-- Two documented rough-edges caught in-development:
+- Four documented rough-edges caught in-development:
   1. P3.1 `contributes()` — initial constant-1/3 rate produced
      no pure symbols for d≥5; graduated-degree cycle fixed.
   2. P3.1 `Key()` — initial linear first-8-bytes-as-u64 made
      every symbol look "pure" in the decoder; FNV-1a fixed.
+  3. Engine `upgradeMagnetSession` race — was spawned for every
+     `registerLocked` caller including AddTorrentFile; under
+     parallel race testing the goroutine raced
+     `writeTorrentCopy` for the same .torrent target and
+     occasionally won, persisting a re-marshalled metainfo
+     that broke `RestoreSession` with "expected EOF". Fix
+     moves the goroutine spawn into `AddMagnet` /
+     `AddInfoHash` only (the two paths that need the
+     metadata-arrival upgrade); regression-gated by
+     `TestAddTorrentFileDoesNotRemarshalCopy`.
+  4. Test XDG pollution — many tests built configs from
+     `cfg.Default()` without overriding the user-level XDG
+     paths (BloomPath, IdentityPath, etc.), so multiple
+     parallel tests would race each other on real
+     `~/.local/share/swartznet/*` files. Diagnosed via the
+     race-flake's WARN logs; fixed across 12 test files.
+     Side effect: engine package race-test time dropped
+     22s → ~3.5s.
 
 ## Commit history (chronological)
 
