@@ -41,6 +41,34 @@ func TestCreateTorrentFileRenameFailure(t *testing.T) {
 	}
 }
 
+// TestCreateTorrentWalkDirFails covers CreateTorrent's
+// `if err != nil { return nil, fmt.Errorf("stat tree: %w", err) }`
+// arm. Plant a 0o000 subdirectory under opts.Root so
+// filepath.WalkDir's pre-walk size pass receives a permission
+// error from the os.ReadDir call inside.
+//
+// Skipped when running as root (which can read any directory)
+// — the test only applies to non-privileged processes.
+func TestCreateTorrentWalkDirFails(t *testing.T) {
+	t.Parallel()
+	if os.Getuid() == 0 {
+		t.Skip("running as root, chmod 0 doesn't deny access")
+	}
+	eng := newTestEngine(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ok.bin"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(root, "denied")
+	if err := os.Mkdir(bad, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o755) })
+	if _, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: root}); err == nil {
+		t.Error("CreateTorrent should fail when WalkDir cannot read a subdirectory")
+	}
+}
+
 // TestCreateTorrentFileMissingRootPropagates covers the
 // `mi, err := e.CreateTorrent(opts); if err != nil` arm in
 // CreateTorrentFile. Pass an opts.Root that doesn't exist so
