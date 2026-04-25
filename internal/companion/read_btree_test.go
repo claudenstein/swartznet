@@ -205,6 +205,36 @@ func TestVerifyFingerprintDetectsTamperedLeaf(t *testing.T) {
 	}
 }
 
+// TestFindDropsRecordsBelowMinPoW covers Find's
+// `if err := VerifyRecordPoW(rec, ...); err != nil { continue }`
+// arm. Build a tree with no PoW (records minted with tiny
+// nonces 0..n that don't satisfy any meaningful threshold).
+// Then post-OpenBTree, set the in-memory trailer's MinPoWBits
+// to 20 so VerifyRecordPoW rejects every record. Find must
+// return an empty slice rather than the matching records.
+func TestFindDropsRecordsBelowMinPoW(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 10, []string{"ubuntu"}, MinPieceSize)
+	// Without modifying the tree, Find returns 10 records.
+	hits, err := r.Find("ubuntu")
+	if err != nil {
+		t.Fatalf("Find pristine: %v", err)
+	}
+	if len(hits) != 10 {
+		t.Fatalf("baseline len = %d, want 10", len(hits))
+	}
+	// Now flip the threshold: records minted with nonce=0..9 do
+	// not satisfy a 20-bit PoW (chance is 2^-20). Find must
+	// silently skip every one and return zero hits.
+	r.trailer.MinPoWBits = 20
+	hits, err = r.Find("ubuntu")
+	if err != nil {
+		t.Fatalf("Find with PoW=20: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("expected 0 hits with MinPoWBits=20, got %d", len(hits))
+	}
+}
+
 // TestVerifyFingerprintCountMismatch covers the
 // `if uint64(count) != r.trailer.NumRecords` arm of
 // VerifyFingerprint. Build a real tree, then artificially
