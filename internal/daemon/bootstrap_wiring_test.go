@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 
 	"github.com/swartznet/swartznet/internal/config"
@@ -20,6 +21,11 @@ func TestDaemonBootstrapNilWithoutDHT(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	d, err := daemon.New(context.Background(), daemon.Options{
@@ -40,12 +46,21 @@ func TestDaemonBootstrapNilWithoutDHT(t *testing.T) {
 // attaches. Run without hardcoded anchors so RunAnchors does
 // nothing — the test only asserts the attachment, not the fetch.
 func TestDaemonBootstrapAttachesWithDHT(t *testing.T) {
+	dir := t.TempDir()
 	cfg := config.Default()
-	cfg.DataDir = t.TempDir()
+	cfg.DataDir = dir
 	cfg.IndexDir = t.TempDir()
 	cfg.ListenPort = 0
 	cfg.DisableDHT = false
 	cfg.NoUpload = true
+	// Hermetic XDG paths — but keep an Identity so the engine
+	// constructs a Lookup (the publisher path requires an identity,
+	// and Bootstrap requires a Lookup to attach to).
+	cfg.IdentityPath = filepath.Join(dir, "identity.key")
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 	cfg.Regtest = true // use in-process DHT, don't hit mainline
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))

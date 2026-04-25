@@ -26,6 +26,11 @@ func TestHTTPAPIStaysReachable(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
