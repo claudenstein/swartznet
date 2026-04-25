@@ -122,7 +122,8 @@ Bit assignments (from `internal/swarmsearch/services.go`):
 | 6 | `BitCompanionSubscriber` | Subscribes to one or more companion publishers and ingests their content index. |
 | 7 | `BitSnippetHighlight` | Returns Bleve highlight fragments wrapped in `<mark>...</mark>` on content hits. |
 | 8 | `BitRegtest` | The peer is running in deterministic regtest mode. Loud bit so accidental cross-connections from a regtest harness to mainnet are obvious. |
-| 9–63 | reserved | Future features. Always allocate the next available bit. |
+| 9 | `BitSetReconciliation` | Peer speaks the Aggregate sync protocol (msg_types 4-8). Peers without this bit set MUST NOT receive sync frames; the handler rejects inbound sync messages with code 2 (`unsupported_scope`). Added v0.5.0. |
+| 10–63 | reserved | Future features. Always allocate the next available bit. |
 
 A peer that does not send a `peer_announce` message before its
 first query is treated as "services unknown" (zero mask) by
@@ -160,6 +161,15 @@ bytes  payload       (bencoded dictionary; details below)
 | 1 | result | responder → initiator |
 | 2 | reject | responder → initiator |
 | 3 | peer_announce | either |
+| 4 | sync_begin | initiator → responder (gated on `BitSetReconciliation`) |
+| 5 | sync_symbols | either (same gate) |
+| 6 | sync_need | either (same gate) |
+| 7 | sync_records | either (same gate) |
+| 8 | sync_end | either (same gate) |
+
+Messages 4–8 form the Aggregate set-reconciliation session
+protocol added in v0.5.0. Full byte-level schema and state
+machine in [`docs/research/SPEC.md`](research/SPEC.md) §2.
 
 #### Query (msg_type 0)
 

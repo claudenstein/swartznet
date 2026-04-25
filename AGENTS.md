@@ -65,12 +65,24 @@ CI quirks (`.github/workflows/test.yml`) that are easy to miss:
   `*_branches_test.go`. When fixing a bug or adding a branch, add a
   matching test — the iterate loop treats coverage growth as the default
   improvement signal.
+- **Hermetic test configs.** Tests that build a `config.Default()`
+  for `engine.New` / `daemon.New` MUST clear the user-level XDG paths
+  (`IdentityPath`, `ReputationPath`, `SeedListPath`, `BloomPath`,
+  `TrustPath`) — leaving them at the defaults points the test at
+  `~/.local/share/swartznet/*` and parallel tests then race on
+  shared on-disk state. The pattern is to set each to `""` (the
+  engine treats empty paths as "skip this subsystem"). Look at
+  `internal/engine/create_test.go`'s `newTestEngine` for the
+  canonical setup. The `TrustPath` / `BloomPath` are sometimes set
+  to a path inside `t.TempDir()` instead of `""` when the test
+  needs that subsystem live.
 
 ## Repository layout
 
 - `cmd/swartznet` — CLI. `main.go` dispatches to `cmd_*.go` per
   subcommand (`add`, `search`, `create`, `index`, `files`, `flag`,
-  `status`, `trust`, `confirm`).
+  `status`, `trust`, `confirm`, `aggregate {inspect,find,build}`,
+  `crawl-probe`).
 - `cmd/swartznet-gui` — Fyne-based GUI; thin shim over `internal/gui`.
 - `cmd/dht-smoke` — standalone DHT probe for ops.
 - `internal/daemon` — **the wiring point.** `daemon.New(ctx, Options)`

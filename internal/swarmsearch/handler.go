@@ -156,11 +156,32 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 			}
 		}
 		sink = p.indexerSink
+		endoSink := p.endorsementSink
 		p.mu.Unlock()
 		if havePk && sink != nil {
 			// Label the indexer with the peer's address so ops
 			// logs can tell where the pubkey came from.
 			sink.NoteGossipIndexer(gotPubkey, "gossip:"+peerAddr)
+		}
+		// Channel C: route endorsements to the daemon's Bootstrap.
+		// A peer that endorses others without first announcing its
+		// own publisher pubkey still counts — the endorser
+		// identity used for the admission threshold is the
+		// publisher pubkey the peer advertised (havePk == true);
+		// otherwise the endorsements are dropped so a pubkey-less
+		// peer can't influence admission by itself.
+		if havePk && endoSink != nil {
+			for _, raw := range pa.Endorsed {
+				if len(raw) != 32 {
+					continue
+				}
+				var cand [32]byte
+				copy(cand[:], raw)
+				if cand == gotPubkey || cand == ([32]byte{}) {
+					continue // don't endorse yourself; skip all-zero
+				}
+				endoSink.NoteEndorsement(gotPubkey, cand)
+			}
 		}
 		p.log.Info("swarmsearch.rx_peer_announce",
 			"peer", peerAddr,
@@ -168,10 +189,327 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 			"services", pa.Services,
 			"pk_gossiped", havePk,
 		)
+	case MsgTypeSyncBegin, MsgTypeSyncSymbols, MsgTypeSyncNeed,
+		MsgTypeSyncRecords, MsgTypeSyncEnd:
+		p.handleSyncFrame(peerAddr, hdr, payload, reply)
 	default:
 		p.log.Debug("swarmsearch.unknown_msg_type",
 			"peer", peerAddr, "msg_type", hdr.MsgType)
 		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "unknown_msg_type")
+	}
+}
+
+// handleSyncFrame is the dispatch hub for Aggregate sync-session
+// messages (msg_types 4..8 per SPEC §2). Every frame first clears
+// the capability gate — a peer that hasn't advertised
+// BitSetReconciliation in its peer_announce gets reject code 2
+// and no state changes. Per-peer session state is keyed by
+// (peerAddr, txid) so one peer can run multiple sessions
+// sequentially; concurrent sessions on the same peer are not yet
+// supported (SPEC §2.9).
+func (p *Protocol) handleSyncFrame(peerAddr string, hdr messageHeader, payload []byte, reply ReplyFunc) {
+	// Capability gate.
+	p.mu.RLock()
+	ps, known := p.peers[peerAddr]
+	p.mu.RUnlock()
+	hasCap := known && ps.Services.Has(BitSetReconciliation)
+	if !hasCap {
+		p.sendReject(reply, peerAddr, hdr.TxID, RejectUnsupportedScope,
+			"sync_not_supported")
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "sync_without_cap")
+		return
+	}
+
+	switch hdr.MsgType {
+	case MsgTypeSyncBegin:
+		m, err := DecodeSyncBegin(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_begin")
+			return
+		}
+		p.onSyncBegin(peerAddr, m, reply)
+	case MsgTypeSyncSymbols:
+		m, err := DecodeSyncSymbols(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_symbols")
+			return
+		}
+		p.onSyncSymbols(peerAddr, m)
+	case MsgTypeSyncNeed:
+		m, err := DecodeSyncNeed(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_need")
+			return
+		}
+		p.onSyncNeed(peerAddr, m, reply)
+	case MsgTypeSyncRecords:
+		m, err := DecodeSyncRecords(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_records")
+			return
+		}
+		p.onSyncRecords(peerAddr, m)
+	case MsgTypeSyncEnd:
+		m, err := DecodeSyncEnd(payload)
+		if err != nil {
+			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_end")
+			return
+		}
+		p.onSyncEnd(peerAddr, m)
+	}
+}
+
+// onSyncBegin creates a responder session and either streams an
+// initial batch of RIBLT symbols (when a RecordSource is attached
+// and has matching records) or immediately emits sync_end
+// converged (zero-record session — still correct wire behavior per
+// SPEC §2).
+func (p *Protocol) onSyncBegin(peerAddr string, m SyncBegin, reply ReplyFunc) {
+	// Query the record source for records matching the peer's
+	// filter. A nil source or a nil-returning LocalRecords call
+	// is treated as "no records to share" — not an error.
+	p.mu.RLock()
+	src := p.recordSource
+	p.mu.RUnlock()
+
+	var localRecords []LocalRecord
+	if src != nil {
+		recs, err := src.LocalRecords(m.Filter)
+		if err != nil {
+			p.log.Debug("swarmsearch.sync_begin.record_source_err",
+				"peer", peerAddr, "err", err)
+		} else {
+			localRecords = recs
+		}
+	}
+
+	sess := NewSyncSession(m.TxID, RoleResponder, localRecords)
+	if err := sess.ApplyBegin(m); err != nil {
+		p.log.Debug("swarmsearch.sync_begin.apply_err", "peer", peerAddr, "err", err)
+		return
+	}
+	p.registerSyncSession(peerAddr, sess)
+
+	if len(localRecords) == 0 {
+		// Zero-record session: emit sync_end converged immediately.
+		end := sess.Finish(SyncStatusConverged)
+		p.sendSyncEnd(reply, end)
+		p.releaseSyncSession(peerAddr, m.TxID)
+		return
+	}
+
+	// Produce an initial batch of symbols and stream them.
+	// Subsequent batches fire when the initiator sends
+	// sync_need or a heartbeat sync_symbols. v0.5 ships a
+	// one-batch responder; richer streaming lands when the
+	// engine exposes a dedicated goroutine to drive it.
+	syms, baseIdx, err := sess.ProduceSymbols(MaxSymbolsPerMessage)
+	if err != nil {
+		p.log.Debug("swarmsearch.sync_begin.produce_err",
+			"peer", peerAddr, "err", err)
+		end := sess.Finish(SyncStatusAborted)
+		p.sendSyncEnd(reply, end)
+		p.releaseSyncSession(peerAddr, m.TxID)
+		return
+	}
+	p.sendSyncSymbols(reply, SyncSymbols{
+		TxID:    m.TxID,
+		Symbols: syms,
+		Index:   baseIdx,
+	})
+}
+
+func (p *Protocol) onSyncSymbols(peerAddr string, m SyncSymbols) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess == nil {
+		p.log.Debug("swarmsearch.sync_symbols.unknown_session",
+			"peer", peerAddr, "txid", m.TxID)
+		return
+	}
+	if err := sess.ApplySymbols(m); err != nil {
+		p.log.Debug("swarmsearch.sync_symbols.apply_err",
+			"peer", peerAddr, "err", err)
+	}
+}
+
+func (p *Protocol) onSyncNeed(peerAddr string, m SyncNeed, reply ReplyFunc) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess == nil {
+		p.log.Debug("swarmsearch.sync_need.unknown_session",
+			"peer", peerAddr, "txid", m.TxID)
+		return
+	}
+	// ApplyNeed looks up the requested IDs against the session's
+	// pre-indexed local records (populated at NewSyncSession time
+	// from the RecordSource). Unknown IDs land in `missing`;
+	// known ones come back as LocalRecords ready to ship.
+	records, missing, err := sess.ApplyNeed(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.sync_need.apply_err",
+			"peer", peerAddr, "err", err)
+		return
+	}
+	frame, err := sess.BuildRecordsFrame(records, missing)
+	if err != nil {
+		p.log.Debug("swarmsearch.sync_need.build_err",
+			"peer", peerAddr, "err", err)
+		return
+	}
+	p.sendSyncRecords(reply, frame)
+}
+
+func (p *Protocol) onSyncRecords(peerAddr string, m SyncRecords) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess == nil {
+		p.log.Debug("swarmsearch.sync_records.unknown_session",
+			"peer", peerAddr, "txid", m.TxID)
+		return
+	}
+	records, err := sess.ApplyRecords(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.sync_records.apply_err",
+			"peer", peerAddr, "err", err)
+		return
+	}
+	// Feed verified records into the sink. Per-record sig and
+	// PoW verification is the sink's responsibility — see
+	// ingestSyncRecord for the defence-in-depth drops. Sink nil
+	// means "drop silently", matching the legacy behavior for
+	// nodes that haven't opted into Aggregate ingestion.
+	p.mu.RLock()
+	sink := p.recordSink
+	p.mu.RUnlock()
+	if sink != nil {
+		p.ingestSyncRecords(peerAddr, sink, records)
+	}
+}
+
+// ingestSyncRecords verifies each SyncRecord's ed25519 signature
+// and hashcash PoW (when configured) before admitting it to the
+// sink. A bad signature bumps the peer's misbehavior score and
+// drops the record — signed-but-wrong-source is a strong
+// indicator the peer is spoofing. Other records from the same
+// frame still proceed; per-record failures don't poison the
+// whole frame.
+//
+// After ingestion, the publisher pubkey of each verified record
+// is forwarded (once per distinct pubkey) to the attached
+// PublisherObserver. The observer's Bootstrap can then feed the
+// pubkey to its admission policy — records accepted via sync are
+// a weak but genuine channel-B signal.
+func (p *Protocol) ingestSyncRecords(peerAddr string, sink RecordSink, records []SyncRecord) {
+	p.mu.RLock()
+	obs := p.publisherObserver
+	p.mu.RUnlock()
+
+	seenPubs := make(map[[32]byte]struct{}, len(records))
+	for _, wr := range records {
+		if len(wr.Pk) != 32 || len(wr.Ih) != 20 || len(wr.Sig) != 64 {
+			// Wire-level already filtered these, but defence in
+			// depth: drop silently.
+			continue
+		}
+		var local LocalRecord
+		copy(local.Pk[:], wr.Pk)
+		local.Kw = wr.Kw
+		copy(local.Ih[:], wr.Ih)
+		local.T = wr.T
+		local.Pow = wr.Pow
+		copy(local.Sig[:], wr.Sig)
+
+		if !verifyLocalRecordSig(local) {
+			p.chargeMisbehavior(peerAddr, ScoreBadRecordSig, "bad_record_sig")
+			continue
+		}
+		sink.Add(local)
+
+		if obs != nil {
+			if _, already := seenPubs[local.Pk]; !already {
+				seenPubs[local.Pk] = struct{}{}
+				obs.NotePublisherSeen(local.Pk)
+			}
+		}
+	}
+}
+
+func (p *Protocol) onSyncEnd(peerAddr string, m SyncEnd) {
+	sess := p.lookupSyncSession(peerAddr, m.TxID)
+	if sess != nil {
+		_ = sess.ApplyEnd(m)
+	}
+	p.releaseSyncSession(peerAddr, m.TxID)
+}
+
+// sendSyncEnd serialises and forwards a SyncEnd frame.
+func (p *Protocol) sendSyncEnd(reply ReplyFunc, m SyncEnd) {
+	raw, err := EncodeSyncEnd(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.send_sync_end.encode_err", "err", err)
+		return
+	}
+	if reply != nil {
+		_ = reply(raw)
+	}
+}
+
+// sendSyncRecords serialises and forwards a SyncRecords frame.
+func (p *Protocol) sendSyncRecords(reply ReplyFunc, m SyncRecords) {
+	raw, err := EncodeSyncRecords(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.send_sync_records.encode_err", "err", err)
+		return
+	}
+	if reply != nil {
+		_ = reply(raw)
+	}
+}
+
+// sendSyncSymbols serialises and forwards a SyncSymbols frame.
+func (p *Protocol) sendSyncSymbols(reply ReplyFunc, m SyncSymbols) {
+	raw, err := EncodeSyncSymbols(m)
+	if err != nil {
+		p.log.Debug("swarmsearch.send_sync_symbols.encode_err", "err", err)
+		return
+	}
+	if reply != nil {
+		_ = reply(raw)
+	}
+}
+
+// registerSyncSession stores a session indexed by (peer, txid).
+func (p *Protocol) registerSyncSession(peerAddr string, sess *SyncSession) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.syncSessions == nil {
+		p.syncSessions = make(map[string]map[uint32]*SyncSession)
+	}
+	m, ok := p.syncSessions[peerAddr]
+	if !ok {
+		m = make(map[uint32]*SyncSession)
+		p.syncSessions[peerAddr] = m
+	}
+	m[sess.TxID()] = sess
+}
+
+// lookupSyncSession returns the session for (peer, txid) or nil.
+func (p *Protocol) lookupSyncSession(peerAddr string, txid uint32) *SyncSession {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if m, ok := p.syncSessions[peerAddr]; ok {
+		return m[txid]
+	}
+	return nil
+}
+
+// releaseSyncSession drops the session entry. No-op if absent.
+func (p *Protocol) releaseSyncSession(peerAddr string, txid uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if m, ok := p.syncSessions[peerAddr]; ok {
+		delete(m, txid)
+		if len(m) == 0 {
+			delete(p.syncSessions, peerAddr)
+		}
 	}
 }
 

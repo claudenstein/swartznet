@@ -32,6 +32,14 @@ func TestSessionRoundTrip(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	// Hermetic: zero out the user-level XDG paths so parallel
+	// tests don't race on the real ~/.local/share/swartznet/
+	// bloom/identity/etc. files.
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -129,6 +137,12 @@ func TestSessionRemoveDeletesCopy(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	// Hermetic: zero out the user-level XDG paths.
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

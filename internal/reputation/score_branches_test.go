@@ -82,6 +82,17 @@ func TestScoreOfBranches(t *testing.T) {
 		t.Errorf("future-seed Score = %v, want full SeedBonus (age clamped to 0)", got)
 	}
 
+	// HitsConfirmed > 0 with HitsReturned = 0 → returned-clamp
+	// branch (`if returned < 1 { returned = 1 }`). Set HitsConfirmed
+	// without recording any HitsReturned so the outer all-zeros guard
+	// is bypassed and the inner ratio computation runs with a
+	// floating-point divisor of 1.
+	pkH := reputation.PubKeyHex(strings.Repeat("8", 64))
+	tr = makeTrackerWith(t, pkH, reputation.Counters{HitsConfirmed: 1})
+	if got := tr.Score(pkH); got <= 0.5 {
+		t.Errorf("confirmed-only Score = %v, want > 0.5 (clamped returned=1 → ratio>0.5)", got)
+	}
+
 	// Confirmed-dominant + seeded → organic > 1 path clamps to 1.
 	pkG := reputation.PubKeyHex("0000000000000000000000000000000000000000000000000000000000000007")
 	tr = makeTrackerWith(t, pkG, reputation.Counters{

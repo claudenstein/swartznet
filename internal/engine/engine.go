@@ -21,6 +21,7 @@ import (
 	pp "github.com/anacrolix/torrent/peer_protocol"
 	"golang.org/x/time/rate"
 
+	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/identity"
@@ -43,14 +44,38 @@ import (
 // sn_search BEP-10 extension to every peer we connect to and tracks which
 // remote peers speak it back. External packages reach the protocol via
 // Engine.SwarmSearch().
+
+// DefaultRecordCacheMax is the FIFO cap applied to the engine's
+// Aggregate RecordCache at engine.New time. 100 000 records at
+// ~170 bytes/record is ~17 MB steady-state memory — reasonable
+// for a desktop daemon that sits between a publisher role and
+// a subscriber role. Operators can override via
+// Engine.RecordCache().SetMaxRecords(n); 0 disables the cap.
+const DefaultRecordCacheMax = 100_000
+
+// DefaultRecordCacheMaxAge is how far back in time a record's T
+// field may be before the periodic prune goroutine drops it.
+// 30 days is long enough to absorb normal sync churn while
+// eventually reclaiming space from stale records whose
+// publishers went silent.
+const DefaultRecordCacheMaxAge = 30 * 24 * time.Hour
+
+// DefaultRecordCachePruneInterval is how often the engine's
+// background goroutine scans the cache for expired records.
+// Hourly keeps the total overhead tiny (one prune of ~100k
+// records costs ~7 ms per SPEC §7 bench) while keeping the
+// cache current enough.
+const DefaultRecordCachePruneInterval = 1 * time.Hour
+
 type Engine struct {
 	cfg      config.Config
 	client   *torrent.Client
 	log      *slog.Logger
-	idx      *indexer.Index        // nil-safe; may be unset for headless tests
-	pipeline *indexer.Pipeline     // nil iff idx == nil
-	swarm    *swarmsearch.Protocol // always non-nil after New
-	peers    *peerTracker          // addr → *torrent.PeerConn, for swarmSender
+	idx      *indexer.Index           // nil-safe; may be unset for headless tests
+	pipeline *indexer.Pipeline        // nil iff idx == nil
+	swarm    *swarmsearch.Protocol    // always non-nil after New
+	recCache *swarmsearch.RecordCache // Aggregate (v0.5) record source; always non-nil after New
+	peers    *peerTracker             // addr → *torrent.PeerConn, for swarmSender
 
 	identity      *identity.Identity        // ed25519 publisher keypair, nil for tests
 	publisher     *dhtindex.Publisher       // nil if no DHT or no identity
@@ -167,6 +192,58 @@ func (pt *peerTracker) get(addr string) (*torrent.PeerConn, bool) {
 	defer pt.mu.RUnlock()
 	pc, ok := pt.conns[addr]
 	return pc, ok
+}
+
+// RecordCache returns the engine's Aggregate record cache. Never
+// nil; callers (publisher hot-paths, CLI build subcommand, tests)
+// Add() signed records to make them visible to sync-session
+// responders. Attached as the swarm protocol's RecordSource at
+// engine construction so the /aggregate endpoint reports non-
+// zero cache_size once records land here.
+func (e *Engine) RecordCache() *swarmsearch.RecordCache { return e.recCache }
+
+// MintAggregateRecords signs one LocalRecord per tokenised keyword
+// of `name` and pushes each into the engine's RecordCache so the
+// sync responder can share them. Silent-skip when the engine has
+// no identity (headless tests) or no cache (shouldn't happen
+// after engine.New; defensive). PoW is currently 0 — the dual-
+// read migration window doesn't require miners yet; a future
+// schema bump will set MinPoWBitsDefault here.
+func (e *Engine) MintAggregateRecords(ih [20]byte, name string) {
+	if e.identity == nil || e.recCache == nil {
+		return
+	}
+	tokens := dhtindex.TokenizeAll(name)
+	now := time.Now().Unix()
+	for _, kw := range tokens {
+		rec, err := companion.SignAndMineRecord(
+			e.identity.PrivateKey,
+			e.identity.PublicKey,
+			kw,
+			ih,
+			now,
+			0,
+		)
+		if err != nil {
+			e.log.Debug("engine.agg_record.sign_failed",
+				"info_hash", metainfo.Hash(ih).HexString(),
+				"kw", kw, "err", err)
+			continue
+		}
+		var local swarmsearch.LocalRecord
+		copy(local.Pk[:], rec.Pk[:])
+		local.Kw = rec.Kw
+		copy(local.Ih[:], rec.Ih[:])
+		local.T = rec.T
+		local.Pow = rec.Pow
+		copy(local.Sig[:], rec.Sig[:])
+		e.recCache.Add(local)
+	}
+	e.log.Debug("engine.agg_records.minted",
+		"info_hash", metainfo.Hash(ih).HexString(),
+		"tokens", len(tokens),
+		"cache_size", e.recCache.Len(),
+	)
 }
 
 // SwarmSearch returns the engine's sn_search protocol handle. Callers
@@ -512,6 +589,24 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// owns the per-peer state the callbacks will populate.
 	swarm := swarmsearch.New(log)
 
+	// Attach an empty Aggregate RecordCache as the swarm's
+	// RecordSource. Publishers call RecordCache() to add freshly
+	// signed records; sync-session responders pull matching
+	// records on every sync_begin. Attached even in headless
+	// test setups because the cache is cheap (empty map) and
+	// keeping this wiring unconditional means the engine's
+	// observable state is consistent across all constructor paths.
+	// 100k records at ~170 bytes/record caps memory at ~17 MB,
+	// which is reasonable for a desktop daemon holding its own
+	// publications plus absorbed-from-sync records. Operators
+	// who want a different cap can call
+	// Engine.RecordCache().SetMaxRecords(n) at any time; 0
+	// disables.
+	recCache := swarmsearch.NewRecordCache()
+	recCache.SetMaxRecords(DefaultRecordCacheMax)
+	swarm.SetRecordSource(recCache)
+	swarm.SetRecordSink(recCache)
+
 	// Wire the extension-point callbacks. These are the exact hook points
 	// the integration design depends on.
 	tc.Callbacks.StatusUpdated = append(tc.Callbacks.StatusUpdated,
@@ -644,6 +739,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		client:    cl,
 		log:       log,
 		swarm:     swarm,
+		recCache:  recCache,
 		handles:   make(map[metainfo.Hash]*Handle),
 		peers:     peers,
 		ulLimiter: ulLimiter,
@@ -663,6 +759,35 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		feelerInterval = swarmsearch.FeelerIntervalRegtest
 	}
 	swarm.StartFeeler(ctx, feelerInterval)
+
+	// Start the Aggregate RecordCache prune goroutine. Runs
+	// until bgCtx is cancelled on Engine.Close. Regtest uses a
+	// much shorter interval so scenario tests can observe the
+	// prune cycle without waiting an hour.
+	pruneInterval := DefaultRecordCachePruneInterval
+	maxAge := DefaultRecordCacheMaxAge
+	if cfg.Regtest {
+		pruneInterval = 200 * time.Millisecond
+		maxAge = 500 * time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(pruneInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-eng.bgCtx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-maxAge).Unix()
+				if dropped := recCache.PruneOlderThan(cutoff); dropped > 0 {
+					log.Debug("engine.record_cache.prune",
+						"dropped", dropped,
+						"cache_size", recCache.Len(),
+					)
+				}
+			}
+		}
+	}()
 
 	// Load the M5 spam-resistance state (Bloom filter + reputation
 	// tracker) before the publisher / lookup so the lookup can be
@@ -957,6 +1082,7 @@ func (e *Engine) AddMagnet(uri string) (*Handle, error) {
 	h := e.registerLocked(t)
 	e.mu.Unlock()
 	e.persistAdd(h, "magnet", uri, "")
+	go e.upgradeMagnetSession(h)
 	return h, nil
 }
 
@@ -1037,6 +1163,7 @@ func (e *Engine) AddInfoHash(infoHash [20]byte) (*Handle, error) {
 	h := e.registerLocked(t)
 	e.mu.Unlock()
 	e.persistAdd(h, "infohash", "", "")
+	go e.upgradeMagnetSession(h)
 	return h, nil
 }
 
@@ -1183,7 +1310,11 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 	go e.autoIndex(h)
 	go e.ingestFileEvents(h)
 	go e.autoConfirmOnComplete(h)
-	go e.upgradeMagnetSession(h)
+	// upgradeMagnetSession is started by AddMagnet/AddInfoHash
+	// only — see those callers. AddTorrentFile and
+	// AddTorrentMetaInfo carry the metainfo bytes directly and
+	// run writeTorrentCopy from their own callsite, so a parallel
+	// upgrader on those paths would race for the same .tmp file.
 	return h
 }
 
@@ -1257,6 +1388,19 @@ func (e *Engine) persistState(h *Handle) {
 // On the next restart the engine can re-add by file directly,
 // skipping the ut_metadata fetch round trip.
 //
+// Only meaningful for adds that started with no metainfo on disk —
+// AddMagnet and AddInfoHash paths. AddTorrentFile and
+// AddTorrentMetaInfo write the .torrent themselves before
+// persistAdd, so a parallel upgradeMagnetSession goroutine for
+// those paths would race against the main writeTorrentCopy with
+// the same target file (and worse, write a *re-marshalled*
+// metainfo that may have a slightly different byte sequence —
+// metainfo.Load then rejects it with "expected EOF" on restore).
+// The check below skips entries that already carry a TorrentFile
+// AND entries whose AddedVia is "file" — defence-in-depth against
+// the persistAdd-ordering race documented in the test
+// TestSessionRoundTrip.
+//
 // No-op for already-file entries, sessionless engines, and
 // torrents whose metadata never arrives.
 func (e *Engine) upgradeMagnetSession(h *Handle) {
@@ -1271,7 +1415,13 @@ func (e *Engine) upgradeMagnetSession(h *Handle) {
 	ih := h.T.InfoHash().HexString()
 	e.sess.mu.Lock()
 	entry, ok := e.sess.entries[ih]
-	already := ok && entry.TorrentFile != ""
+	// Skip if the .torrent file is already on disk OR if the
+	// AddedVia indicates this entry was added with metainfo
+	// already (file/torrent-meta-info paths). Both branches
+	// indicate writeTorrentCopy already ran (or is about to) on
+	// the main path and we'd be racing with it for the same
+	// .torrent.tmp file.
+	already := ok && (entry.TorrentFile != "" || entry.AddedVia == "file" || entry.AddedVia == "metainfo")
 	e.sess.mu.Unlock()
 	if already {
 		return
@@ -1402,6 +1552,13 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 	h.queueMu.Lock()
 	h.queueOrder = entry.QueueOrder
 	h.queueMu.Unlock()
+	// Magnet/infohash entries can still benefit from the metainfo
+	// upgrade once metadata arrives — spawn the goroutine for
+	// those branches only. File entries already have their
+	// .torrent on disk so the goroutine would just race itself.
+	if entry.AddedVia != "file" && entry.AddedVia != "metainfo" {
+		go e.upgradeMagnetSession(h)
+	}
 	return nil
 }
 
@@ -1579,6 +1736,11 @@ func (e *Engine) autoIndex(h *Handle) {
 			SizeBytes: doc.SizeBytes,
 		})
 	}
+
+	// Aggregate (v0.5) record mint. Extracted into a method so
+	// tests can exercise it without the full torrent-add flow.
+	ihBytes := h.T.InfoHash()
+	e.MintAggregateRecords(ihBytes, doc.Name)
 
 	// Auto-confirm torrents signed by a trusted publisher. A
 	// trusted publisher's signature is the strongest "this
@@ -2039,21 +2201,6 @@ func (e *Engine) DHTRoutingTableSize() (good int, total int) {
 	s := srv.Stats()
 	return s.GoodNodes, s.Nodes
 }
-
-// DHTServerForTest returns the underlying anacrolix *dht.Server
-// that the Engine's DHT-facing subsystems (Publisher, Lookup,
-// PointerPutter/Getter) drive. Returns nil if DHT is disabled.
-//
-// As the name implies this is an escape hatch for diagnostic
-// tests that need to poke at internal DHT state (e.g. read the
-// BEP-44 store directly to confirm a put landed). It is NOT
-// intended for production use. Leaking this into the stable
-// API surface would couple SwartzNet's packaging to a specific
-// anacrolix release.
-func (e *Engine) DHTServerForTest() *dht.Server {
-	return e.dhtServer()
-}
-
 
 // HandleByInfoHash looks up a *Handle by 20-byte infohash.
 // Returns an error if the infohash is not currently registered

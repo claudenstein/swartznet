@@ -26,6 +26,11 @@ func TestDaemonNewBadAPIAddrIsNonFatal(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	var stderr bytes.Buffer
 	d, err := daemon.New(context.Background(), daemon.Options{
@@ -67,6 +72,11 @@ func TestDaemonNewIndexDirIsAFile(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	_, err := daemon.New(context.Background(), daemon.Options{
 		Cfg:     cfg,
@@ -90,6 +100,11 @@ func TestDaemonNewDataDirInvalid(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	_, err := daemon.New(context.Background(), daemon.Options{
 		Cfg:     cfg,

@@ -254,6 +254,22 @@ Lang detection via `github.com/pemistahl/lingua-go` so results can be language-f
 
 ### 4.3 Layer D — DHT keyword index
 
+> **v0.5.0 supersession notice.** The "Aggregate" redesign
+> ([`docs/research/PROPOSAL.md`](research/PROPOSAL.md),
+> [`docs/research/SPEC.md`](research/SPEC.md)) **inverts** the
+> layout documented below: a publisher now writes ONE BEP-44
+> item (a PPMI — Publisher Pointer Mutable Item) at the fixed
+> salt `SHA256("snet.index")`, pointing to a companion index
+> torrent that holds the real keyword records. Per-keyword
+> BEP-44 items still work (v0.5 dual-reads both formats for the
+> migration window) but new publishers MUST write PPMIs going
+> forward. The full new format lives in SPEC §1 (B-tree page
+> layout) and §3 (cold-subscriber bootstrap); the rationale for
+> the inversion in PROPOSAL §2.
+>
+> Keep the per-keyword description below for the dual-read
+> window; PROPOSAL §6 schedules retirement across v0.6/v0.7.
+
 **What it indexes:** keyword → list of infohashes, stored in mainline DHT as BEP-44 mutable items, exactly as `04-bep-extension-points.md` §3 describes.
 
 **Mechanism:** BEP-44 `get`/`put` via the existing anacrolix DHT library. No new DHT verbs. No new reserved bits. No new handshake.
@@ -305,6 +321,58 @@ We ship both. Start queries against the well-known seeds; union with results fro
 - **No "publishers I don't know" bucket.** In v1 we do not query pubkeys below a reputation threshold at all. Users can opt into "explore mode" later.
 
 **Privacy.** The keyword goes over the wire *hashed* (as part of the SHA1 target in BEP-44 `get`). DHT nodes contacting you see only the target hash. The actual plaintext keyword is only known to the querier and (by reverse lookup) to the publisher who originally minted that target. This is roughly the GNUnet property (`03-p2p-search-protocols.md` §2.6) but cheaper: we don't need GNUnet's RSA-key-per-query because we're not trying to prevent offline keyword-recovery attacks (someone with a dictionary can always try hashing common keywords to infer what you queried; we don't care).
+
+#### 4.3.1 Aggregate (v0.5.0) — per-publisher PPMI layout
+
+The v0.5.0 redesign collapses the per-keyword shard scheme above
+into a single per-publisher pointer:
+
+```
+pubkey = our ed25519 key
+salt   = SHA256("snet.index")   // fixed 32-byte constant
+target = SHA1(pubkey || salt)
+v      = {
+  "ih":      <20-byte infohash of our current companion torrent>,
+  "commit":  <32-byte SHA256 over canonical record stream>,
+  "topics":  <optional 32-byte cuckoo-filter digest of kw prefixes>,
+  "ts":      <unix timestamp>,
+  "next_pk": <reserved, 0 or 32 bytes>
+}
+```
+
+Properties:
+
+- **O(publishers) DHT items** instead of O(publishers × keywords).
+  For 10k publishers that's ~10k items totalling <2 MB — the DHT
+  barely notices.
+- **No 1000-byte cap** — the companion torrent at `v.ih` holds
+  the full keyword→records index as a signed B-tree (SPEC §1),
+  scaling to millions of records per publisher.
+- **Double-hashed salt** means DHT observers see only
+  `SHA1(pk || SHA256("snet.index"))` — a fixed mask across all
+  publishers. Keyword enumeration moves from "passive observation"
+  to "dictionary attack on the companion torrent contents" (i.e.,
+  requires downloading + indexing the torrent first).
+- **Commit-bound trailer** in the companion torrent re-derives
+  the canonical fingerprint from the leaf records; a mismatched
+  PPMI and tree combination are rejected at read time.
+
+**Migration.** v0.5 dual-writes both formats (PPMI + legacy
+per-keyword) and dual-reads via `Lookup.Query` (PROPOSAL §6 Phase
+1). v0.6 writes PPMI only; v0.7 drops the legacy read path.
+
+**Discovery.** Subscriber bootstrap now uses three independent
+channels (SPEC §3): hardcoded anchor pubkeys → PPMI fetch;
+BEP-51 `sample_infohashes` crawl → `snet.pubkey` metainfo
+inspection; `sn_search peer_announce.endorsed` gossip of
+publisher pubkeys. The "well-known seed pubkey" list shrinks to
+~5 reputation anchors rather than a hardcoded registry.
+
+**Peer-wire complement.** When two `sn_search` peers both
+advertise `BitSetReconciliation` (services bit 9), they can
+exchange Rateless IBLT symbols to reconcile their local record
+sets directly, without either one fetching the other's
+companion torrent in full. Wire format in SPEC §2.
 
 ---
 

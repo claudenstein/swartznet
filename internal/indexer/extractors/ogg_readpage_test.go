@@ -66,8 +66,8 @@ func TestReadOGGPageBodyEOF(t *testing.T) {
 	t.Parallel()
 	hdr := make([]byte, 27)
 	copy(hdr[:4], "OggS")
-	hdr[26] = 1            // segCount=1
-	body := []byte{0xFF}   // segTable byte → declares 255-byte segment
+	hdr[26] = 1          // segCount=1
+	body := []byte{0xFF} // segTable byte → declares 255-byte segment
 	full := append(hdr, body...)
 	br := bufio.NewReader(bytes.NewReader(full))
 	if _, err := readOGGPage(br); err == nil {
@@ -82,7 +82,7 @@ func TestReadOGGPageSuccessPath(t *testing.T) {
 	hdr := make([]byte, 27)
 	copy(hdr[:4], "OggS")
 	hdr[26] = 1
-	full := append(hdr, byte(4))      // segTable: one 4-byte segment
+	full := append(hdr, byte(4))           // segTable: one 4-byte segment
 	full = append(full, []byte("ABCD")...) // body
 	br := bufio.NewReader(bytes.NewReader(full))
 	page, err := readOGGPage(br)

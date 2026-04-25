@@ -217,17 +217,12 @@ func (mp *MiniPeer) btHandshake() error {
 	return nil
 }
 
-// ltepHandshake sends our LTEP extended handshake (ext ID 0)
-// advertising sn_search, then reads the remote's and extracts
-// their sn_search extension ID.
-func (mp *MiniPeer) ltepHandshake() error {
-	return mp.ltepHandshakeAdvertise(true)
-}
-
-// ltepHandshakeAdvertise is the internal form of ltepHandshake that
-// lets the caller decide whether to include sn_search in the `m`
-// dictionary. Used by DialVanillaMiniPeer to simulate a mainline
-// client that does not know about SwartzNet's extension.
+// ltepHandshakeAdvertise sends our LTEP extended handshake (ext
+// ID 0) and reads the remote's, extracting their sn_search
+// extension ID. The advertiseSNSearch flag toggles whether the
+// outbound `m` dict includes sn_search — DialVanillaMiniPeer
+// passes false to simulate a mainline client that does not know
+// about SwartzNet's extension.
 func (mp *MiniPeer) ltepHandshakeAdvertise(advertiseSNSearch bool) error {
 	// Build our handshake dict. If we're pretending to be a
 	// vanilla client we send an empty `m` dict — that's what any

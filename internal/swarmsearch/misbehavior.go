@@ -54,6 +54,21 @@ const (
 	// unknown MsgType. Suggests protocol confusion.
 	ScoreUnexpectedMessage = 10
 
+	// ScoreBadRecordSig is charged for an Aggregate record
+	// delivered via sync_records (SPEC §2.7) whose per-record
+	// ed25519 signature fails to verify against its embedded
+	// pubkey. Strong evidence of a malicious relay injecting
+	// records; counted as Severe.
+	ScoreBadRecordSig = 20
+
+	// ScoreInsufficientPoW is charged for a record whose hashcash
+	// nonce doesn't meet the publisher's declared MinPoWBits.
+	// Indicates the peer is either running an older build that
+	// doesn't mint PoW or is deliberately shipping unbound
+	// records. Medium severity — one mistake isn't ban-worthy,
+	// persistent drip is.
+	ScoreInsufficientPoW = 10
+
 	// BanThreshold is the score at which a peer is banned.
 	// Matches Bitcoin Core's DISCOURAGEMENT_THRESHOLD of 100.
 	// A single Severe violation (ScoreBadBencode = 20) is not

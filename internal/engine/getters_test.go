@@ -157,3 +157,41 @@ func TestEngineAddTrustedPeerEngineRejectsNilAndUnknown(t *testing.T) {
 		t.Error("AddTrustedPeerEngine on unknown infohash should error")
 	}
 }
+
+// TestEngineAddTrustedPeerEngineSuccess covers the success arm
+// (`return h.T.AddClientPeer(other.client), nil`). Add the same
+// magnet (zero-pieces, no metadata) to both engines so they
+// share an infohash, then wire other into eng's peer set. The
+// number of peer addresses returned reflects however many
+// listen addresses anacrolix exposes, but it must be ≥0 and the
+// call must not error.
+func TestEngineAddTrustedPeerEngineSuccess(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := newGettersEngine(t)
+	defer cleanup()
+	other, otherCleanup := newGettersEngine(t)
+	defer otherCleanup()
+
+	const magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+	h1, err := eng.AddMagnet(magnet)
+	if err != nil {
+		t.Fatalf("eng.AddMagnet: %v", err)
+	}
+	_ = h1
+	h2, err := other.AddMagnet(magnet)
+	if err != nil {
+		t.Fatalf("other.AddMagnet: %v", err)
+	}
+	_ = h2
+
+	var ih [20]byte
+	copy(ih[:], h1.T.InfoHash().Bytes())
+
+	added, err := eng.AddTrustedPeerEngine(ih, other)
+	if err != nil {
+		t.Fatalf("AddTrustedPeerEngine: %v", err)
+	}
+	if added < 0 {
+		t.Errorf("AddClientPeer returned negative count %d", added)
+	}
+}

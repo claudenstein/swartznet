@@ -110,17 +110,6 @@ func (ft *fileTracker) Subscribe() <-chan FileCompleteEvent {
 	return ch
 }
 
-// Events returns a receive-only channel of FileCompleteEvent values. This
-// is a thin convenience wrapper around Subscribe(): each call creates a
-// new independent subscription, so callers MUST bind the result to a local
-// variable and range over it. Calling Events() inside a loop's select-case
-// expression leaks a new channel per iteration.
-//
-// New code should prefer Subscribe() for clarity.
-func (ft *fileTracker) Events() <-chan FileCompleteEvent {
-	return ft.Subscribe()
-}
-
 // Close detaches from the torrent and shuts down the goroutine. Idempotent.
 // After Close returns, every outstanding subscriber channel is closed.
 func (ft *fileTracker) Close() {

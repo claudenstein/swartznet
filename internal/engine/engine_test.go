@@ -23,6 +23,12 @@ func TestEngineStartStop(t *testing.T) {
 	cfg.ListenPort = 0 // OS-assigned, avoids port collisions in parallel tests
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	// Hermetic XDG paths.
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 

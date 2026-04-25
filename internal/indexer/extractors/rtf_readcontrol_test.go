@@ -20,8 +20,8 @@ func readControlOn(s string) (string, int, string, error) {
 func TestReadControlSingleCharEscapes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		in      string
-		hex     string
+		in  string
+		hex string
 	}{
 		{"\\rest", "\\"},
 		{"{rest", "{"},

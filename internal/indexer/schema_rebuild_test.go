@@ -13,13 +13,13 @@ import (
 
 // TestOpenWithLoggerSchemaRebuild covers the previously-uncovered
 // schema-mismatch rebuild branch. Strategy:
-//   1. Open a fresh index — writeSchemaVersion stores "3".
-//   2. Close, then reopen with bleve directly and overwrite the
-//      sentinel to "1" so the next OpenWithLogger sees a stale
-//      schema.
-//   3. OpenWithLogger again — must detect the mismatch, log the
-//      rebuild warning, RemoveAll the directory, and create a
-//      fresh index.
+//  1. Open a fresh index — writeSchemaVersion stores "3".
+//  2. Close, then reopen with bleve directly and overwrite the
+//     sentinel to "1" so the next OpenWithLogger sees a stale
+//     schema.
+//  3. OpenWithLogger again — must detect the mismatch, log the
+//     rebuild warning, RemoveAll the directory, and create a
+//     fresh index.
 func TestOpenWithLoggerSchemaRebuild(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "idx")

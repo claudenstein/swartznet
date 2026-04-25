@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/swartznet/swartznet/internal/daemon"
+	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
 type statusTab struct {
@@ -25,6 +26,8 @@ type statusTab struct {
 	swarmLabels    []*widget.Label
 	dhtCard        *widget.Card
 	dhtLabels      []*widget.Label
+	aggCard        *widget.Card
+	aggLabels      []*widget.Label
 	pubCard        *widget.Card
 	pubLabels      []*widget.Label
 	bloomCard      *widget.Card
@@ -92,6 +95,23 @@ func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 		),
 	)
 
+	// Aggregate card — v0.5 PPMI/B-tree/RIBLT track. Follows the
+	// DHT card pattern: one label per field, order matches the
+	// CLI status renderer so operators can read the same info
+	// in either surface.
+	st.aggLabels = makeLabelGroup(7)
+	st.aggCard = widget.NewCard("Aggregate (v0.5)", "",
+		container.NewVBox(
+			labelRow("PPMI enabled:", st.aggLabels[0]),
+			labelRow("Known indexers:", st.aggLabels[1]),
+			labelRow("Record source:", st.aggLabels[2]),
+			labelRow("Cache size:", st.aggLabels[3]),
+			labelRow("Bootstrap anchors:", st.aggLabels[4]),
+			labelRow("Bootstrap admitted:", st.aggLabels[5]),
+			labelRow("Bootstrap pending:", st.aggLabels[6]),
+		),
+	)
+
 	// Publisher card.
 	st.pubLabels = makeLabelGroup(3)
 	st.pubCard = widget.NewCard("DHT Publisher", "",
@@ -138,6 +158,7 @@ func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 		st.indexCard,
 		st.swarmCard,
 		st.dhtCard,
+		st.aggCard,
 		st.pubCard,
 		st.bloomCard,
 	)
@@ -215,6 +236,39 @@ func (st *statusTab) refresh() {
 	// formatter renders as "-" to match other empty cards.
 	dhtGood, dhtTotal := st.d.Eng.DHTRoutingTableSize()
 
+	// Aggregate track (v0.5). PPMI getter attachment reflects
+	// the dual-read migration state; record source kind + cache
+	// size reflect whether the publisher is feeding records into
+	// the sync responder. Everything nil-safe — a daemon without
+	// Aggregate wiring just shows zeros/"no".
+	aggPPMI := "no"
+	var aggKnownIndexers int
+	aggSourceKind := "-"
+	var aggCacheSize int
+	var aggAnchors, aggAdmitted, aggPending int
+	if lookup := st.d.Eng.Lookup(); lookup != nil {
+		if lookup.PPMIGetter() != nil {
+			aggPPMI = "yes"
+		}
+		aggKnownIndexers = len(lookup.Indexers())
+	}
+	// Bootstrap counts, when the daemon has one wired.
+	if b := st.d.Bootstrap; b != nil {
+		aggAnchors = b.AnchorCount()
+		aggAdmitted = b.AdmittedCount()
+		aggPending = b.PendingCount()
+	}
+	if sw := st.d.Eng.SwarmSearch(); sw != nil {
+		if src := sw.RecordSource(); src != nil {
+			if cache, ok := src.(*swarmsearch.RecordCache); ok {
+				aggSourceKind = "cache"
+				aggCacheSize = cache.Len()
+			} else {
+				aggSourceKind = "custom"
+			}
+		}
+	}
+
 	// Publisher.
 	var pubKeywords, pubHits int
 	var pubKey string
@@ -272,6 +326,14 @@ func (st *statusTab) refresh() {
 
 		st.dhtLabels[0].SetText(fmt.Sprintf("%d", dhtGood))
 		st.dhtLabels[1].SetText(fmt.Sprintf("%d", dhtTotal))
+
+		st.aggLabels[0].SetText(aggPPMI)
+		st.aggLabels[1].SetText(fmt.Sprintf("%d", aggKnownIndexers))
+		st.aggLabels[2].SetText(aggSourceKind)
+		st.aggLabels[3].SetText(fmt.Sprintf("%d", aggCacheSize))
+		st.aggLabels[4].SetText(fmt.Sprintf("%d", aggAnchors))
+		st.aggLabels[5].SetText(fmt.Sprintf("%d", aggAdmitted))
+		st.aggLabels[6].SetText(fmt.Sprintf("%d", aggPending))
 
 		st.pubLabels[0].SetText(fmt.Sprintf("%d", pubKeywords))
 		st.pubLabels[1].SetText(fmt.Sprintf("%d", pubHits))

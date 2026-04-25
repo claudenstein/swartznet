@@ -63,7 +63,7 @@ func TestVerifyBytesBadPubKeyLength(t *testing.T) {
 		"info": map[string]interface{}{
 			"name": "x", "piece length": 16384, "pieces": string(make([]byte, 20)), "length": 4,
 		},
-		"snet.pubkey": "short",                   // not 32 bytes
+		"snet.pubkey": "short",                  // not 32 bytes
 		"snet.sig":    string(make([]byte, 64)), // 64 byte placeholder
 	}
 	raw, _ := bencode.Marshal(mi)
@@ -103,6 +103,45 @@ func TestVerifyFileMissingPath(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.torrent")
 	if _, err := signing.VerifyFile(missing); err == nil {
 		t.Error("VerifyFile on missing path should error")
+	}
+}
+
+// TestSignFileRenameFailure covers SignFile's
+// `os.Rename` error arm. Plant a non-empty directory at the
+// target path; ReadFile and WriteFile both succeed, but the
+// final rename can't replace a non-empty directory with a
+// regular file. The leaked tempfile must be cleaned up.
+func TestSignFileRenameFailure(t *testing.T) {
+	t.Parallel()
+	_, priv := newKey(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mini.torrent")
+	if err := os.WriteFile(path, miniTorrent(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-existing tmpfile blocker: plant a non-empty directory
+	// at <path>.tmp so os.WriteFile fails at truncate-open. (We
+	// use the WriteFile arm since rename-to-non-empty has
+	// different platform semantics.)
+	tmp := path + ".tmp"
+	if err := os.MkdirAll(filepath.Join(tmp, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := signing.SignFile(path, priv); err == nil {
+		t.Error("SignFile should fail when tempfile path is a non-empty directory")
+	}
+}
+
+// TestVerifyFileReadAllFailsOnDirectory covers the
+// `io.ReadAll(f)` error arm: os.Open succeeds on a directory
+// (Linux semantics) but reading from a directory file
+// descriptor returns EISDIR, surfacing the wrapped
+// "signing: read" error rather than a decode failure.
+func TestVerifyFileReadAllFailsOnDirectory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := signing.VerifyFile(dir); err == nil {
+		t.Error("VerifyFile on a directory should error during read")
 	}
 }
 

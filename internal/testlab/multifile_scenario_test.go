@@ -69,9 +69,9 @@ func TestScenarioMultiFileTorrent(t *testing.T) {
 	const rootName = "multifile-root"
 	root := filepath.Join(seed.DataDir, rootName)
 	files := map[string][]byte{
-		"readme.txt":             readmeBody,
-		"data/payload.bin":       binBody,
-		"data/nested/deep.txt":   deepBody,
+		"readme.txt":           readmeBody,
+		"data/payload.bin":     binBody,
+		"data/nested/deep.txt": deepBody,
 	}
 	for rel, body := range files {
 		full := filepath.Join(root, rel)

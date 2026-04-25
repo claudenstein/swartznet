@@ -12,9 +12,9 @@ func TestSourceTrackerRecordEmptyArgsNoop(t *testing.T) {
 	t.Parallel()
 	st := reputation.NewSourceTracker(8)
 
-	st.Record("", "abcd")        // empty infohash
-	st.Record("1234", "")        // empty pubkey
-	st.Record("", "")            // both empty
+	st.Record("", "abcd") // empty infohash
+	st.Record("1234", "") // empty pubkey
+	st.Record("", "")     // both empty
 
 	if got := st.Len(); got != 0 {
 		t.Errorf("Len = %d, want 0 after empty-args Records", got)
@@ -29,8 +29,8 @@ func TestSourceTrackerForgetEmptyAndUnknownNoop(t *testing.T) {
 	st := reputation.NewSourceTracker(8)
 	st.Record("1111", "abcd") // seed something
 
-	st.Forget("")        // empty
-	st.Forget("9999")    // never recorded
+	st.Forget("")     // empty
+	st.Forget("9999") // never recorded
 
 	if got := st.Len(); got != 1 {
 		t.Errorf("Len = %d, want 1 (the seed should still be there)", got)

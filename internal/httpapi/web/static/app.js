@@ -409,12 +409,13 @@
 
   async function refreshStatus() {
     try {
-      const [s, ixStats, torrents] = await Promise.all([
+      const [s, ixStats, torrents, agg] = await Promise.all([
         getJSON('/status'),
         getJSON('/index/stats').catch(() => null), // optional — tolerate older daemons
         getJSON('/torrents').catch(() => null),    // for the Torrents card
+        getJSON('/aggregate').catch(() => null),   // v0.5 Aggregate track — older daemons lack this
       ]);
-      renderStatus(s, ixStats, torrents);
+      renderStatus(s, ixStats, torrents, agg);
     } catch (err) {
       statusDisplay.innerHTML = '';
       statusDisplay.appendChild(elt('p', { class: 'hint', text: 'error: ' + err.message }));
@@ -425,7 +426,7 @@
     }
   }
 
-  function renderStatus(s, ixStats, torrents) {
+  function renderStatus(s, ixStats, torrents, agg) {
     statusDisplay.innerHTML = '';
     const grid = elt('div', { class: 'status-grid' });
 
@@ -517,6 +518,36 @@
       grid.appendChild(card('Reputation', [
         ['known indexers', String(s.reputation.known_indexers || 0)],
       ]));
+    }
+
+    // Aggregate (v0.5 redesign) card — only rendered when the
+    // daemon exposes /aggregate (older daemons 404 on that path,
+    // getJSON('/aggregate') resolves to null). PPMI enabled /
+    // record source / cache size are the fields users care about
+    // during the dual-read migration window.
+    if (agg) {
+      const aggRows = [
+        ['PPMI enabled', agg.ppmi_enabled ? 'yes' : 'no'],
+        ['known indexers', String(agg.known_indexers || 0)],
+      ];
+      if (agg.record_source_kind) {
+        aggRows.push(['record source', agg.record_source_kind]);
+      }
+      if (agg.record_cache_size > 0 || agg.record_cache_max > 0) {
+        if (agg.record_cache_max > 0) {
+          aggRows.push(['cache', String(agg.record_cache_size || 0) + ' / ' + String(agg.record_cache_max)]);
+        } else {
+          aggRows.push(['cache size', String(agg.record_cache_size)]);
+        }
+      }
+      if (agg.bootstrap) {
+        aggRows.push(['anchors', String(agg.bootstrap.anchors || 0)]);
+        aggRows.push(['admitted', String(agg.bootstrap.admitted || 0)]);
+        if (agg.bootstrap.pending > 0) {
+          aggRows.push(['pending', String(agg.bootstrap.pending)]);
+        }
+      }
+      grid.appendChild(card('Aggregate (v0.5)', aggRows));
     }
 
     statusDisplay.appendChild(grid);

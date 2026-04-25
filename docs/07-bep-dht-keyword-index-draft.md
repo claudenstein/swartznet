@@ -12,6 +12,19 @@
 
 ## Abstract
 
+> **v0.5.0 supersession notice.** The SwartzNet v0.5.0
+> "Aggregate" redesign replaces the per-(publisher, keyword)
+> mutable-item scheme described below with a single-per-publisher
+> pointer (PPMI) at the fixed salt `SHA256("snet.index")`
+> referencing a companion index torrent that holds the real
+> records. See
+> [`docs/research/PROPOSAL.md`](research/PROPOSAL.md) for the
+> rationale and [`docs/research/SPEC.md`](research/SPEC.md) §1
+> and §3.1 for the new byte formats. This draft stays intact
+> for the v0.5→v0.7 dual-read migration window and because
+> per-keyword items remain a valid legacy layout any BEP-44
+> DHT node will keep serving.
+
 This document specifies a convention for using
 [BEP-44][bep44] mutable items to publish "keyword → list of
 infohashes" mappings on the BitTorrent mainline DHT. A

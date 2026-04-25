@@ -220,10 +220,11 @@ func (a *AnacrolixGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte)
 // lookup path (M4e) can be unit-tested without spinning up a real
 // DHT server. Production code should never use this directly.
 type MemoryPutterGetter struct {
-	mu    sync.Mutex
-	store map[[20]byte]storedItem
-	priv  ed25519.PrivateKey
-	pub   [32]byte
+	mu        sync.Mutex
+	store     map[[20]byte]storedItem
+	ppmiStore map[[20]byte]ppmiStoredItem
+	priv      ed25519.PrivateKey
+	pub       [32]byte
 }
 
 type storedItem struct {
@@ -241,7 +242,8 @@ type storedItem struct {
 // not verify signatures).
 func NewMemoryPutterGetter(priv ed25519.PrivateKey) *MemoryPutterGetter {
 	m := &MemoryPutterGetter{
-		store: make(map[[20]byte]storedItem),
+		store:     make(map[[20]byte]storedItem),
+		ppmiStore: make(map[[20]byte]ppmiStoredItem),
 	}
 	if priv != nil {
 		m.priv = priv
@@ -251,6 +253,12 @@ func NewMemoryPutterGetter(priv ed25519.PrivateKey) *MemoryPutterGetter {
 	}
 	return m
 }
+
+// PubKey returns the public key derived from the private key the
+// memory store was constructed with, as a [32]byte. Used by tests
+// that need to query under the same pubkey the memory store
+// signed puts as.
+func (m *MemoryPutterGetter) PubKey() [32]byte { return m.pub }
 
 // Put stores a value under the (pub, salt) target.
 func (m *MemoryPutterGetter) Put(ctx context.Context, salt []byte, value KeywordValue) error {

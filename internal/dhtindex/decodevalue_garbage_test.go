@@ -15,8 +15,8 @@ func TestDecodeValueGarbageBencode(t *testing.T) {
 	t.Parallel()
 	cases := [][]byte{
 		[]byte("not bencode"),
-		[]byte{0xFF, 0xFE, 0xFD}, // raw garbage bytes
-		[]byte("d3:tsi42e"),      // truncated dict — no closing 'e'
+		{0xFF, 0xFE, 0xFD},  // raw garbage bytes
+		[]byte("d3:tsi42e"), // truncated dict — no closing 'e'
 	}
 	for _, payload := range cases {
 		_, err := dhtindex.DecodeValue(payload)

@@ -15,7 +15,130 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Added — "Aggregate" distributed-layer redesign
+
+A multi-commit series inverts Layer-D from per-keyword BEP-44
+items into per-publisher pointers, moves the real keyword index
+into a piece-aligned B-tree inside a regular BitTorrent
+"companion index torrent", and reconciles updates between peers
+via a new Rateless IBLT set-sync session layered on `sn_search`.
+Design and rationale in
+[`docs/research/PROPOSAL.md`](docs/research/PROPOSAL.md);
+byte-level spec in [`docs/research/SPEC.md`](docs/research/SPEC.md);
+phase-by-phase tracking in
+[`docs/research/ROADMAP.md`](docs/research/ROADMAP.md).
+
+Shipped components:
+
+  - `internal/companion/btree.go` — B-tree page layout
+    (magic `SNAGG\0`, interior/leaf/trailer kinds) with
+    deterministic build, BFS piece assignment, ed25519-signed
+    trailer binding the tree to a publisher.
+  - `internal/companion/read_btree.go` — prefix-query walker
+    with trailer-sig verification and per-record sig re-check
+    on every returned hit.
+  - `internal/companion/pow.go` — hashcash mint +
+    `SignAndMineRecord` convenience (D=20 default).
+  - `internal/dhtindex/ppmi.go` — Publisher Pointer Mutable
+    Item. One BEP-44 item per publisher at the fixed
+    double-hashed salt `SHA256("snet.index")`. Collapses DHT
+    cost from O(publishers × keywords) to O(publishers).
+  - `internal/dhtindex/lookup.go` — `Lookup.Query` resolves
+    PPMIs first, falls back to legacy per-keyword for
+    publishers that haven't migrated. Dual-read migration.
+  - `internal/swarmsearch/riblt.go` — rateless IBLT encoder/
+    decoder (SIGCOMM 2024) with graduated-degree cycle.
+    Converges in ~3d symbols for symmetric difference d.
+  - `internal/swarmsearch/sync_{wire,session}.go` — msg_types
+    4-8 wire format and in-process session state machine.
+  - `internal/swarmsearch/handler.go` — LTEP dispatch for
+    sync msg_types behind the `BitSetReconciliation` (services
+    bit 9) capability gate. Peers without the bit receive
+    `reject code 2`.
+  - `internal/daemon/bootstrap.go` + `bootstrap_https.go` —
+    three-channel cold-start (anchors + BEP-51 candidates +
+    `peer_announce` endorsements) plus last-ditch HTTPS anchor
+    fallback.
+
+Test coverage: ~130 new test functions across the four
+packages, including the capstone `TestAggregateEndToEnd` that
+exercises publisher → PPMI → subscriber → prefix-query in one
+pass.
+
+Status of the BEP-51 crawler track: the primitives now land
+incrementally — `dhtindex.SampleInfohashes` (raw BEP-51 query),
+`dhtindex.PublisherFromMetainfo` (signature classifier), and
+`dhtindex.CrawlOnce` (one-tick glue: sample + fetch + classify
++ sink). A `swartznet crawl-probe --addr <host:port>` ops
+command exercises the primitive against a live peer.
+
+The remaining gap is a *production* MetainfoFetcher: BEP-9
+ut_metadata only transports the info dict, while
+`snet.pubkey` / `snet.sig` are top-level metainfo fields, so
+a BEP-9-only fetcher can't promote crawled infohashes to the
+"observed publishers" set without an additional signature-
+exchange channel. Closing the gap needs either a new LTEP
+extension (e.g. `ut_signature`) or a tracker / HTTP mirror
+convention. Documented in
+[`docs/research/MILESTONE-v0.5.0.md`](docs/research/MILESTONE-v0.5.0.md).
+LocalRecord sync was wired up in earlier commits so nodes do
+share records over the responder path; the engine attaches a
+RecordCache as both source and sink in `engine.New`.
+
+### Added — `swartznet crawl-probe` ops command
+
+One-shot CLI that issues a single BEP-51 `sample_infohashes`
+query against a DHT address and prints the response (samples,
+interval, num, closest nodes). Pure ops tooling — no running
+daemon needed. Useful for validating that a peer supports
+BEP-51 and for hand-inspecting the samples it volunteers
+during Channel-B crawler development. Text + JSON output.
+
+### Added — Engine periodic RecordCache prune
+
+`engine.DefaultRecordCacheMaxAge` (30 days) +
+`DefaultRecordCachePruneInterval` (1 hour). On startup
+`engine.New` launches a goroutine that calls
+`RecordCache.PruneOlderThan` on a ticker so the Aggregate
+cache's TTL is enforced automatically without operator
+intervention. Regtest mode swaps in 200 ms / 500 ms so
+scenario tests can observe the prune cycle.
+
 ### Fixed
+
+  - **`upgradeMagnetSession` race in `Engine.AddTorrentFile`**. The
+    metainfo-arrival upgrade goroutine was spawned for every
+    `registerLocked` caller, including `AddTorrentFile` and
+    `AddTorrentMetaInfo`. For those paths, the goroutine raced
+    `writeTorrentCopy` for the same `<hex>.torrent.tmp` target
+    file: when the goroutine won the rename, the saved bytes
+    contained a re-marshalled metainfo (anacrolix's
+    `Torrent.Metainfo()` synthesises CreationDate / CreatedBy
+    fields) that no longer byte-matched the original. On the
+    next `RestoreSession`, `metainfo.Load` rejected the file
+    with "error after decoding metainfo: expected EOF". Symptom:
+    intermittent flake under heavy parallel race testing where
+    `eng2.TorrentSnapshots()` returned 1 torrent instead of 2.
+    Fix moves the goroutine spawn out of `registerLocked` and
+    into `AddMagnet` / `AddInfoHash` only — the two paths that
+    genuinely benefit from a post-fetch metainfo upgrade. Same
+    gate added in `restoreEntry` so file/metainfo restores skip
+    the upgrade. Regression-gated by
+    `TestAddTorrentFileDoesNotRemarshalCopy` (deterministic:
+    fails reproducibly with original buggy code).
+
+  - **Anchor-source admit no-op**. `daemon.Bootstrap.admit`
+    contained a documented placeholder that called
+    `tracker.RecordReturned(pub, 0)`, which `RecordReturned`
+    silently ignores (`if n <= 0 { return }`). Anchor pubkeys
+    therefore never landed on the tracker, breaking the
+    intent of `opts.AnchorReputation` and leaving the lookup's
+    heavy-tail rule unable to identify trusted publishers.
+    Replaced with `tracker.MarkSeeded(pub, label)` for
+    `source == "anchor"` only — gives anchors the high
+    starting score the seeded-bonus branch of `scoreOf` is
+    designed to express. Candidate sources stay un-seeded
+    (default 0.5; earn or lose reputation organically).
 
   - **Layer-D BEP-44 put/get round-trip**. anacrolix/torrent's
     `NewAnacrolixDhtServer` builds a `dht.ServerConfig` from

@@ -64,7 +64,14 @@ const (
 	// node on mainnet is obvious.
 	BitRegtest ServiceBits = 1 << 8
 
-	// Bits 9-63 are reserved for future features. Always
+	// BitSetReconciliation: node speaks the Aggregate
+	// sn_search sync protocol (msg_types 4..8 per SPEC §2).
+	// Peers without this bit set MUST NOT receive sync
+	// frames; the handler rejects them with code 2 (unsupported
+	// scope). Added v0.5.0 with the "Aggregate" redesign.
+	BitSetReconciliation ServiceBits = 1 << 9
+
+	// Bits 10-63 are reserved for future features. Always
 	// allocate the NEXT available bit for a new feature;
 	// never reuse an old bit for a different meaning.
 )
@@ -142,5 +149,6 @@ func DefaultServices() ServiceBits {
 		BitContentHits |
 		BitCompanionPublisher |
 		BitCompanionSubscriber |
-		BitSnippetHighlight
+		BitSnippetHighlight |
+		BitSetReconciliation
 }

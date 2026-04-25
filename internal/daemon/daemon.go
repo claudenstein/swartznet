@@ -23,13 +23,37 @@ import (
 // always call Close when done. Fields are exported so callers
 // (CLI, GUI) can reach the subsystems directly.
 type Daemon struct {
-	Eng     *engine.Engine
-	Index   *indexer.Index              // nil when NoIndex is set
-	CompPub *companion.Publisher        // nil when conditions unmet
-	CompSub *companion.SubscriberWorker // nil when conditions unmet
-	API     *httpapi.Server             // nil when APIAddr is empty
-	Cfg     config.Config
-	Log     *slog.Logger
+	Eng       *engine.Engine
+	Index     *indexer.Index              // nil when NoIndex is set
+	CompPub   *companion.Publisher        // nil when conditions unmet
+	CompSub   *companion.SubscriberWorker // nil when conditions unmet
+	API       *httpapi.Server             // nil when APIAddr is empty
+	Bootstrap *Bootstrap                  // v0.5 Aggregate bootstrap; nil when Lookup unavailable
+	Cfg       config.Config
+	Log       *slog.Logger
+}
+
+// bootstrapEndorsementSink adapts *Bootstrap to the
+// swarmsearch.EndorsementSink interface. Kept as a small typed
+// value (not a func-type adapter) so future extensions — e.g.
+// rate limiting per-endorser, telemetry — slot in cleanly.
+type bootstrapEndorsementSink struct{ boot *Bootstrap }
+
+func (a bootstrapEndorsementSink) NoteEndorsement(endorser, candidate [32]byte) {
+	a.boot.IngestEndorsement(endorser, candidate)
+}
+
+// bootstrapPublisherObserver adapts *Bootstrap to the
+// swarmsearch.PublisherObserver interface. When sync-record
+// ingestion observes a new publisher pubkey, we feed it as a
+// candidate with sigValid=true (records already passed per-record
+// ed25519 verification in the swarmsearch handler). Bootstrap's
+// admission policy then decides: Bloom/reputation hit → admit;
+// else → queue as pending for future endorsement rounds.
+type bootstrapPublisherObserver struct{ boot *Bootstrap }
+
+func (a bootstrapPublisherObserver) NotePublisherSeen(pubkey [32]byte) {
+	a.boot.CandidateFromCrawl(pubkey, true)
 }
 
 // Options controls which subsystems daemon.New starts.
@@ -119,6 +143,47 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		}
 	}
 
+	// --- Aggregate bootstrap (P4.1) ---
+	// Construct the three-channel cold-start orchestrator when the
+	// engine has a Lookup (i.e. DHT is enabled). Runs channel A
+	// (anchor PPMI fetch) in a background goroutine so daemon.New
+	// doesn't block on the 5-anchor parallel fetch. Channel B
+	// (BEP-51 crawl) and channel C (peer_announce endorsement
+	// gossip) stay pluggable — they need future engine hooks.
+	if eng.Lookup() != nil {
+		bootOpts := DefaultBootstrapOptions()
+		boot, err := NewBootstrap(
+			eng.Lookup(),
+			eng.PointerGetter(), // AnacrolixGetter implements PPMIGetter via GetPPMI
+			eng.KnownGoodBloom(),
+			eng.ReputationTracker(),
+			bootOpts,
+			opts.Log,
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: aggregate bootstrap init failed: %v\n", err)
+		} else {
+			d.Bootstrap = boot
+			// Route peer_announce.endorsed gossip (channel C)
+			// into the Bootstrap's admission policy. An adapter
+			// closure keeps swarmsearch free of a direct
+			// dependency on daemon.Bootstrap.
+			if sw := eng.SwarmSearch(); sw != nil {
+				sw.SetEndorsementSink(bootstrapEndorsementSink{boot: boot})
+				sw.SetPublisherObserver(bootstrapPublisherObserver{boot: boot})
+			}
+			if len(boot.AnchorKeys()) > 0 {
+				go func() {
+					succeeded, errs := boot.RunAnchors(ctx)
+					if opts.Log != nil {
+						opts.Log.Info("daemon.aggregate_bootstrap.anchors",
+							"succeeded", succeeded, "errors", len(errs))
+					}
+				}()
+			}
+		}
+	}
+
 	// --- Session restore ---
 	// Re-add every torrent recorded in the on-disk session manifest so
 	// the user sees their previous list when reopening the GUI/web UI.
@@ -129,7 +194,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	// --- HTTP API ---
 	if opts.APIAddr != "" {
 		httpapi.SetHealthzVersion(opts.Version)
-		api := httpapi.NewWithOptions(opts.APIAddr, opts.Log, httpapi.Options{
+		apiOpts := httpapi.Options{
 			Index:     d.Index,
 			Swarm:     eng.SwarmSearch(),
 			Publisher: eng.Publisher(),
@@ -141,7 +206,11 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			Control:   &controllerAdapter{eng: eng},
 			Companion: newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile),
 			DHTStats:  eng.DHTRoutingTableSize,
-		})
+		}
+		if d.Bootstrap != nil {
+			apiOpts.Bootstrap = d.Bootstrap
+		}
+		api := httpapi.NewWithOptions(opts.APIAddr, opts.Log, apiOpts)
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
 		} else {

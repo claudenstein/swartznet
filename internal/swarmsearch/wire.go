@@ -211,15 +211,39 @@ type PeerAnnounce struct {
 	Version  int    `bencode:"v"`                  // ProtocolVersion
 	Services uint64 `bencode:"services,omitempty"` // ServiceBits as uint64
 	Pubkey   []byte `bencode:"pk,omitempty"`       // 32-byte ed25519 publisher key
+	// Endorsed is the SPEC §3.3 channel-C gossip primitive —
+	// 32-byte ed25519 publisher pubkeys the sender vouches for.
+	// Subscribers route these to their Bootstrap's
+	// IngestEndorsement so admission thresholds can fire. Capped
+	// at MaxEndorsedPerAnnounce entries per frame to keep per-
+	// handshake overhead bounded.
+	Endorsed [][]byte `bencode:"endorsed,omitempty"`
 }
+
+// MaxEndorsedPerAnnounce caps the per-frame endorsement list
+// size. SPEC §3.3 suggests 10; we enforce it on both encode and
+// decode so malformed peers can't over-claim.
+const MaxEndorsedPerAnnounce = 10
 
 // EncodePeerAnnounce serialises a PeerAnnounce message.
 func EncodePeerAnnounce(pa PeerAnnounce) ([]byte, error) {
 	pa.MsgType = MsgTypePeerAnnounce
+	if len(pa.Endorsed) > MaxEndorsedPerAnnounce {
+		return nil, fmt.Errorf("swarmsearch: %d endorsements exceeds cap %d",
+			len(pa.Endorsed), MaxEndorsedPerAnnounce)
+	}
+	for i, e := range pa.Endorsed {
+		if len(e) != 32 {
+			return nil, fmt.Errorf("swarmsearch: endorsed[%d] has %d bytes, want 32", i, len(e))
+		}
+	}
 	return bencode.Marshal(pa)
 }
 
-// DecodePeerAnnounce parses a PeerAnnounce message.
+// DecodePeerAnnounce parses a PeerAnnounce message. Silently
+// drops endorsements with the wrong byte length rather than
+// failing the whole frame — a malformed entry is a local
+// validation fault, not a protocol-level violation.
 func DecodePeerAnnounce(payload []byte) (PeerAnnounce, error) {
 	var pa PeerAnnounce
 	if err := bencode.Unmarshal(payload, &pa); err != nil {
@@ -228,5 +252,19 @@ func DecodePeerAnnounce(payload []byte) (PeerAnnounce, error) {
 	if pa.MsgType != MsgTypePeerAnnounce {
 		return pa, fmt.Errorf("swarmsearch: not a peer_announce, msg_type=%d", pa.MsgType)
 	}
+	// Cap endorsement count defensively — a noisy peer shouldn't
+	// blow out memory. Extra entries beyond the cap are truncated.
+	if len(pa.Endorsed) > MaxEndorsedPerAnnounce {
+		pa.Endorsed = pa.Endorsed[:MaxEndorsedPerAnnounce]
+	}
+	// Filter malformed entries. The remainder is still a valid
+	// frame from the caller's perspective.
+	clean := pa.Endorsed[:0]
+	for _, e := range pa.Endorsed {
+		if len(e) == 32 {
+			clean = append(clean, e)
+		}
+	}
+	pa.Endorsed = clean
 	return pa, nil
 }

@@ -33,19 +33,26 @@ import (
 // only the indexers that actually returned the flagged hash,
 // instead of falling back to "demote every known indexer".
 //
+// As of P2.3 (Aggregate), Lookup can optionally resolve publisher
+// PPMI pointers first and fall back to the legacy per-keyword
+// path only for publishers who haven't migrated. Attach a
+// PPMIGetter via SetPPMIGetter to enable; when nil, Query behaves
+// exactly as before.
+//
 // All helpers are nil by default; the M4e tests still pass
-// unchanged. M5d / M9 wire them up via the Engine.
+// unchanged. M5d / M9 / P2.3 wire them up via the Engine.
 //
 // Lookup is safe for concurrent use.
 type Lookup struct {
 	getter Getter
 
-	mu       sync.RWMutex
-	indexers map[[32]byte]IndexerInfo
-	tracker  *reputation.Tracker
-	bloom    *reputation.BloomFilter
-	sources  *reputation.SourceTracker
-	minScore float64 // skip indexers with score below this
+	mu         sync.RWMutex
+	indexers   map[[32]byte]IndexerInfo
+	tracker    *reputation.Tracker
+	bloom      *reputation.BloomFilter
+	sources    *reputation.SourceTracker
+	minScore   float64 // skip indexers with score below this
+	ppmiGetter PPMIGetter
 }
 
 // IndexerInfo is the metadata Lookup tracks per known indexer
@@ -86,8 +93,32 @@ type LookupResponse struct {
 	// non-error result.
 	IndexersResponded int
 	// Hits is the merged hit list, sorted by source-count descending
-	// then by name.
+	// then by name. Populated from the legacy per-keyword path.
 	Hits []LookupHit
+
+	// PPMIsResolved is the list of publisher pointers that the
+	// Aggregate path successfully fetched. Each entry points at a
+	// companion index torrent the caller must download (via the
+	// engine) to resolve into actual hits. Empty when no
+	// PPMIGetter is attached.
+	PPMIsResolved []ResolvedPPMI
+
+	// PPMIMissing counts the indexers for whom PPMI resolution
+	// failed (and that therefore fell back to the legacy path).
+	// Useful for telemetry / UI "most of your indexers haven't
+	// migrated to PPMI yet" warnings.
+	PPMIMissing int
+}
+
+// ResolvedPPMI is one publisher's PPMI pointer after successful
+// DHT fetch. The caller feeds Value.IH to its torrent engine to
+// download the companion index, then uses the returned tree's
+// prefix-query walker (companion.BTreeReader) to convert this
+// pointer into hits for its local search.
+type ResolvedPPMI struct {
+	PubKey [32]byte
+	Label  string
+	Value  PPMIValue
 }
 
 // NewLookup constructs an empty Lookup wrapped around the given
@@ -136,6 +167,26 @@ func (l *Lookup) SetMinIndexerScore(s float64) {
 	l.mu.Lock()
 	l.minScore = s
 	l.mu.Unlock()
+}
+
+// SetPPMIGetter attaches (or detaches) a PPMI resolver. When
+// non-nil, Query first fans out PPMI gets to all known indexers
+// and reports successful pointers via LookupResponse.PPMIsResolved.
+// Publishers for whom PPMI fetch fails (most likely: they haven't
+// migrated yet) fall through to the legacy per-keyword path
+// unchanged. When nil, Query behaves exactly as it did before
+// Aggregate landed.
+func (l *Lookup) SetPPMIGetter(g PPMIGetter) {
+	l.mu.Lock()
+	l.ppmiGetter = g
+	l.mu.Unlock()
+}
+
+// PPMIGetter returns the attached PPMI getter, or nil.
+func (l *Lookup) PPMIGetter() PPMIGetter {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.ppmiGetter
 }
 
 // Tracker returns the attached reputation tracker, or nil.
@@ -240,6 +291,7 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 	bloom := l.bloom
 	sources := l.sources
 	minScore := l.minScore
+	ppmiGetter := l.ppmiGetter
 	l.mu.RUnlock()
 
 	if len(indexers) == 0 {
@@ -258,6 +310,82 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 			}
 		}
 		indexers = filtered
+	}
+
+	// Aggregate path: fan out PPMI resolution first when enabled.
+	// Publishers with a live PPMI are removed from the legacy
+	// fallback set — we trust the Aggregate pointer and don't
+	// double-query their per-keyword items.
+	var ppmis []ResolvedPPMI
+	var ppmiMissing int
+	resolvedMask := make(map[[32]byte]bool)
+	if ppmiGetter != nil {
+		ppmis, ppmiMissing = resolvePPMIs(ctx, ppmiGetter, indexers)
+		for _, p := range ppmis {
+			resolvedMask[p.PubKey] = true
+		}
+	}
+
+	fallback := indexers[:0:len(indexers)]
+	for _, info := range indexers {
+		if !resolvedMask[info.PubKey] {
+			fallback = append(fallback, info)
+		}
+	}
+
+	resp := l.legacyQuery(ctx, salt, fallback, tracker, bloom, sources)
+	resp.IndexersAsked = len(indexers) // PPMI + legacy fan-out together
+	resp.PPMIsResolved = ppmis
+	resp.PPMIMissing = ppmiMissing
+	return resp, nil
+}
+
+// resolvePPMIs fans out PPMI gets to every indexer and returns
+// the list of successful resolutions plus a count of failures.
+func resolvePPMIs(ctx context.Context, getter PPMIGetter, indexers []IndexerInfo) ([]ResolvedPPMI, int) {
+	type ppmiResult struct {
+		info IndexerInfo
+		v    PPMIValue
+		err  error
+	}
+	results := make(chan ppmiResult, len(indexers))
+	var wg sync.WaitGroup
+	for _, info := range indexers {
+		wg.Add(1)
+		go func(info IndexerInfo) {
+			defer wg.Done()
+			v, err := getter.GetPPMI(ctx, info.PubKey)
+			results <- ppmiResult{info: info, v: v, err: err}
+		}(info)
+	}
+	wg.Wait()
+	close(results)
+
+	var ppmis []ResolvedPPMI
+	missing := 0
+	for r := range results {
+		if r.err != nil {
+			missing++
+			continue
+		}
+		ppmis = append(ppmis, ResolvedPPMI{
+			PubKey: r.info.PubKey,
+			Label:  r.info.Label,
+			Value:  r.v,
+		})
+	}
+	return ppmis, missing
+}
+
+// legacyQuery performs the pre-Aggregate per-keyword fan-out for
+// a set of indexers. Extracted from Query so the new
+// Query-with-PPMI path can short-circuit for publishers already
+// resolved via Aggregate. When the indexer set is empty, returns
+// a zeroed response.
+func (l *Lookup) legacyQuery(ctx context.Context, salt []byte, indexers []IndexerInfo, tracker *reputation.Tracker, bloom *reputation.BloomFilter, sources *reputation.SourceTracker) *LookupResponse {
+	resp := &LookupResponse{IndexersAsked: len(indexers)}
+	if len(indexers) == 0 {
+		return resp
 	}
 
 	type fetchResult struct {
@@ -279,8 +407,7 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 	close(results)
 
 	merged := make(map[string]*LookupHit)
-	hitSources := make(map[string][][32]byte) // infohash hex → indexer pubkeys
-	resp := &LookupResponse{IndexersAsked: len(indexers)}
+	hitSources := make(map[string][][32]byte)
 	for r := range results {
 		if r.err != nil {
 			continue
@@ -324,15 +451,10 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 		}
 	}
 
-	// Compute per-hit score from indexer reputation + bloom flag.
 	for ih, lh := range merged {
 		lh.Score = scoreLookupHit(lh, hitSources[ih], tracker)
 	}
 
-	// Record per-hit source attribution so M9's targeted flag
-	// path can later look up which indexers claimed each hash.
-	// This runs after the merge so each infohash gets one
-	// RecordMany call with the deduplicated source list.
 	if sources != nil {
 		for ih, pks := range hitSources {
 			pkHexes := make([]reputation.PubKeyHex, 0, len(pks))
@@ -347,8 +469,6 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 		resp.Hits = append(resp.Hits, *lh)
 	}
 	sort.Slice(resp.Hits, func(i, j int) bool {
-		// Bloom hits go to the top; ties broken by score, then
-		// source-count, then name.
 		if resp.Hits[i].BloomHit != resp.Hits[j].BloomHit {
 			return resp.Hits[i].BloomHit
 		}
@@ -360,7 +480,7 @@ func (l *Lookup) Query(ctx context.Context, query string) (*LookupResponse, erro
 		}
 		return resp.Hits[i].Name < resp.Hits[j].Name
 	})
-	return resp, nil
+	return resp
 }
 
 // scoreLookupHit computes the LookupHit.Score in [0, 1].

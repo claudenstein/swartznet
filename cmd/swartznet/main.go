@@ -72,6 +72,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdFiles(rest, stdout, stderr)
 	case "trust":
 		return cmdTrust(rest, stdout, stderr)
+	case "aggregate":
+		return cmdAggregate(rest, stdout, stderr)
+	case "crawl-probe":
+		return cmdCrawlProbe(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -95,6 +99,8 @@ Commands:
   index <infohash> <on|off>         Toggle per-torrent indexing on a running daemon.
   files <infohash> [<idx> <prio>]   List files in a torrent, or set file priority (none/normal/high).
   trust <list|add|remove> ...       Manage the local publisher trust list.
+  aggregate <inspect|find|build>    Inspect/query/build Aggregate (v0.5) index files.
+  crawl-probe --addr <host:port>    One-shot BEP-51 sample_infohashes probe (ops tool).
   version                           Print the version and exit.
   help                              Print this message.
 

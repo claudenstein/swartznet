@@ -13,7 +13,7 @@ func TestRecordConfirmedEmptyArgsNoop(t *testing.T) {
 	t.Parallel()
 	tr := reputation.NewTracker()
 
-	tr.RecordConfirmed()                   // no varargs
+	tr.RecordConfirmed()                            // no varargs
 	tr.RecordConfirmed([]reputation.PubKeyHex{}...) // empty slice spread
 
 	// Should not have created any phantom records.

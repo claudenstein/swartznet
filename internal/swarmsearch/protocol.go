@@ -121,6 +121,38 @@ type Protocol struct {
 	// will build on this cache for the short-ID dedup path.
 	hitCache *HitCache
 
+	// syncSessions is the per-peer set of active Aggregate sync
+	// sessions (SPEC §2). Keyed by peer-addr → txid → session.
+	// Lazily initialised by handleSyncFrame; no wake-up cost on
+	// peers that never sync.
+	syncSessions map[string]map[uint32]*SyncSession
+
+	// recordSource feeds the Aggregate sync responder: on
+	// sync_begin the handler queries LocalRecords(filter) and
+	// pre-populates the session so subsequent ProduceSymbols /
+	// ApplyNeed calls have something to share. Nil until
+	// SetRecordSource is called — the handler then ships a
+	// zero-record converged reply, which is correct (and quiet)
+	// wire behavior for nodes that aren't yet publishers.
+	recordSource RecordSource
+
+	// recordSink catches incoming sync_records deliveries. Any
+	// records that pass per-record sig verification land here.
+	// Attach a writable cache (typically the same *RecordCache
+	// that implements RecordSource, since it satisfies both)
+	// to make a subscriber node actually ingest peer-supplied
+	// records. Nil is valid — records are then verified and
+	// dropped.
+	recordSink RecordSink
+
+	// publisherObserver receives one call per distinct publisher
+	// pubkey observed during sync-record ingestion. The daemon's
+	// Bootstrap implements this to feed the admission policy:
+	// pubkeys seen repeatedly AND signing records the receiver
+	// chose to accept are treated as candidate indexers. Nil is
+	// valid — observations are then no-ops.
+	publisherObserver PublisherObserver
+
 	// txidCounter is incremented by nextTxID() for each outbound
 	// Query fan-out (M3c). Accessed with sync/atomic.
 	txidCounter uint32
@@ -141,6 +173,12 @@ type Protocol struct {
 	// own publisher (nothing to merge into). Closes wire-compat
 	// §8.4-C.
 	indexerSink IndexerSink
+
+	// endorsementSink receives peer_announce.endorsed entries
+	// so the daemon's Bootstrap can apply its admission policy.
+	// SPEC §3.3 channel-C gossip primitive. Nil when no
+	// Bootstrap is wired.
+	endorsementSink EndorsementSink
 }
 
 // IndexerSink is the narrow interface the Protocol uses to
@@ -153,6 +191,17 @@ type Protocol struct {
 // sn_search read-loop goroutines.
 type IndexerSink interface {
 	NoteGossipIndexer(pubkey [32]byte, label string)
+}
+
+// EndorsementSink receives peer_announce.endorsed entries.
+// An endorser vouches for a candidate publisher pubkey; the
+// daemon's Bootstrap applies its admission policy. Keeps the
+// swarmsearch package ignorant of daemon.Bootstrap internals.
+//
+// Implementations must be safe for concurrent calls from the
+// sn_search read-loop goroutines.
+type EndorsementSink interface {
+	NoteEndorsement(endorser, candidate [32]byte)
 }
 
 // New constructs a Protocol with default capabilities, the
@@ -176,6 +225,93 @@ func New(log *slog.Logger) *Protocol {
 // HitCache returns the Protocol's LRU hit cache. Callers can
 // inspect cache size for /status output.
 func (p *Protocol) HitCache() *HitCache { return p.hitCache }
+
+// RecordSource exposes the local set of Aggregate records the
+// node is willing to share via sync_begin-initiated set
+// reconciliation. Implementations are typically backed by the
+// publisher's in-memory record cache or a live query against
+// the companion index subsystem.
+//
+// LocalRecords MUST return a snapshot — callers store the slice
+// in a SyncSession and index by record ID. It is safe for the
+// implementation to filter by the supplied SyncFilter (pubkeys,
+// since, prefix) or to return everything and let the peer's
+// RIBLT decoder throw away what doesn't interest it.
+type RecordSource interface {
+	LocalRecords(filter SyncFilter) ([]LocalRecord, error)
+}
+
+// RecordSink accepts incoming sync_records deliveries. Every
+// record has already been sig-verified by the handler before
+// being passed to Add; sinks are free to do additional policy
+// (dedup, admission limits, PoW threshold) and MAY drop records
+// silently — the signature contract is the only wire-level
+// guarantee callers rely on.
+type RecordSink interface {
+	Add(r LocalRecord)
+}
+
+// PublisherObserver is notified about publisher pubkeys carried
+// in sync_records deliveries. Implementations route these into
+// the subscriber's admission policy — a pubkey that keeps
+// appearing in records accepted via sync is a weak but genuine
+// indexer-candidate signal. The daemon.Bootstrap satisfies this
+// interface via a small adapter that calls CandidateFromCrawl.
+type PublisherObserver interface {
+	NotePublisherSeen(pubkey [32]byte)
+}
+
+// SetRecordSource attaches (or detaches) the record provider
+// feeding sync_begin responses. Nil is allowed — the handler
+// falls back to the zero-record converged reply path.
+func (p *Protocol) SetRecordSource(src RecordSource) {
+	p.mu.Lock()
+	p.recordSource = src
+	p.mu.Unlock()
+}
+
+// RecordSource returns the attached record provider, or nil.
+func (p *Protocol) RecordSource() RecordSource {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.recordSource
+}
+
+// SetRecordSink attaches a writable cache that accumulates
+// records delivered via sync_records. Typically the same
+// *RecordCache used as RecordSource (it implements both
+// interfaces), but callers can split them — e.g. feed a
+// disk-backed record store as the sink while serving from
+// an in-memory mirror via RecordSource.
+func (p *Protocol) SetRecordSink(sink RecordSink) {
+	p.mu.Lock()
+	p.recordSink = sink
+	p.mu.Unlock()
+}
+
+// RecordSink returns the attached record sink, or nil.
+func (p *Protocol) RecordSink() RecordSink {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.recordSink
+}
+
+// SetPublisherObserver attaches the observer that receives
+// per-publisher-pubkey notifications during sync-record ingestion.
+// Nil disables the notification pipeline. The daemon.Bootstrap
+// is the primary consumer.
+func (p *Protocol) SetPublisherObserver(obs PublisherObserver) {
+	p.mu.Lock()
+	p.publisherObserver = obs
+	p.mu.Unlock()
+}
+
+// PublisherObserver returns the attached observer, or nil.
+func (p *Protocol) PublisherObserver() PublisherObserver {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.publisherObserver
+}
 
 // PeerBook returns the Protocol's tried/new peer book.
 // Callers can use it to inspect the tried/new split for
@@ -248,6 +384,23 @@ func (p *Protocol) SetIndexerSink(sink IndexerSink) {
 	p.mu.Lock()
 	p.indexerSink = sink
 	p.mu.Unlock()
+}
+
+// SetEndorsementSink attaches a sink that receives
+// peer_announce.endorsed entries. The daemon's Bootstrap
+// implements this to route endorsements through its admission
+// policy. Nil disables the routing (no-op).
+func (p *Protocol) SetEndorsementSink(sink EndorsementSink) {
+	p.mu.Lock()
+	p.endorsementSink = sink
+	p.mu.Unlock()
+}
+
+// EndorsementSink returns the attached endorsement sink, or nil.
+func (p *Protocol) EndorsementSink() EndorsementSink {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.endorsementSink
 }
 
 // KnownPeers returns a snapshot of every peer the protocol has a

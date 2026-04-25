@@ -62,6 +62,20 @@ func TestNewAnacrolixPutterSuccessAndPublicKey(t *testing.T) {
 	}
 }
 
+// TestNewAnacrolixPutterBadKeySize covers the
+// `len(priv) != ed25519.PrivateKeySize` guard. Pre-existing
+// "bad key" tests passed nil server alongside the short key,
+// so the nil-server guard fired first and the key-size guard
+// stayed uncovered. Pass a real server so we get past the
+// first check and trip the second.
+func TestNewAnacrolixPutterBadKeySize(t *testing.T) {
+	t.Parallel()
+	srv := newIsolatedDHTServer(t)
+	if _, err := dhtindex.NewAnacrolixPutter(srv, []byte("short")); err == nil {
+		t.Error("expected error for short private key")
+	}
+}
+
 // TestNewAnacrolixGetterSuccess covers the success branch of
 // NewAnacrolixGetter — same constraint as the putter test:
 // existing nil-server tests short-circuit on the first guard.
