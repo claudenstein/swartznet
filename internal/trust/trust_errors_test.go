@@ -32,6 +32,27 @@ func TestLoadOrCreateUnreadablePath(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreatePathTraverseFile covers the
+// "os.Open fails with non-NotExist error" arm of LoadOrCreate
+// (the existing TestLoadOrCreateUnreadablePath ends up hitting
+// the JSON-decode error path instead, since os.Open on a
+// directory succeeds on Linux). Plant a regular file at a
+// component that should be a directory so os.Open fails with
+// ENOTDIR, which is not os.ErrNotExist.
+func TestLoadOrCreatePathTraverseFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Make `dir/file` a regular file, then ask for `dir/file/trust.json`.
+	regular := filepath.Join(dir, "file")
+	if err := os.WriteFile(regular, []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(regular, "trust.json")
+	if _, err := trust.LoadOrCreate(target); err == nil {
+		t.Error("LoadOrCreate should fail when a path component is not a directory")
+	}
+}
+
 // TestLabelOnUntrustedKeyReturnsEmpty covers the documented "empty
 // string if not trusted" path of Label. The existing tests
 // implicitly cover the trusted lookup; this one proves the miss
