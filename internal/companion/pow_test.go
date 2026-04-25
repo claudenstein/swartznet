@@ -100,6 +100,26 @@ func TestSignAndMineRecordRejectsBadPubLen(t *testing.T) {
 	}
 }
 
+// TestSignAndMineRecordPropagatesPoWError covers the
+// `if err != nil` arm after MineRecordPoW. Pass bits=41 so
+// MineRecordPoW's "cost prohibitive" guard fires; the wrapped
+// error must surface from SignAndMineRecord without producing
+// a signed record.
+func TestSignAndMineRecordPropagatesPoWError(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	var ih [20]byte
+	r, err := SignAndMineRecord(priv, pub, "x", ih, 0, 41)
+	if err == nil {
+		t.Fatal("expected error for prohibitive bits=41")
+	}
+	// The returned record is the partial mined value; its Sig
+	// must remain zero since signing was skipped.
+	var zeroSig [64]byte
+	if r.Sig != zeroSig {
+		t.Error("Sig should be zero on PoW failure (signing skipped)")
+	}
+}
+
 // Sanity: recordPreimage and RecordSigMessage MUST produce
 // identical bytes — otherwise a miner would solve for one preimage
 // and a verifier would check a different one.
