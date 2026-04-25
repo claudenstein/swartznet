@@ -106,6 +106,40 @@ scenario tests can observe the prune cycle.
 
 ### Fixed
 
+  - **`upgradeMagnetSession` race in `Engine.AddTorrentFile`**. The
+    metainfo-arrival upgrade goroutine was spawned for every
+    `registerLocked` caller, including `AddTorrentFile` and
+    `AddTorrentMetaInfo`. For those paths, the goroutine raced
+    `writeTorrentCopy` for the same `<hex>.torrent.tmp` target
+    file: when the goroutine won the rename, the saved bytes
+    contained a re-marshalled metainfo (anacrolix's
+    `Torrent.Metainfo()` synthesises CreationDate / CreatedBy
+    fields) that no longer byte-matched the original. On the
+    next `RestoreSession`, `metainfo.Load` rejected the file
+    with "error after decoding metainfo: expected EOF". Symptom:
+    intermittent flake under heavy parallel race testing where
+    `eng2.TorrentSnapshots()` returned 1 torrent instead of 2.
+    Fix moves the goroutine spawn out of `registerLocked` and
+    into `AddMagnet` / `AddInfoHash` only — the two paths that
+    genuinely benefit from a post-fetch metainfo upgrade. Same
+    gate added in `restoreEntry` so file/metainfo restores skip
+    the upgrade. Regression-gated by
+    `TestAddTorrentFileDoesNotRemarshalCopy` (deterministic:
+    fails reproducibly with original buggy code).
+
+  - **Anchor-source admit no-op**. `daemon.Bootstrap.admit`
+    contained a documented placeholder that called
+    `tracker.RecordReturned(pub, 0)`, which `RecordReturned`
+    silently ignores (`if n <= 0 { return }`). Anchor pubkeys
+    therefore never landed on the tracker, breaking the
+    intent of `opts.AnchorReputation` and leaving the lookup's
+    heavy-tail rule unable to identify trusted publishers.
+    Replaced with `tracker.MarkSeeded(pub, label)` for
+    `source == "anchor"` only — gives anchors the high
+    starting score the seeded-bonus branch of `scoreOf` is
+    designed to express. Candidate sources stay un-seeded
+    (default 0.5; earn or lose reputation organically).
+
   - **Layer-D BEP-44 put/get round-trip**. anacrolix/torrent's
     `NewAnacrolixDhtServer` builds a `dht.ServerConfig` from
     scratch and does NOT copy `dht.NewDefaultServerConfig`'s
