@@ -6,11 +6,19 @@ import (
 )
 
 // makeInteriorPage builds a synthetic page with a fully formed
-// header (kind / payload-length) and the supplied payload bytes
-// copied in after the header. Pads to totalSize.
+// header (version / kind / payload-length) and the supplied
+// payload bytes copied in after the header. Pads to totalSize.
+//
+// Version is set to BTreeVersion so the per-test "this guard
+// fires" assertions reach the guard they claim to exercise
+// rather than tripping decodeHeader's version check first.
 func makeInteriorPage(t *testing.T, kind PageKind, payload []byte, totalSize int) []byte {
 	t.Helper()
-	hdr := encodeHeader(PageHeader{Kind: kind, PayloadLength: uint16(len(payload))})
+	hdr := encodeHeader(PageHeader{
+		Version:       BTreeVersion,
+		Kind:          kind,
+		PayloadLength: uint16(len(payload)),
+	})
 	page := make([]byte, totalSize)
 	copy(page, hdr)
 	copy(page[PageHeaderSize:], payload)
