@@ -279,6 +279,57 @@ func TestCrawlOnceMalformedMetainfo(t *testing.T) {
 	}
 }
 
+// TestCrawlOnceContextCancelMidLoop covers the
+// `if err := ctx.Err(); err != nil` guard between samples.
+// We supply two samples and have the first fetch cancel the
+// context before returning. The second iteration of the loop
+// must observe ctx.Err() and return early with the partial
+// outcome and the cancellation error.
+func TestCrawlOnceContextCancelMidLoop(t *testing.T) {
+	t.Parallel()
+
+	s1 := krpc.ID{0x11}
+	s2 := krpc.ID{0x22}
+	respConn, done := startBep51Responder(t, []krpc.ID{s1, s2})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var firstSeen bool
+	fetch := func(_ context.Context, ih krpc.ID) ([]byte, error) {
+		// Pretend the fetch succeeded but cancel the parent
+		// context. The next iteration should bail before
+		// invoking fetch again.
+		if !firstSeen {
+			firstSeen = true
+			cancel()
+			return nil, errors.New("simulated fetch error to trigger FetchErrs")
+		}
+		t.Errorf("fetch called after context cancel for ih=%x", ih)
+		return nil, errors.New("should not reach")
+	}
+	sink := func(_ [32]byte, _ bool) {
+		t.Error("sink called despite cancel-only test")
+	}
+
+	srv := newIsolatedDHTServer(t)
+	addr := dht.NewAddr(respConn.LocalAddr())
+
+	outcome, err := dhtindex.CrawlOnce(ctx, srv, addr, krpc.ID{}, fetch, sink)
+	<-done
+
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+	if outcome.FetchErrs != 1 {
+		t.Errorf("FetchErrs = %d, want 1 (the first fetch failed before cancel was observed)", outcome.FetchErrs)
+	}
+	// Second sample must not have been processed.
+	if outcome.Forwarded+outcome.BadSigs+outcome.Unsigned+outcome.Malformed != 0 {
+		t.Errorf("classification counters non-zero: %+v", outcome)
+	}
+}
+
 // TestCrawlOnceNilGuards locks the nil-fetch / nil-sink
 // validation paths. Both must error cleanly rather than
 // panic deep inside the sample query.
