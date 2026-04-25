@@ -237,6 +237,48 @@ func TestCrawlOnceEndToEnd(t *testing.T) {
 	}
 }
 
+// TestCrawlOnceMalformedMetainfo covers the
+// `case perr != nil: out.Malformed++` arm of the
+// classification switch. Fetcher returns garbage bytes so
+// PublisherFromMetainfo's bencode.Unmarshal fails, which
+// must increment Malformed and skip the sink without
+// touching Forwarded/BadSigs/Unsigned.
+func TestCrawlOnceMalformedMetainfo(t *testing.T) {
+	t.Parallel()
+
+	sample := krpc.ID{0xFF}
+	respConn, done := startBep51Responder(t, []krpc.ID{sample})
+
+	fetch := func(ctx context.Context, ih krpc.ID) ([]byte, error) {
+		// Not a valid bencode dictionary — PublisherFromMetainfo
+		// reports a decode error.
+		return []byte("not-bencode"), nil
+	}
+	var sinkCalls int
+	sink := func(_ [32]byte, _ bool) { sinkCalls++ }
+
+	srv := newIsolatedDHTServer(t)
+	addr := dht.NewAddr(respConn.LocalAddr())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	outcome, err := dhtindex.CrawlOnce(ctx, srv, addr, krpc.ID{}, fetch, sink)
+	if err != nil {
+		t.Fatalf("CrawlOnce: %v", err)
+	}
+	<-done
+
+	if outcome.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1", outcome.Malformed)
+	}
+	if outcome.Forwarded != 0 || outcome.BadSigs != 0 || outcome.Unsigned != 0 {
+		t.Errorf("unexpected non-zero counters: %+v", outcome)
+	}
+	if sinkCalls != 0 {
+		t.Errorf("sink called %d times, want 0 (malformed must not forward)", sinkCalls)
+	}
+}
+
 // TestCrawlOnceNilGuards locks the nil-fetch / nil-sink
 // validation paths. Both must error cleanly rather than
 // panic deep inside the sample query.
