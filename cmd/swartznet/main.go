@@ -74,6 +74,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdTrust(rest, stdout, stderr)
 	case "aggregate":
 		return cmdAggregate(rest, stdout, stderr)
+	case "crawl-probe":
+		return cmdCrawlProbe(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -98,6 +100,7 @@ Commands:
   files <infohash> [<idx> <prio>]   List files in a torrent, or set file priority (none/normal/high).
   trust <list|add|remove> ...       Manage the local publisher trust list.
   aggregate <inspect|find> ...      Inspect/query Aggregate (v0.5) index files.
+  crawl-probe --addr <host:port>    One-shot BEP-51 sample_infohashes probe (ops tool).
   version                           Print the version and exit.
   help                              Print this message.
 

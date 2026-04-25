@@ -193,13 +193,48 @@ These remain post-v0.5 follow-ons; none blocks the release.
    project/operator keys; until then, operators can pass keys
    via `BootstrapOptions.AnchorHexes` programmatically.
 2. **BEP-51 crawler wiring** — `Bootstrap.CandidateFromCrawl`
-   exists and is tested, but no engine component calls it.
-   Requires hooking into the anacrolix/dht sample_infohashes
-   stream.
-3. **`peer_announce` endorsement gossip** — `endorsed` field
-   from SPEC §3.3 is documented but the handler doesn't yet
-   extract + route endorsements into
-   `Bootstrap.IngestEndorsement`.
+   exists and is tested, and the three building blocks now
+   land incrementally:
+
+   - `dhtindex.SampleInfohashes` — low-level BEP-51 query
+   - `dhtindex.PublisherFromMetainfo` — (pubkey, sigValid, err)
+     classifier
+   - `dhtindex.CrawlOnce` — one-tick glue: sample + fetch +
+     classify + sink
+
+   A production **MetainfoFetcher** is still pending and
+   harder than it first looks: BEP-9 (`ut_metadata`) only
+   transports the **info dict**, while `snet.pubkey` /
+   `snet.sig` are *top-level* metainfo fields (see
+   `internal/signing/signing.go` — signatures bind the
+   infohash, so they cannot live inside info without
+   recursion). A BEP-9-only crawler therefore never sees the
+   signature and cannot call `CandidateFromCrawl(pk, true)`
+   for anything it discovered via `sample_infohashes`.
+
+   Closing the gap needs one of:
+   - A new LTEP extension (e.g. `ut_signature`) that
+     exchanges the 96-byte `snet.pubkey` + `snet.sig` pair
+     peer-to-peer after the BEP-9 fetch completes;
+   - A tracker / HTTP mirror convention that serves the
+     original signed .torrent bytes keyed by infohash; or
+   - Moving signing to an in-info-dict scheme, which would
+     re-break the "infohash-preserving signed .torrent" guarantee.
+
+   Until one of those lands, Channel-B remains useful for
+   counting activity and for feeding the crawl frontier via
+   `sr.Nodes`, but cannot promote unsigned infohash
+   observations to the "observed publishers" set. The
+   unsigned counter in `CrawlOutcome` lets operators see
+   exactly how many candidates are being skipped.
+3. **`peer_announce` endorsement gossip** — **done**.
+   `internal/swarmsearch/handler.go` routes the `endorsed`
+   field of every peer_announce through
+   `Bootstrap.IngestEndorsement` when the announcing peer
+   has gossiped its own publisher pubkey. Self-endorsements
+   and all-zero pubkeys are filtered. See
+   `swarmsearch/endorsement_test.go` for the integration
+   coverage.
 4. **Production hashcash difficulty** — currently minted at
    D=0. Bumping to D=20 (MinPoWBitsDefault) requires a schema
    bump coordinated with reader enforcement.
