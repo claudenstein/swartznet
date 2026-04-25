@@ -129,6 +129,25 @@ func TestNewBootstrapNilLookup(t *testing.T) {
 	}
 }
 
+// TestNewBootstrapZeroOptionsFillDefaults covers the four
+// default-fill arms (MaxTrackedPublishers, AnchorReputation,
+// CandidateReputation, EndorsementThreshold) plus the nil-log
+// substitution branch. DefaultBootstrapOptions returns all
+// positive values so existing tests bypass these guards;
+// constructing with zero-valued options + nil log forces the
+// fallback assignments to run.
+func TestNewBootstrapZeroOptionsFillDefaults(t *testing.T) {
+	t.Parallel()
+	lookup := newTestLookup()
+	b, err := NewBootstrap(lookup, nil, nil, nil, BootstrapOptions{}, nil)
+	if err != nil {
+		t.Fatalf("NewBootstrap with zero options: %v", err)
+	}
+	if b == nil {
+		t.Fatal("Bootstrap is nil after constructor returned nil error")
+	}
+}
+
 // TestIngestEndorsementOnAdmittedFreshEndorser covers the
 // second `if _, ok := b.endorsements[cand]; !ok { make(...) }`
 // arm — the admitted-but-no-prior-endorsements case. Pre-admit
