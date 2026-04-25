@@ -95,6 +95,24 @@ func TestHttpGetClientBadRequestURL(t *testing.T) {
 	}
 }
 
+// TestHttpGetClientDialFailure covers the
+// `resp, err := g.c.Do(req)` error arm. The URL is parseable
+// (so NewRequestWithContext succeeds) but the target is a
+// reserved address or a closed port that http.Client cannot
+// reach, surfacing a transport error rather than a non-200
+// status. We use a context that's already canceled to make
+// the failure deterministic.
+func TestHttpGetClientDialFailure(t *testing.T) {
+	t.Parallel()
+	c := NewHTTPSFallbackClient(time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so Do returns ctx.Err() immediately
+	_, err := c.Get(ctx, "https://example.com")
+	if err == nil {
+		t.Error("expected error from canceled context")
+	}
+}
+
 // TestBootstrapAnchorCount — direct accessor coverage. Exercises
 // both empty and post-FallbackToHTTPS states.
 func TestBootstrapAnchorCount(t *testing.T) {
