@@ -7,6 +7,7 @@ require (
 	github.com/anacrolix/dht/v2 v2.23.0
 	github.com/anacrolix/torrent v1.61.0
 	github.com/blevesearch/bleve/v2 v2.5.7
+	github.com/klauspost/compress v1.18.5
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	golang.org/x/net v0.47.0
 	golang.org/x/time v0.14.0
@@ -84,7 +85,6 @@ require (
 	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade // indirect
 	github.com/json-iterator/go v1.1.9 // indirect
 	github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 // indirect
-	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.3 // indirect
 	github.com/mattn/go-isatty v0.0.16 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
