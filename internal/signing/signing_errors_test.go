@@ -106,6 +106,19 @@ func TestVerifyFileMissingPath(t *testing.T) {
 	}
 }
 
+// TestVerifyFileReadAllFailsOnDirectory covers the
+// `io.ReadAll(f)` error arm: os.Open succeeds on a directory
+// (Linux semantics) but reading from a directory file
+// descriptor returns EISDIR, surfacing the wrapped
+// "signing: read" error rather than a decode failure.
+func TestVerifyFileReadAllFailsOnDirectory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := signing.VerifyFile(dir); err == nil {
+		t.Error("VerifyFile on a directory should error during read")
+	}
+}
+
 func TestVerifyFileGarbageContents(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
