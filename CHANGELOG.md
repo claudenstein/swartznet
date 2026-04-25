@@ -65,13 +65,44 @@ packages, including the capstone `TestAggregateEndToEnd` that
 exercises publisher → PPMI → subscriber → prefix-query in one
 pass.
 
-Still pending for the full v0.5.0 milestone: engine-level
-plumbing of the BEP-51 crawler into
-`Bootstrap.CandidateFromCrawl`, and of a LocalRecord source
-into the sync-session responder path so nodes actually share
-records (current handler ships a zero-record converged reply).
-Both need live DHT / torrent-engine context and will land as
-follow-on integration commits.
+Status of the BEP-51 crawler track: the primitives now land
+incrementally — `dhtindex.SampleInfohashes` (raw BEP-51 query),
+`dhtindex.PublisherFromMetainfo` (signature classifier), and
+`dhtindex.CrawlOnce` (one-tick glue: sample + fetch + classify
++ sink). A `swartznet crawl-probe --addr <host:port>` ops
+command exercises the primitive against a live peer.
+
+The remaining gap is a *production* MetainfoFetcher: BEP-9
+ut_metadata only transports the info dict, while
+`snet.pubkey` / `snet.sig` are top-level metainfo fields, so
+a BEP-9-only fetcher can't promote crawled infohashes to the
+"observed publishers" set without an additional signature-
+exchange channel. Closing the gap needs either a new LTEP
+extension (e.g. `ut_signature`) or a tracker / HTTP mirror
+convention. Documented in
+[`docs/research/MILESTONE-v0.5.0.md`](docs/research/MILESTONE-v0.5.0.md).
+LocalRecord sync was wired up in earlier commits so nodes do
+share records over the responder path; the engine attaches a
+RecordCache as both source and sink in `engine.New`.
+
+### Added — `swartznet crawl-probe` ops command
+
+One-shot CLI that issues a single BEP-51 `sample_infohashes`
+query against a DHT address and prints the response (samples,
+interval, num, closest nodes). Pure ops tooling — no running
+daemon needed. Useful for validating that a peer supports
+BEP-51 and for hand-inspecting the samples it volunteers
+during Channel-B crawler development. Text + JSON output.
+
+### Added — Engine periodic RecordCache prune
+
+`engine.DefaultRecordCacheMaxAge` (30 days) +
+`DefaultRecordCachePruneInterval` (1 hour). On startup
+`engine.New` launches a goroutine that calls
+`RecordCache.PruneOlderThan` on a ticker so the Aggregate
+cache's TTL is enforced automatically without operator
+intervention. Regtest mode swaps in 200 ms / 500 ms so
+scenario tests can observe the prune cycle.
 
 ### Fixed
 
