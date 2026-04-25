@@ -156,6 +156,18 @@ swartznet files <infohash> 4 high
 swartznet trust list
 swartznet trust add <64-char-hex-pubkey> "Alice's release key"
 swartznet trust remove <64-char-hex-pubkey>
+
+# Aggregate (v0.5+) — inspect a companion-index .bin, search a
+# specific publisher's tree, build a tree from a JSONL record stream
+swartznet aggregate inspect path/to/index.bin
+swartznet aggregate find path/to/index.bin "linux"
+swartznet aggregate build --in records.jsonl --out index.bin
+
+# BEP-51 sample_infohashes probe — diagnostic ops tool. Issues
+# one query against the given DHT peer and prints the response.
+# No running daemon required.
+swartznet crawl-probe --addr router.bittorrent.com:6881
+swartznet crawl-probe --addr <host:port> --json
 ```
 
 ## Backwards compatibility
