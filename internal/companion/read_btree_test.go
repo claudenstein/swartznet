@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -201,6 +202,29 @@ func TestVerifyFingerprintDetectsTamperedLeaf(t *testing.T) {
 	// that verify does NOT quietly accept.
 	if err := r.VerifyFingerprint(); err == nil {
 		t.Fatal("expected tampered leaf to fail VerifyFingerprint")
+	}
+}
+
+// TestVerifyFingerprintCountMismatch covers the
+// `if uint64(count) != r.trailer.NumRecords` arm of
+// VerifyFingerprint. Build a real tree, then artificially
+// inflate the trailer's NumRecords claim by one. The
+// fingerprint hash itself still matches (we don't touch leaves)
+// so the count-vs-claim check is the only thing that catches
+// the mismatch.
+func TestVerifyFingerprintCountMismatch(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 30, []string{"alpha", "beta"}, MinPieceSize)
+	// Inflate the verified trailer's NumRecords. The fingerprint
+	// bytes still match what's reconstructible from the leaves
+	// because we don't mutate any leaf — but the explicit count
+	// guard runs before the fingerprint comparison.
+	r.trailer.NumRecords++
+	err := r.VerifyFingerprint()
+	if err == nil {
+		t.Fatal("expected error for inflated NumRecords")
+	}
+	if !strings.Contains(err.Error(), "trailer claims") {
+		t.Errorf("error = %q, want it to mention 'trailer claims'", err.Error())
 	}
 }
 
