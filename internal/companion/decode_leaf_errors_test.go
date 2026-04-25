@@ -12,6 +12,16 @@ func makeLeafPage(t *testing.T, payload []byte, totalSize int) []byte {
 	return makeInteriorPage(t, PageKindLeaf, payload, totalSize)
 }
 
+// TestDecodeLeafShortPage — page bytes shorter than
+// PageHeaderSize must surface decodeHeader's error rather
+// than panic on an out-of-range slice.
+func TestDecodeLeafShortPage(t *testing.T) {
+	t.Parallel()
+	if _, _, err := DecodeLeaf(make([]byte, PageHeaderSize-1)); err == nil {
+		t.Error("DecodeLeaf should reject sub-header-sized page")
+	}
+}
+
 // TestDecodeLeafBadKind — root/interior pages must be rejected.
 func TestDecodeLeafBadKind(t *testing.T) {
 	t.Parallel()

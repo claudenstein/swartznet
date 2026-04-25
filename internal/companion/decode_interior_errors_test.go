@@ -45,7 +45,11 @@ func TestDecodeInteriorBadKind(t *testing.T) {
 func TestDecodeInteriorPayloadTooLong(t *testing.T) {
 	t.Parallel()
 	page := make([]byte, PageHeaderSize+8)
-	hdr := encodeHeader(PageHeader{Kind: PageKindInterior, PayloadLength: 60000})
+	hdr := encodeHeader(PageHeader{
+		Version:       BTreeVersion,
+		Kind:          PageKindInterior,
+		PayloadLength: 60000,
+	})
 	copy(page, hdr)
 	if _, _, err := DecodeInterior(page); err == nil {
 		t.Error("DecodeInterior should reject impossible payload length")
@@ -59,6 +63,33 @@ func TestDecodeInteriorPayloadTooShort(t *testing.T) {
 	page := makeInteriorPage(t, PageKindInterior, []byte{0xAA}, MinPieceSize)
 	if _, _, err := DecodeInterior(page); err == nil {
 		t.Error("DecodeInterior should reject 1-byte payload")
+	}
+}
+
+// TestDecodeInteriorShortPage — page bytes shorter than
+// PageHeaderSize must surface decodeHeader's error rather
+// than panic on an out-of-range slice. Locks the
+// `if err != nil` arm just below decodeHeader().
+func TestDecodeInteriorShortPage(t *testing.T) {
+	t.Parallel()
+	if _, _, err := DecodeInterior(make([]byte, PageHeaderSize-1)); err == nil {
+		t.Error("DecodeInterior should reject sub-header-sized page")
+	}
+}
+
+// TestDecodeInteriorBadSeparatorVarint — claim 1 child but
+// supply a body whose separator-length varint never
+// terminates (4 consecutive continuation bytes). The
+// `binary.Uvarint(...) n <= 0` guard must fire.
+func TestDecodeInteriorBadSeparatorVarint(t *testing.T) {
+	t.Parallel()
+	body := make([]byte, 0, 16)
+	body = binary.LittleEndian.AppendUint16(body, 1) // 1 child
+	// 4 continuation bytes with no terminator: bad varint.
+	body = append(body, 0x80, 0x80, 0x80, 0x80)
+	page := makeInteriorPage(t, PageKindInterior, body, MinPieceSize)
+	if _, _, err := DecodeInterior(page); err == nil {
+		t.Error("DecodeInterior should reject malformed separator varint")
 	}
 }
 
