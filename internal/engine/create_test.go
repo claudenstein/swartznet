@@ -19,6 +19,14 @@ func newTestEngine(t *testing.T) *engine.Engine {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	// Hermetic: zero out the user-level XDG paths so parallel
+	// tests don't race on real ~/.local/share/swartznet/* files
+	// (bloom, identity, reputation, seed list, trust store).
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	eng, err := engine.New(context.Background(), cfg, log)
 	if err != nil {

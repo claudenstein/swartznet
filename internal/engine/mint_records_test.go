@@ -25,6 +25,10 @@ func newTestEngineWithIdentity(t *testing.T) *engine.Engine {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	// Generate a valid key and write it at 0600 where
 	// identity.LoadOrCreate expects.
@@ -98,6 +102,10 @@ func TestMintAggregateRecordsSilentWithoutIdentity(t *testing.T) {
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
 	cfg.IdentityPath = "" // explicit opt-out — no identity loaded
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	eng, err := engine.New(context.Background(), cfg, log)
