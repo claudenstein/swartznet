@@ -383,19 +383,16 @@ func (b *Bootstrap) admit(pub [32]byte, label, source string) bool {
 	b.mu.Unlock()
 
 	b.lookup.AddIndexer(pub, label)
-	if b.tracker != nil {
-		rep := b.opts.CandidateReputation
-		if source == "anchor" {
-			rep = b.opts.AnchorReputation
-		}
-		// Tracker doesn't have a direct "set score" API; we
-		// instead record enough Hits-Returned events to cause
-		// the Bayesian-smoothed score to land at approximately
-		// the seed. For now we just call RecordReturned once to
-		// put the pubkey on the tracker's radar; a later commit
-		// can seed more precisely.
-		b.tracker.RecordReturned(reputation.PubKey(pub), 0)
-		_ = rep
+	if b.tracker != nil && source == "anchor" {
+		// Mark anchor pubkeys as seeded on the tracker. This
+		// gives them a high starting score via the seeded-bonus
+		// branch of scoreOf, which decays organically over ~6
+		// months — the natural interpretation of opts.AnchorReputation.
+		// Candidate sources (bep51, endorsement) start at the
+		// defaultUnknownScore (0.5) and have to earn or lose
+		// reputation through observed Returned/Confirmed/Flagged
+		// events.
+		b.tracker.MarkSeeded(reputation.PubKey(pub), label)
 	}
 	return true
 }

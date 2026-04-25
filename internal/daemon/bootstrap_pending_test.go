@@ -92,47 +92,45 @@ func TestCandidateFromCrawlAdmitsWhenBloomPolicyAllows(t *testing.T) {
 	}
 }
 
-// TestAdmitWithTrackerAttached — admit takes the tracker
-// branch (line 386-398) when one is wired up. The current
-// implementation calls tracker.RecordReturned(pub, 0), which
-// is a no-op because RecordReturned guards against n<=0 —
-// the comment in admit notes this is a placeholder for a
-// future "set score" API. We don't assert any tracker state
-// change here; this test exists to exercise the branch
-// itself so coverage tools see it executed.
-func TestAdmitWithTrackerAttached(t *testing.T) {
+// TestAdmitAnchorMarksTrackerSeeded — admit with source="anchor"
+// must MarkSeeded the pubkey on the tracker so the lookup's
+// heavy-tail rule can identify trusted publishers and the
+// scoreOf seeded-bonus branch starts the score near 1.0 (then
+// decays organically over ~6 months).
+func TestAdmitAnchorMarksTrackerSeeded(t *testing.T) {
 	t.Parallel()
 	lookup := newTestLookup()
 	tracker := reputation.NewTracker()
 	b, _ := NewBootstrap(lookup, nil, nil, tracker, DefaultBootstrapOptions(), nil)
 
-	pub := pubkeyBytes("admit-tracker")
-	if !b.admit(pub, "test-label", "anchor") {
+	pub := pubkeyBytes("anchor-marks-seeded")
+	if !b.admit(pub, "anchor-label", "anchor") {
 		t.Fatal("admit failed")
 	}
-	if !b.IsAdmitted(pub) {
-		t.Error("admitted set should contain pub after admit")
+	pkHex := reputation.PubKey(pub)
+	if !tracker.IsSeeded(pkHex) {
+		t.Error("anchor admit must MarkSeeded the pubkey on the tracker")
 	}
 }
 
-// TestAdmitAnchorReputationBranch — admit picks
-// AnchorReputation when source=="anchor" and
-// CandidateReputation otherwise. The internal `rep` value
-// is currently discarded (it's part of the same future
-// "set score" placeholder as above) but the branch itself
-// is real and worth exercising for both sides.
-func TestAdmitAnchorReputationBranch(t *testing.T) {
+// TestAdmitCandidateDoesNotSeed — non-anchor sources (bep51,
+// endorsement) must NOT be marked as seeded; they start at the
+// neutral 0.5 default and earn/lose reputation through observed
+// behavior, per the BootstrapOptions docstring.
+func TestAdmitCandidateDoesNotSeed(t *testing.T) {
 	t.Parallel()
 	lookup := newTestLookup()
 	tracker := reputation.NewTracker()
 	b, _ := NewBootstrap(lookup, nil, nil, tracker, DefaultBootstrapOptions(), nil)
 
-	a := pubkeyBytes("admit-anchor-source")
-	c := pubkeyBytes("admit-crawl-source")
-	if !b.admit(a, "lbl-a", "anchor") {
-		t.Error("admit anchor source failed")
-	}
-	if !b.admit(c, "lbl-c", "bep51") {
-		t.Error("admit bep51 source failed")
+	for _, src := range []string{"bep51", "endorsement", "endorsed-bloom", "crawled"} {
+		pub := pubkeyBytes("candidate-" + src)
+		if !b.admit(pub, "lbl", src) {
+			t.Errorf("admit src=%q failed", src)
+			continue
+		}
+		if tracker.IsSeeded(reputation.PubKey(pub)) {
+			t.Errorf("non-anchor source %q must NOT mark tracker as seeded", src)
+		}
 	}
 }
