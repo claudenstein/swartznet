@@ -1,6 +1,7 @@
 package companion
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -45,5 +46,30 @@ func TestBytesPageSourcePieceOOR(t *testing.T) {
 	}
 	if _, err := s.Piece(-1); err == nil {
 		t.Error("Piece(-1) should error")
+	}
+}
+
+// TestAtomicWriteRenameFailure — covers the Rename-error
+// branch in atomicWrite. We plant a non-empty directory at
+// the destination path so os.Rename(tmp, path) fails (can't
+// replace a non-empty dir with a file). The function must
+// surface the error AND clean up the tempfile (not leave a
+// growing collection of *.tmp files next to the destination).
+func TestAtomicWriteRenameFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	// Plant a non-empty dir at the destination.
+	if err := os.MkdirAll(filepath.Join(target, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := atomicWrite(target, []byte("data")); err == nil {
+		t.Error("atomicWrite into non-empty-dir destination should error")
+	}
+	// Tempfile cleanup: the .tmp must NOT linger after the
+	// failed rename.
+	if _, err := os.Stat(target + ".tmp"); err == nil {
+		t.Error(".tmp left behind after rename failure")
 	}
 }
