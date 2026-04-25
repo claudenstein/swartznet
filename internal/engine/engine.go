@@ -2202,21 +2202,6 @@ func (e *Engine) DHTRoutingTableSize() (good int, total int) {
 	return s.GoodNodes, s.Nodes
 }
 
-// DHTServerForTest returns the underlying anacrolix *dht.Server
-// that the Engine's DHT-facing subsystems (Publisher, Lookup,
-// PointerPutter/Getter) drive. Returns nil if DHT is disabled.
-//
-// As the name implies this is an escape hatch for diagnostic
-// tests that need to poke at internal DHT state (e.g. read the
-// BEP-44 store directly to confirm a put landed). It is NOT
-// intended for production use. Leaking this into the stable
-// API surface would couple SwartzNet's packaging to a specific
-// anacrolix release.
-func (e *Engine) DHTServerForTest() *dht.Server {
-	return e.dhtServer()
-}
-
-
 // HandleByInfoHash looks up a *Handle by 20-byte infohash.
 // Returns an error if the infohash is not currently registered
 // with the engine. Intended for test use — the internal/testlab
