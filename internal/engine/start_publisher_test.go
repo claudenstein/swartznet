@@ -108,13 +108,18 @@ func TestStartPublisherFullPath(t *testing.T) {
 	cfg.NoUpload = true
 	cfg.Seed = false
 	cfg.IdentityPath = identPath
-	cfg.ReputationPath = ""
+	// Wire bloom + reputation + tracker so startPublisher's
+	// `if e.tracker != nil { lookup.SetTracker }` and
+	// `if e.bloom != nil { lookup.SetBloom }` arms fire too.
+	cfg.ReputationPath = filepath.Join(dataDir, "rep.json")
 	cfg.SeedListPath = ""
-	cfg.BloomPath = ""
+	cfg.BloomPath = filepath.Join(dataDir, "known-good.bloom")
 	cfg.TrustPath = ""
 	cfg.PublisherManifest = filepath.Join(dataDir, "manifest.json")
 	cfg.CompanionDir = ""
 	cfg.CompanionFollowFile = ""
+	cfg.Regtest = true            // exercises the Regtest publisher options arm
+	cfg.MinIndexerScore = 0.25    // exercises lookup.SetMinIndexerScore arm
 
 	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
