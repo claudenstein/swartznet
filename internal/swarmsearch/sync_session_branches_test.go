@@ -4,6 +4,22 @@ import (
 	"testing"
 )
 
+// TestNeedFrameTooManyIDs covers NeedFrame's
+// `if len(ids) > MaxNeedIDsPerMessage` arm. The session must
+// be in PhaseBegun or PhaseSymbolsFlowing for the phase guard
+// to pass; pass MaxNeedIDsPerMessage+1 ids to trip the cap.
+func TestNeedFrameTooManyIDs(t *testing.T) {
+	t.Parallel()
+	s := NewSyncSession(1, RoleInitiator, nil)
+	if _, err := s.Begin(SyncFilter{}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	tooMany := make([][32]byte, MaxNeedIDsPerMessage+1)
+	if _, err := s.NeedFrame(tooMany); err == nil {
+		t.Error("NeedFrame should reject IDs slice exceeding the cap")
+	}
+}
+
 // TestApplyNeedTxIDMismatch covers ApplyNeed's
 // `if m.TxID != s.txid` arm.
 func TestApplyNeedTxIDMismatch(t *testing.T) {
