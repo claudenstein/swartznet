@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
@@ -136,4 +137,21 @@ func TestStartPublisherFullPath(t *testing.T) {
 	if eng.PointerGetter() == nil {
 		t.Error("PointerGetter should be wired alongside Publisher")
 	}
+
+	// Adding a torrent here drives autoIndex's `if pub != nil`
+	// arm: with the publisher running, autoIndex Submits a
+	// PublishTask after GotInfo fires.
+	srcPath := filepath.Join(dataDir, "src.bin")
+	if err := os.WriteFile(srcPath, []byte(fillTo(32*1024)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mi, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: srcPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.AddTorrentMetaInfo(mi); err != nil {
+		t.Fatal(err)
+	}
+	// Wait briefly for autoIndex to run and Submit to the publisher.
+	time.Sleep(150 * time.Millisecond)
 }
