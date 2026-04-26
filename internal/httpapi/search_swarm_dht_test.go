@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"testing"
 
+	pp "github.com/anacrolix/torrent/peer_protocol"
 	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/httpapi"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
@@ -60,6 +61,78 @@ func TestHTTPSearchWithSwarmConfigured(t *testing.T) {
 	}
 	if len(got.Swarm.Hits) != 0 {
 		t.Errorf("Hits = %d, want 0", len(got.Swarm.Hits))
+	}
+}
+
+// scriptedSender forwards every Query to a callback that
+// synthesises a Result via HandleMessage. Lets the swarm
+// happy-path hit-iteration fire in HTTP-level tests.
+type scriptedSender struct {
+	p    *swarmsearch.Protocol
+	hits []swarmsearch.Hit
+}
+
+func (s *scriptedSender) Send(peer string, payload []byte) error {
+	q, err := swarmsearch.DecodeQuery(payload)
+	if err != nil {
+		return err
+	}
+	go func() {
+		resPayload, _ := swarmsearch.EncodeResult(swarmsearch.Result{
+			TxID:  q.TxID,
+			Total: len(s.hits),
+			Hits:  s.hits,
+		})
+		s.p.HandleMessage(peer, resPayload, nil)
+	}()
+	return nil
+}
+
+// TestHTTPSearchSwarmReturnsHits covers handleSearch's swarm
+// success-with-hits iteration arm. Mark a peer capable, plug
+// in a scriptedSender that synthesises a Result with one
+// hit, and verify the HTTP response carries the hit
+// translated into a SwarmHit.
+func TestHTTPSearchSwarmReturnsHits(t *testing.T) {
+	t.Parallel()
+	sw := swarmsearch.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	scripted := &scriptedSender{
+		p: sw,
+		hits: []swarmsearch.Hit{
+			{IH: bytes.Repeat([]byte{0xab}, 20), N: "Ubuntu Swarm", S: 100, Sz: 6 << 30},
+		},
+	}
+	sw.SetSender(scripted)
+	const peer = "1.2.3.4:6881"
+	sw.NotePeerAdded(peer)
+	sw.OnRemoteHandshake(peer, &pp.ExtendedHandshakeMessage{
+		M: map[pp.ExtensionName]pp.ExtensionNumber{
+			swarmsearch.ExtensionName: 11,
+		},
+	})
+
+	idx := openTempIndex(t)
+	base := startServer(t, httpapi.Options{Index: idx, Swarm: sw})
+
+	body, _ := json.Marshal(httpapi.SearchRequest{
+		Q:              "ubuntu",
+		Swarm:          true,
+		SwarmTimeoutMs: 200,
+	})
+	resp, err := http.Post(base+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got httpapi.SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Swarm == nil || len(got.Swarm.Hits) == 0 {
+		t.Fatalf("expected swarm hits, got %+v", got.Swarm)
+	}
+	if got.Swarm.Hits[0].Name != "Ubuntu Swarm" {
+		t.Errorf("Name = %q, want 'Ubuntu Swarm'", got.Swarm.Hits[0].Name)
 	}
 }
 
