@@ -4,6 +4,30 @@ import (
 	"testing"
 )
 
+// TestApplyNeedTxIDMismatch covers ApplyNeed's
+// `if m.TxID != s.txid` arm.
+func TestApplyNeedTxIDMismatch(t *testing.T) {
+	t.Parallel()
+	s := NewSyncSession(7, RoleResponder, nil)
+	if _, _, err := s.ApplyNeed(SyncNeed{TxID: 99}); err == nil {
+		t.Error("ApplyNeed with mismatched TxID should error")
+	}
+}
+
+// TestApplyNeedTooManyIDs covers the
+// `if len(m.IDs) > MaxNeedIDsPerMessage` cap arm.
+func TestApplyNeedTooManyIDs(t *testing.T) {
+	t.Parallel()
+	s := NewSyncSession(7, RoleResponder, nil)
+	tooMany := make([][]byte, MaxNeedIDsPerMessage+1)
+	for i := range tooMany {
+		tooMany[i] = make([]byte, 32)
+	}
+	if _, _, err := s.ApplyNeed(SyncNeed{TxID: 7, IDs: tooMany}); err == nil {
+		t.Error("ApplyNeed should reject IDs slice exceeding the cap")
+	}
+}
+
 // TestProduceSymbolsWrongPhase covers ProduceSymbols's
 // `if s.phase != PhaseBegun && s.phase != PhaseSymbolsFlowing`
 // error arm. A fresh session is in PhaseIdle; ProduceSymbols
