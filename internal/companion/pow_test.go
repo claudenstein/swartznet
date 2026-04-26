@@ -91,6 +91,23 @@ func TestSignAndMineRecordRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLeadingZeroBitsOfByteSliceEdgeCases covers the two
+// edge-case return arms of the pow.go-local copy of the
+// leading-zero-counter: the all-zero input (outer loop exits
+// without ever entering the inner mask loop) and the empty
+// input (outer loop never iterates).
+func TestLeadingZeroBitsOfByteSliceEdgeCases(t *testing.T) {
+	if got := leadingZeroBitsOfByteSlice(nil); got != 0 {
+		t.Errorf("leadingZeroBitsOfByteSlice(nil) = %d, want 0", got)
+	}
+	if got := leadingZeroBitsOfByteSlice([]byte{0x00, 0x00, 0x00}); got != 24 {
+		t.Errorf("leadingZeroBitsOfByteSlice(3 zeros) = %d, want 24", got)
+	}
+	if got := leadingZeroBitsOfByteSlice([]byte{0x00, 0x00, 0x40}); got != 17 {
+		t.Errorf("leadingZeroBitsOfByteSlice(2 zeros + 0x40) = %d, want 17", got)
+	}
+}
+
 func TestSignAndMineRecordRejectsBadPubLen(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	var ih [20]byte
