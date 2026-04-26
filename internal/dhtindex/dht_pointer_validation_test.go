@@ -54,6 +54,98 @@ func TestPutInfohashPointerSaltTooLarge(t *testing.T) {
 	}
 }
 
+// TestPutInfohashPointerDHTTraversalFails covers the
+// `getput.Put(...)` error arm in PutInfohashPointer. With a
+// pre-canceled context the put traversal aborts before
+// contacting any peers, surfacing the wrapped "put pointer"
+// error.
+func TestPutInfohashPointerDHTTraversalFails(t *testing.T) {
+	t.Parallel()
+	srv := newIsolatedDHTServer(t)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put, err := dhtindex.NewAnacrolixPutter(srv, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ih [20]byte
+	ih[0] = 0xab
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := put.PutInfohashPointer(ctx, []byte("salt"), ih); err == nil {
+		t.Error("PutInfohashPointer with canceled ctx should error from getput.Put")
+	}
+}
+
+// TestPutDHTTraversalFails covers AnacrolixPutter.Put's
+// getput.Put error arm. Same canceled-context pattern as the
+// pointer-side test.
+func TestPutDHTTraversalFails(t *testing.T) {
+	t.Parallel()
+	srv := newIsolatedDHTServer(t)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put, err := dhtindex.NewAnacrolixPutter(srv, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	val := dhtindex.KeywordValue{
+		Hits: []dhtindex.KeywordHit{
+			{IH: []byte(strings.Repeat("\x01", 20)), N: "ubuntu"},
+		},
+	}
+	if err := put.Put(ctx, []byte("salt"), val); err == nil {
+		t.Error("Put with canceled ctx should error from getput.Put")
+	}
+}
+
+// TestGetPPMIDHTTraversalFails covers AnacrolixGetter.GetPPMI's
+// getput.Get error arm.
+func TestGetPPMIDHTTraversalFails(t *testing.T) {
+	t.Parallel()
+	srv := newIsolatedDHTServer(t)
+	get, err := dhtindex.NewAnacrolixGetter(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pub [32]byte
+	pub[0] = 0xab
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := get.GetPPMI(ctx, pub); err == nil {
+		t.Error("GetPPMI with canceled ctx should error from getput.Get")
+	}
+}
+
+// TestPutPPMIDHTTraversalFails covers AnacrolixPutter.PutPPMI's
+// getput.Put error arm.
+func TestPutPPMIDHTTraversalFails(t *testing.T) {
+	t.Parallel()
+	srv := newIsolatedDHTServer(t)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put, err := dhtindex.NewAnacrolixPutter(srv, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	val := dhtindex.PPMIValue{
+		IH: []byte(strings.Repeat("\x01", 20)),
+	}
+	if err := put.PutPPMI(ctx, val); err == nil {
+		t.Error("PutPPMI with canceled ctx should error from getput.Put")
+	}
+}
+
 // TestGetInfohashPointerDHTTraversalFails covers the
 // `res, _, err := getput.Get(...); if err != nil { return ... }`
 // arm. With an isolated DHT server (no peers, Passive mode)
