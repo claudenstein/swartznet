@@ -13,6 +13,59 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
+// TestRestoreSessionEntryQueueOrderBumpsCounter covers
+// restoreEntry's `if entry.QueueOrder > e.nextQueueOrder`
+// arm. A session manifest with a high QueueOrder must lift
+// the engine's internal counter so subsequently-added
+// torrents get fresh order numbers above the restored set.
+func TestRestoreSessionEntryQueueOrderBumpsCounter(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+
+	var ih [20]byte
+	if _, err := rand.Read(ih[:]); err != nil {
+		t.Fatal(err)
+	}
+	hexIH := hex.EncodeToString(ih[:])
+	magnet := "magnet:?xt=urn:btih:" + hexIH
+
+	writeSessionManifest(t, dataDir, []sessionEntryJSON{
+		{
+			InfoHash:   hexIH,
+			AddedVia:   "magnet",
+			MagnetURI:  magnet,
+			QueueOrder: 999,
+			Indexing:   true,
+		},
+	})
+
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	defer eng.Close()
+	if err := eng.RestoreSession(); err != nil {
+		t.Fatalf("RestoreSession: %v", err)
+	}
+
+	// Sanity: snapshot should reflect the restored torrent.
+	snaps := eng.TorrentSnapshots()
+	if len(snaps) != 1 {
+		t.Fatalf("len(snaps) = %d, want 1", len(snaps))
+	}
+}
+
 // TestRestoreSessionPausedEntryDisablesData covers the
 // previously-uncovered entry.Paused branch in restoreEntry.
 // Hand-crafting a session manifest with a paused magnet entry
