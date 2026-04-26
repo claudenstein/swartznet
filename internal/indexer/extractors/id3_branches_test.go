@@ -2,6 +2,7 @@ package extractors
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,58 @@ func TestID3ExtractorPaddingOnly(t *testing.T) {
 	}
 	if chunks != nil {
 		t.Errorf("got %d chunks, want nil for padding-only tag", len(chunks))
+	}
+}
+
+// TestID3ExtractorUnknownFrameContinues covers the
+// `label := id3Label(id); if label == "" { continue }` arm.
+// XYZ1 isn't a known frame — skipped silently while the
+// neighbouring TIT2 frame still surfaces.
+func TestID3ExtractorUnknownFrameContinues(t *testing.T) {
+	t.Parallel()
+	tag := buildID3v24Tag(map[string]string{
+		"XYZ1": "ignored",
+		"TIT2": "Real Title",
+	})
+	chunks, err := NewID3Extractor().Extract(bytes.NewReader(tag), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+	got := chunks[0].Text
+	if !strings.Contains(got, "Title: Real Title") {
+		t.Errorf("missing Real Title in:\n%s", got)
+	}
+	if strings.Contains(got, "XYZ1") || strings.Contains(got, "ignored") {
+		t.Errorf("unknown-frame leaked into output:\n%s", got)
+	}
+}
+
+// TestID3ExtractorEmptyTextContinues covers the
+// `text := decodeID3Text(...); if text == "" { continue }` arm.
+// Build a TIT2 frame whose body decodes to "".
+func TestID3ExtractorEmptyTextContinues(t *testing.T) {
+	t.Parallel()
+	// Empty UTF-8 text frame: encoding=3, no payload bytes.
+	tag := buildID3v24Tag(map[string]string{
+		"TIT2": "",
+		"TPE1": "Real Artist",
+	})
+	chunks, err := NewID3Extractor().Extract(bytes.NewReader(tag), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+	got := chunks[0].Text
+	if strings.Contains(got, "Title:") {
+		t.Errorf("empty-text frame leaked into output:\n%s", got)
+	}
+	if !strings.Contains(got, "Real Artist") {
+		t.Errorf("expected Artist field, got:\n%s", got)
 	}
 }
 
