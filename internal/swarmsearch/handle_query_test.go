@@ -1,6 +1,7 @@
 package swarmsearch_test
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -61,6 +62,26 @@ func TestHandleQueryShortQueryCharges(t *testing.T) {
 	if got := p.MisbehaviorScore(peer); got == 0 {
 		t.Error("MisbehaviorScore should be non-zero after a too-short query")
 	}
+}
+
+// TestHandleQueryReplyErrorLogged covers handleQuery's
+// `if err := reply(payloadOut); err != nil { return }` arm.
+// A reply closure that returns an error must be tolerated —
+// handleQuery debug-logs and returns rather than panicking
+// or retrying.
+func TestHandleQueryReplyErrorLogged(t *testing.T) {
+	t.Parallel()
+	p := swarmsearch.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p.SetSearcher(nopSearcher{})
+
+	body, err := swarmsearch.EncodeQuery(swarmsearch.Query{TxID: 6, Q: "ubuntu", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingReply := func(_ []byte) error {
+		return errors.New("simulated reply send failure")
+	}
+	p.HandleMessage("1.2.3.4:6881", body, failingReply)
 }
 
 // TestHandleQueryNilReplyDecodeOnlyMode covers the
