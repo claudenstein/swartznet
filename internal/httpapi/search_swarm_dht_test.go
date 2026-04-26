@@ -63,6 +63,46 @@ func TestHTTPSearchWithSwarmConfigured(t *testing.T) {
 	}
 }
 
+// TestHTTPSearchDHTQueryError covers handleSearch's
+// `if err != nil { dhtResp.Error = err.Error() }` arm in the
+// DHT path. dhtindex.Lookup.Query rejects queries that
+// produce no tokens — passing an all-stopword query
+// ("the of") makes Tokenize return empty and Lookup.Query
+// surfaces the error. The HTTP layer must still respond 200
+// and put the error string in the dht.error field.
+func TestHTTPSearchDHTQueryError(t *testing.T) {
+	t.Parallel()
+	// Need at least one indexer registered for Lookup.Query
+	// to even attempt tokenisation.
+	lookup := dhtindex.NewLookup(emptyDHTGetter{})
+	idx := openTempIndex(t)
+	base := startServer(t, httpapi.Options{Index: idx, Lookup: lookup})
+
+	body, _ := json.Marshal(httpapi.SearchRequest{
+		Q:            "the of", // all-stopword → Tokenize returns empty
+		DHT:          true,
+		DHTTimeoutMs: 50,
+	})
+	resp, err := http.Post(base+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d (expected 200 even on DHT-side error)", resp.StatusCode)
+	}
+	var got httpapi.SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DHT == nil {
+		t.Fatal("DHT result should not be nil when Lookup is configured")
+	}
+	if got.DHT.Error == "" {
+		t.Errorf("expected DHT.Error to be populated, got %q", got.DHT.Error)
+	}
+}
+
 // TestHTTPSearchWithDHTConfigured covers the Lookup branch in
 // handleSearch. A Lookup wrapped around an emptyDHTGetter with no
 // indexers registered returns IndexersAsked=0 and an empty hits
