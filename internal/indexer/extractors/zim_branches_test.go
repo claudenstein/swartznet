@@ -110,6 +110,74 @@ func TestZimExtractorSkipsEmptyDecodedText(t *testing.T) {
 	}
 }
 
+// TestZimDispatchByExtensionFallback covers the
+// `strings.EqualFold(filepath.Ext(c.Path), ".zim") { return true }`
+// arm in zim's init claims. The existing dispatch test goes
+// through Dispatch which fills MIME from the path, so the
+// MIME-prefix arm above always fires first. Pass a
+// non-zim MIME so only the extension-fallback arm matches.
+func TestZimDispatchByExtensionFallback(t *testing.T) {
+	t.Parallel()
+	got, _ := Dispatch(Candidate{Path: "wikipedia.zim", MIME: "application/octet-stream", Size: 1024})
+	if got == nil || got.Name() != "zim" {
+		t.Errorf("Dispatch(.zim, octet-stream) = %v, want zim extractor", got)
+	}
+}
+
+// patchClusterTypeByte rewrites the cluster's type byte (the
+// first byte of the cluster blob). cluster 0's offset lives in
+// the cluster ptr list at clusterPtrPos+0*8.
+func patchClusterTypeByte(t *testing.T, zim []byte, clusterIdx uint32, newType byte) []byte {
+	t.Helper()
+	hdr := readZimHeaderForTest(t, zim)
+	cpAt := int64(hdr.ClusterPtrPos) + int64(clusterIdx)*8
+	clusterPos := int64(binary.LittleEndian.Uint64(zim[cpAt : cpAt+8]))
+	zim[clusterPos] = newType
+	return zim
+}
+
+// TestZimExtractorXZClusterTypeRejected covers readZimCluster's
+// `zimCompXZ → "XZ/LZMA2 clusters not supported in v1"` arm.
+// Patch a valid uncompressed cluster's type byte to 4 (XZ); the
+// readZimCluster err is swallowed by Extract's `continue`, so
+// the resulting chunk list is empty.
+func TestZimExtractorXZClusterTypeRejected(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("content")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	zim = patchClusterTypeByte(t, zim, 0, 4) // XZ
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil for XZ-typed cluster", len(chunks))
+	}
+}
+
+// TestZimExtractorUnknownClusterTypeRejected covers readZimCluster's
+// `default → "unknown cluster compression"` arm. Patch the type
+// byte to a value outside {1, 2, 4} so the switch's default fires.
+func TestZimExtractorUnknownClusterTypeRejected(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("content")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	zim = patchClusterTypeByte(t, zim, 0, 6) // unknown
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil for unknown cluster type", len(chunks))
+	}
+}
+
 // TestZimExtractorRespectsMaxBytesCutoff covers the early-break
 // arm `if emitted >= maxBytes { break }` in Extract. Build a
 // 2-article ZIM whose first article alone overflows maxBytes;
