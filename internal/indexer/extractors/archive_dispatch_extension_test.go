@@ -26,6 +26,33 @@ func TestArchiveClaimsByExtensionWithUnknownMIME(t *testing.T) {
 	}
 }
 
+// TestArchiveExtractorDirOnlyZipReturnsNil covers the
+// `if len(names) == 0 { return nil, nil }` arm in Extract. A
+// zip whose ONLY entries are directories yields zero file
+// names — extractor returns nil rather than emitting an empty
+// chunk.
+func TestArchiveExtractorDirOnlyZipReturnsNil(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range []string{"docs/", "src/", "tests/"} {
+		if _, err := zw.Create(name); err != nil {
+			t.Fatalf("zip create %q: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+
+	chunks, err := NewArchiveExtractor().Extract(bytes.NewReader(buf.Bytes()), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil for dir-only zip", len(chunks))
+	}
+}
+
 // TestZipMemberNamesSkipsEmptyName covers the
 // `if f.Name == "" { continue }` arm in zipMemberNames. The
 // archive/zip writer accepts an empty-name entry; on read, the
