@@ -90,6 +90,23 @@ func TestFallbackToHTTPSRejectsEmptyURL(t *testing.T) {
 	}
 }
 
+// TestFallbackToHTTPSNilClientFallsBackToDefault covers
+// `if client == nil { client = NewHTTPSFallbackClient(0) }`.
+// The pre-existing tests all pass an explicit fakeHTTPSClient
+// so the nil-client substitution arm stayed uncovered.
+// Pre-cancel the context so the substituted real client errors
+// out immediately rather than making a network call.
+func TestFallbackToHTTPSNilClientFallsBackToDefault(t *testing.T) {
+	lookup := newTestLookup()
+	b, _ := NewBootstrap(lookup, nil, nil, nil, DefaultBootstrapOptions(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := b.FallbackToHTTPS(ctx, "https://example.com", nil); err == nil {
+		t.Error("expected error from canceled context with default client")
+	}
+}
+
 func TestFallbackToHTTPSPropagatesGetError(t *testing.T) {
 	lookup := newTestLookup()
 	b, _ := NewBootstrap(lookup, nil, nil, nil, DefaultBootstrapOptions(), nil)

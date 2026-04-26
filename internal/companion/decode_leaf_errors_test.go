@@ -94,6 +94,38 @@ func TestEncodeTrailerBadVersion(t *testing.T) {
 	}
 }
 
+// TestDecodeTrailerBadKind — DecodeTrailer must reject a
+// page whose header decodes successfully but whose Kind is
+// not PageKindTrailer.
+func TestDecodeTrailerBadKind(t *testing.T) {
+	t.Parallel()
+	body := make([]byte, TrailerPayloadSize)
+	page := makeInteriorPage(t, PageKindLeaf, body, MinPieceSize)
+	if _, err := DecodeTrailer(page); err == nil {
+		t.Error("DecodeTrailer should reject leaf-kind page")
+	}
+}
+
+// TestDecodeTrailerWrongPayloadLength — a trailer whose
+// header.PayloadLength differs from TrailerPayloadSize must be
+// rejected before any body bytes are read.
+func TestDecodeTrailerWrongPayloadLength(t *testing.T) {
+	t.Parallel()
+	// Hand-build a page with PageKindTrailer but wrong payload
+	// length. encodeHeader clamps to uint16; pass a length
+	// smaller than TrailerPayloadSize.
+	page := make([]byte, MinPieceSize)
+	hdr := encodeHeader(PageHeader{
+		Version:       BTreeVersion,
+		Kind:          PageKindTrailer,
+		PayloadLength: 32, // not TrailerPayloadSize
+	})
+	copy(page, hdr)
+	if _, err := DecodeTrailer(page); err == nil {
+		t.Error("DecodeTrailer should reject mismatched PayloadLength")
+	}
+}
+
 // TestDecodeTrailerBadVersion — DecodeTrailer must reject a
 // trailer whose first payload byte (TrailerVersion) is not
 // 0x01. Hand-build the page since EncodeTrailer rejects bad

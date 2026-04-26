@@ -41,6 +41,53 @@ func TestCreateTorrentFileRenameFailure(t *testing.T) {
 	}
 }
 
+// TestCreateTorrentWalkDirFails covers CreateTorrent's
+// `if err != nil { return nil, fmt.Errorf("stat tree: %w", err) }`
+// arm. Plant a 0o000 subdirectory under opts.Root so
+// filepath.WalkDir's pre-walk size pass receives a permission
+// error from the os.ReadDir call inside.
+//
+// Skipped when running as root (which can read any directory)
+// — the test only applies to non-privileged processes.
+func TestCreateTorrentWalkDirFails(t *testing.T) {
+	t.Parallel()
+	if os.Getuid() == 0 {
+		t.Skip("running as root, chmod 0 doesn't deny access")
+	}
+	eng := newTestEngine(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ok.bin"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(root, "denied")
+	if err := os.Mkdir(bad, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o755) })
+	if _, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: root}); err == nil {
+		t.Error("CreateTorrent should fail when WalkDir cannot read a subdirectory")
+	}
+}
+
+// TestCreateTorrentFileMissingRootPropagates covers the
+// `mi, err := e.CreateTorrent(opts); if err != nil` arm in
+// CreateTorrentFile. Pass an opts.Root that doesn't exist so
+// CreateTorrent fails on os.Stat — the wrapping function must
+// surface the error without writing any file.
+func TestCreateTorrentFileMissingRootPropagates(t *testing.T) {
+	t.Parallel()
+	eng := newTestEngine(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no-such-root")
+	out := filepath.Join(dir, "out.torrent")
+	if _, _, err := eng.CreateTorrentFile(engine.CreateTorrentOptions{Root: missing}, out); err == nil {
+		t.Error("CreateTorrentFile should fail when Root is missing")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf(".torrent should not exist after failure, stat err = %v", err)
+	}
+}
+
 // TestCreateTorrentFileBadSigningKeyPropagatesError covers the
 // "sign:" wrapped error branch in CreateTorrentFile: SignWith
 // receives a private key of wrong length so signing.SignBytes

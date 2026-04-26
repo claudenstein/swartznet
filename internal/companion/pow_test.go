@@ -91,12 +91,49 @@ func TestSignAndMineRecordRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLeadingZeroBitsOfByteSliceEdgeCases covers the two
+// edge-case return arms of the pow.go-local copy of the
+// leading-zero-counter: the all-zero input (outer loop exits
+// without ever entering the inner mask loop) and the empty
+// input (outer loop never iterates).
+func TestLeadingZeroBitsOfByteSliceEdgeCases(t *testing.T) {
+	if got := leadingZeroBitsOfByteSlice(nil); got != 0 {
+		t.Errorf("leadingZeroBitsOfByteSlice(nil) = %d, want 0", got)
+	}
+	if got := leadingZeroBitsOfByteSlice([]byte{0x00, 0x00, 0x00}); got != 24 {
+		t.Errorf("leadingZeroBitsOfByteSlice(3 zeros) = %d, want 24", got)
+	}
+	if got := leadingZeroBitsOfByteSlice([]byte{0x00, 0x00, 0x40}); got != 17 {
+		t.Errorf("leadingZeroBitsOfByteSlice(2 zeros + 0x40) = %d, want 17", got)
+	}
+}
+
 func TestSignAndMineRecordRejectsBadPubLen(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	var ih [20]byte
 	shortPub := make(ed25519.PublicKey, 16)
 	if _, err := SignAndMineRecord(priv, shortPub, "x", ih, 0, 8); err == nil {
 		t.Fatal("expected error for wrong-length pubkey")
+	}
+}
+
+// TestSignAndMineRecordPropagatesPoWError covers the
+// `if err != nil` arm after MineRecordPoW. Pass bits=41 so
+// MineRecordPoW's "cost prohibitive" guard fires; the wrapped
+// error must surface from SignAndMineRecord without producing
+// a signed record.
+func TestSignAndMineRecordPropagatesPoWError(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	var ih [20]byte
+	r, err := SignAndMineRecord(priv, pub, "x", ih, 0, 41)
+	if err == nil {
+		t.Fatal("expected error for prohibitive bits=41")
+	}
+	// The returned record is the partial mined value; its Sig
+	// must remain zero since signing was skipped.
+	var zeroSig [64]byte
+	if r.Sig != zeroSig {
+		t.Error("Sig should be zero on PoW failure (signing skipped)")
 	}
 }
 

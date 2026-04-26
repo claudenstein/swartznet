@@ -63,6 +63,96 @@ func TestHTTPSearchWithSwarmConfigured(t *testing.T) {
 	}
 }
 
+// fixedHitGetter returns the same KeywordValue for every
+// (pubkey, salt) pair. Used to drive Lookup.Query into its
+// happy path so handleSearch's hit-iteration loop fires.
+type fixedHitGetter struct {
+	hits []dhtindex.KeywordHit
+}
+
+func (g fixedHitGetter) Get(_ context.Context, _ [32]byte, _ []byte) (dhtindex.KeywordValue, error) {
+	return dhtindex.KeywordValue{Hits: g.hits}, nil
+}
+
+// TestHTTPSearchDHTReturnsHits covers handleSearch's
+// `for _, h := range out.Hits { dhtResp.Hits = append(...) }`
+// arm. Wire a Lookup with a fixedHitGetter that returns one
+// hit, register an indexer, then post a query and verify the
+// HTTP response carries the hit translated into a DHTHit.
+func TestHTTPSearchDHTReturnsHits(t *testing.T) {
+	t.Parallel()
+	getter := fixedHitGetter{hits: []dhtindex.KeywordHit{
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "Ubuntu DHT", S: 100, F: 4, Sz: 6 << 30},
+	}}
+	lookup := dhtindex.NewLookup(getter)
+	var pub [32]byte
+	pub[0] = 0xab
+	lookup.AddIndexer(pub, "indexer-one")
+	idx := openTempIndex(t)
+	base := startServer(t, httpapi.Options{Index: idx, Lookup: lookup})
+
+	body, _ := json.Marshal(httpapi.SearchRequest{
+		Q:            "ubuntu",
+		DHT:          true,
+		DHTTimeoutMs: 200,
+	})
+	resp, err := http.Post(base+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got httpapi.SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DHT == nil || len(got.DHT.Hits) == 0 {
+		t.Fatalf("expected DHT hits, got %+v", got.DHT)
+	}
+	if got.DHT.Hits[0].Name != "Ubuntu DHT" {
+		t.Errorf("hit Name = %q, want 'Ubuntu DHT'", got.DHT.Hits[0].Name)
+	}
+}
+
+// TestHTTPSearchDHTQueryError covers handleSearch's
+// `if err != nil { dhtResp.Error = err.Error() }` arm in the
+// DHT path. dhtindex.Lookup.Query rejects queries that
+// produce no tokens — passing an all-stopword query
+// ("the of") makes Tokenize return empty and Lookup.Query
+// surfaces the error. The HTTP layer must still respond 200
+// and put the error string in the dht.error field.
+func TestHTTPSearchDHTQueryError(t *testing.T) {
+	t.Parallel()
+	// Need at least one indexer registered for Lookup.Query
+	// to even attempt tokenisation.
+	lookup := dhtindex.NewLookup(emptyDHTGetter{})
+	idx := openTempIndex(t)
+	base := startServer(t, httpapi.Options{Index: idx, Lookup: lookup})
+
+	body, _ := json.Marshal(httpapi.SearchRequest{
+		Q:            "the of", // all-stopword → Tokenize returns empty
+		DHT:          true,
+		DHTTimeoutMs: 50,
+	})
+	resp, err := http.Post(base+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d (expected 200 even on DHT-side error)", resp.StatusCode)
+	}
+	var got httpapi.SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DHT == nil {
+		t.Fatal("DHT result should not be nil when Lookup is configured")
+	}
+	if got.DHT.Error == "" {
+		t.Errorf("expected DHT.Error to be populated, got %q", got.DHT.Error)
+	}
+}
+
 // TestHTTPSearchWithDHTConfigured covers the Lookup branch in
 // handleSearch. A Lookup wrapped around an emptyDHTGetter with no
 // indexers registered returns IndexersAsked=0 and an empty hits

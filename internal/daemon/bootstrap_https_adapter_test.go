@@ -95,6 +95,24 @@ func TestHttpGetClientBadRequestURL(t *testing.T) {
 	}
 }
 
+// TestHttpGetClientDialFailure covers the
+// `resp, err := g.c.Do(req)` error arm. The URL is parseable
+// (so NewRequestWithContext succeeds) but the target is a
+// reserved address or a closed port that http.Client cannot
+// reach, surfacing a transport error rather than a non-200
+// status. We use a context that's already canceled to make
+// the failure deterministic.
+func TestHttpGetClientDialFailure(t *testing.T) {
+	t.Parallel()
+	c := NewHTTPSFallbackClient(time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so Do returns ctx.Err() immediately
+	_, err := c.Get(ctx, "https://example.com")
+	if err == nil {
+		t.Error("expected error from canceled context")
+	}
+}
+
 // TestBootstrapAnchorCount — direct accessor coverage. Exercises
 // both empty and post-FallbackToHTTPS states.
 func TestBootstrapAnchorCount(t *testing.T) {
@@ -126,6 +144,35 @@ func TestNewBootstrapNilLookup(t *testing.T) {
 	t.Parallel()
 	if _, err := NewBootstrap(nil, nil, nil, nil, DefaultBootstrapOptions(), nil); err == nil {
 		t.Error("NewBootstrap(nil lookup) should error")
+	}
+}
+
+// TestIngestEndorsementBloomPolicyFallback covers the
+// `if b.bloomPolicy(cand) { admit("endorsed-bloom", ...) }`
+// arm. EndorsementThreshold=10 ensures countStrongEndorsers
+// with a single endorser falls short, forcing the policy
+// fallback. With bloom + tracker wired, bloomPolicy(cand)
+// returns true via tracker.Threshold(cand, 0.3) — the
+// default unknown score of 0.5 clears 0.3 — so admit fires.
+func TestIngestEndorsementBloomPolicyFallback(t *testing.T) {
+	t.Parallel()
+	lookup := newTestLookup()
+	bf := reputation.NewBloomFilter(16, 0.01)
+	tr := reputation.NewTracker()
+	opts := DefaultBootstrapOptions()
+	opts.EndorsementThreshold = 10
+	b, err := NewBootstrap(lookup, nil, bf, tr, opts, nil)
+	if err != nil {
+		t.Fatalf("NewBootstrap: %v", err)
+	}
+
+	endorser := pubkeyBytes("endorser-1")
+	cand := pubkeyBytes("cand-1")
+	if !b.IngestEndorsement(endorser, cand) {
+		t.Error("IngestEndorsement should admit via bloom-policy fallback")
+	}
+	if !b.IsAdmitted(cand) {
+		t.Error("cand should be admitted after bloom-policy fallback")
 	}
 }
 

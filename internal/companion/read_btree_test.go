@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -201,6 +202,315 @@ func TestVerifyFingerprintDetectsTamperedLeaf(t *testing.T) {
 	// that verify does NOT quietly accept.
 	if err := r.VerifyFingerprint(); err == nil {
 		t.Fatal("expected tampered leaf to fail VerifyFingerprint")
+	}
+}
+
+// pieceErrSource wraps a PageSource and returns a synthetic
+// error for one specific piece index. Used to drive Find's
+// per-piece I/O error arms without rebuilding the tree.
+type pieceErrSource struct {
+	inner   PageSource
+	failIdx int
+}
+
+func (p *pieceErrSource) Piece(i int) ([]byte, error) {
+	if i == p.failIdx {
+		return nil, fmt.Errorf("simulated piece %d fetch error", i)
+	}
+	return p.inner.Piece(i)
+}
+func (p *pieceErrSource) NumPieces() int { return p.inner.NumPieces() }
+
+// TestFindRootPieceFetchError covers Find's
+// `rootPage, err := r.src.Piece(0); if err != nil` arm. After
+// a successful OpenBTree (which only reads the trailer page),
+// swap the source for one that fails on piece 0 so Find's
+// subsequent fetch errors before any walk.
+func TestFindRootPieceFetchError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &pieceErrSource{inner: r.src, failIdx: 0}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when root piece fetch errors")
+	}
+}
+
+// TestFindLeafPieceFetchError covers Find's
+// `page, err := r.src.Piece(idx); if err != nil` arm for the
+// leaf-walk loop. We swap the source to fail on piece 1 (the
+// first leaf) after walkToLeaves has already gathered indices.
+// walkToLeaves itself reads piece 0, then Find iterates the
+// leaf indices and re-fetches each one — that re-fetch is the
+// path under test.
+func TestFindLeafPieceFetchError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Save inner so walkToLeaves can read piece 0 (the root).
+	// Then fail on the first leaf piece so Find's outer loop
+	// errors before decoding any leaf.
+	src := r.src
+	r.src = &leafFailSource{inner: src, leafFailIdx: 1}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when a leaf piece fetch errors")
+	}
+}
+
+// leafFailSource fails on a specific leaf index, but only on
+// the second-or-later call. walkToLeaves and Find both fetch
+// the leaf piece — the first call (walkToLeaves) succeeds so
+// the walk completes, the second call (Find's outer loop)
+// fails so Find's leaf-fetch error arm fires.
+type leafFailSource struct {
+	inner       PageSource
+	leafFailIdx int
+	hits        int
+}
+
+func (l *leafFailSource) Piece(i int) ([]byte, error) {
+	if i == l.leafFailIdx {
+		l.hits++
+		if l.hits >= 2 {
+			return nil, fmt.Errorf("simulated leaf %d fetch error", i)
+		}
+	}
+	return l.inner.Piece(i)
+}
+func (l *leafFailSource) NumPieces() int { return l.inner.NumPieces() }
+
+// TestWalkToLeavesUnexpectedKind covers walkToLeaves's
+// `if hdr.Kind != PageKindInterior && != Root` arm. Build a
+// tree, then on Find's recursion swap piece 1 for a valid
+// trailer-kind page so decodeHeader succeeds but the kind
+// gate rejects.
+func TestWalkToLeavesUnexpectedKind(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Fabricate a valid trailer-kind page header (kind 0x03).
+	trailerHdr := encodeHeader(PageHeader{
+		Version: BTreeVersion,
+		Kind:    PageKindTrailer,
+	})
+	page := make([]byte, MinPieceSize)
+	copy(page, trailerHdr)
+	r.src = &constPieceSource{inner: r.src, idx: 1, payload: page}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when walkToLeaves hits a trailer-kind sub-page")
+	}
+}
+
+// TestFindRootHeaderDecodeError covers Find's
+// `decodeHeader(rootPage) error` arm. Return zero-bytes for
+// piece 0 so decodeHeader fails on the magic check before
+// walkToLeaves runs.
+func TestFindRootHeaderDecodeError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &constPieceSource{inner: r.src, idx: 0, payload: make([]byte, MinPieceSize)}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when root header decode errors")
+	}
+}
+
+// TestFindRootKindNotRoot covers Find's
+// `if hdr.Kind != PageKindRoot` arm. Return a leaf-kind page
+// for piece 0 so decodeHeader succeeds but the kind check
+// rejects.
+func TestFindRootKindNotRoot(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Fabricate a valid leaf-kind page (just header) for piece 0.
+	leafHdr := encodeHeader(PageHeader{
+		Version: BTreeVersion,
+		Kind:    PageKindLeaf,
+	})
+	page := make([]byte, MinPieceSize)
+	copy(page, leafHdr)
+	r.src = &constPieceSource{inner: r.src, idx: 0, payload: page}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when piece 0 is not root kind")
+	}
+}
+
+type constPieceSource struct {
+	inner   PageSource
+	idx     int
+	payload []byte
+}
+
+func (c *constPieceSource) Piece(i int) ([]byte, error) {
+	if i == c.idx {
+		return c.payload, nil
+	}
+	return c.inner.Piece(i)
+}
+func (c *constPieceSource) NumPieces() int { return c.inner.NumPieces() }
+
+// TestFindLeafDecodeErrorReFetch covers Find's
+// `_, recs, err := DecodeLeaf(page); if err != nil` arm. The
+// existing TestFindLeafDecodeError corrupts the leaf bytes
+// before any read, so walkToLeaves's decodeHeader trips first.
+// Use a stateful source that returns the real leaf on the
+// walk, then garbage on Find's re-fetch — DecodeLeaf inside
+// the outer loop fires.
+func TestFindLeafDecodeErrorReFetch(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &leafGarbageSource{inner: r.src, garbageIdx: 1}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when leaf decode produces an error on re-fetch")
+	}
+}
+
+type leafGarbageSource struct {
+	inner      PageSource
+	garbageIdx int
+	hits       int
+}
+
+func (l *leafGarbageSource) Piece(i int) ([]byte, error) {
+	if i == l.garbageIdx {
+		l.hits++
+		if l.hits >= 2 {
+			// Return same-sized buffer of zeros — fails
+			// decodeHeader's magic check inside DecodeLeaf.
+			real, err := l.inner.Piece(i)
+			if err != nil {
+				return nil, err
+			}
+			return make([]byte, len(real)), nil
+		}
+	}
+	return l.inner.Piece(i)
+}
+func (l *leafGarbageSource) NumPieces() int { return l.inner.NumPieces() }
+
+// TestFindDropsRecordsWithBadSig covers Find's
+// `if err := VerifyRecordSig(rec); err != nil { continue }`
+// arm. Build records normally, corrupt one record's signature
+// before passing to BuildBTree (the trailer is signed over the
+// resulting fingerprint, so OpenBTree still succeeds), and
+// observe that Find returns one fewer hit than the input set.
+func TestFindDropsRecordsWithBadSig(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	recs := makeRecords(t, pub, priv, 5, []string{"ubuntu"})
+	// Corrupt the third record's signature. The leaf decode
+	// still succeeds because Sig is just 64 raw bytes, but
+	// VerifyRecordSig will fail.
+	recs[2].Sig[0] ^= 0xFF
+
+	var pk [32]byte
+	copy(pk[:], pub)
+	out, err := BuildBTree(BuildBTreeInput{
+		Records:   recs,
+		PubKey:    pk,
+		PrivKey:   priv,
+		Seq:       1,
+		PieceSize: MinPieceSize,
+		CreatedTs: 1712649600,
+	})
+	if err != nil {
+		t.Fatalf("BuildBTree: %v", err)
+	}
+	src := &BytesPageSource{Data: out.Bytes, PieceSize: MinPieceSize}
+	r, err := OpenBTree(src)
+	if err != nil {
+		t.Fatalf("OpenBTree: %v", err)
+	}
+	hits, err := r.Find("ubuntu")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if len(hits) != 4 {
+		t.Errorf("Find returned %d hits, want 4 (one record dropped due to bad sig)", len(hits))
+	}
+}
+
+// TestFindDropsRecordsBelowMinPoW covers Find's
+// `if err := VerifyRecordPoW(rec, ...); err != nil { continue }`
+// arm. Build a tree with no PoW (records minted with tiny
+// nonces 0..n that don't satisfy any meaningful threshold).
+// Then post-OpenBTree, set the in-memory trailer's MinPoWBits
+// to 20 so VerifyRecordPoW rejects every record. Find must
+// return an empty slice rather than the matching records.
+func TestFindDropsRecordsBelowMinPoW(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 10, []string{"ubuntu"}, MinPieceSize)
+	// Without modifying the tree, Find returns 10 records.
+	hits, err := r.Find("ubuntu")
+	if err != nil {
+		t.Fatalf("Find pristine: %v", err)
+	}
+	if len(hits) != 10 {
+		t.Fatalf("baseline len = %d, want 10", len(hits))
+	}
+	// Now flip the threshold: records minted with nonce=0..9 do
+	// not satisfy a 20-bit PoW (chance is 2^-20). Find must
+	// silently skip every one and return zero hits.
+	r.trailer.MinPoWBits = 20
+	hits, err = r.Find("ubuntu")
+	if err != nil {
+		t.Fatalf("Find with PoW=20: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("expected 0 hits with MinPoWBits=20, got %d", len(hits))
+	}
+}
+
+// TestVerifyFingerprintFetchError covers VerifyFingerprint's
+// `if err := r.src.Piece(i); err != nil` arm. Swap the source
+// with a wrapper that fails on piece 1 (the leaf) so the walk
+// errors out before any record is hashed.
+func TestVerifyFingerprintFetchError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &pieceErrSource{inner: r.src, failIdx: 1}
+	if err := r.VerifyFingerprint(); err == nil {
+		t.Error("VerifyFingerprint should propagate piece-fetch errors")
+	}
+}
+
+// TestVerifyFingerprintHeaderDecodeError covers
+// VerifyFingerprint's `if err := decodeHeader(page); err != nil`
+// arm. Replace piece 1 with all-zero bytes so decodeHeader
+// rejects on bad magic.
+func TestVerifyFingerprintHeaderDecodeError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &constPieceSource{inner: r.src, idx: 1, payload: make([]byte, MinPieceSize)}
+	if err := r.VerifyFingerprint(); err == nil {
+		t.Error("VerifyFingerprint should propagate header-decode errors")
+	}
+}
+
+// TestVerifyFingerprintHashMismatch covers the
+// `if got != r.trailer.TreeFingerprint` arm. Mutate the
+// in-memory trailer's TreeFingerprint after OpenBTree so the
+// reconstructed hash and the claim no longer match. The
+// counts still match (we don't touch leaves), so the count
+// guard passes and the fingerprint comparison is the
+// catch-all.
+func TestVerifyFingerprintHashMismatch(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Flip a byte in the in-memory trailer fingerprint. The
+	// in-memory fingerprint diverges from what the leaves
+	// re-hash to, so the comparison fails.
+	r.trailer.TreeFingerprint[0] ^= 0xFF
+	if err := r.VerifyFingerprint(); err == nil {
+		t.Error("VerifyFingerprint should reject when reconstructed hash differs from trailer claim")
+	}
+}
+
+// TestVerifyFingerprintCountMismatch covers the
+// `if uint64(count) != r.trailer.NumRecords` arm of
+// VerifyFingerprint. Build a real tree, then artificially
+// inflate the trailer's NumRecords claim by one. The
+// fingerprint hash itself still matches (we don't touch leaves)
+// so the count-vs-claim check is the only thing that catches
+// the mismatch.
+func TestVerifyFingerprintCountMismatch(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 30, []string{"alpha", "beta"}, MinPieceSize)
+	// Inflate the verified trailer's NumRecords. The fingerprint
+	// bytes still match what's reconstructible from the leaves
+	// because we don't mutate any leaf — but the explicit count
+	// guard runs before the fingerprint comparison.
+	r.trailer.NumRecords++
+	err := r.VerifyFingerprint()
+	if err == nil {
+		t.Fatal("expected error for inflated NumRecords")
+	}
+	if !strings.Contains(err.Error(), "trailer claims") {
+		t.Errorf("error = %q, want it to mention 'trailer claims'", err.Error())
 	}
 }
 

@@ -172,6 +172,77 @@ func TestLookupSomeIndexersSilent(t *testing.T) {
 	}
 }
 
+// TestLookupQueryDropsBadInfoHashLength covers the
+// `if len(ih) != 40 { continue }` arm of legacyQuery's merge
+// loop. KeywordHit.IH is a []byte so a malformed indexer can
+// publish a hit with an IH that's not exactly 20 bytes; the
+// merge must skip it without indexing into the empty slot.
+func TestLookupQueryDropsBadInfoHashLength(t *testing.T) {
+	t.Parallel()
+	g := newScriptedGetter()
+	pub := newPubkey(t)
+	salt, _ := dhtindex.SaltForKeyword("ubuntu")
+	g.set(pub, salt, dhtindex.KeywordValue{Hits: []dhtindex.KeywordHit{
+		// 19-byte IH → hex string is 38 chars → skipped.
+		{IH: bytes.Repeat([]byte{0xaa}, 19), N: "Wrong Length", S: 50},
+		// Valid 20-byte IH → kept.
+		{IH: bytes.Repeat([]byte{0xbb}, 20), N: "Right Length", S: 100},
+	}})
+
+	l := dhtindex.NewLookup(g)
+	l.AddIndexer(pub, "indexer-one")
+	resp, err := l.Query(context.Background(), "ubuntu")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(resp.Hits) != 1 {
+		t.Fatalf("Hits = %d, want 1 (bad-length one dropped)", len(resp.Hits))
+	}
+	if resp.Hits[0].Name != "Right Length" {
+		t.Errorf("kept hit name = %q, want 'Right Length'", resp.Hits[0].Name)
+	}
+}
+
+// TestLookupQueryMergeFillsEmptyNameWithinIndexer covers the
+// `if lh.Name == "" && h.N != "" { lh.Name = h.N }` arm and
+// the matching Size/Files fill-from-later-hit arms of
+// legacyQuery's merge loop. A single indexer returns two hits
+// for the same infohash where the first has empty Name/Size/
+// Files and the second has non-empty values for all three.
+// The merge processes hits in slice order, so the second
+// hit's metadata deterministically fills the initially-empty
+// merged entry.
+func TestLookupQueryMergeFillsEmptyNameWithinIndexer(t *testing.T) {
+	t.Parallel()
+	g := newScriptedGetter()
+	pub := newPubkey(t)
+	salt, _ := dhtindex.SaltForKeyword("ubuntu")
+	g.set(pub, salt, dhtindex.KeywordValue{Hits: []dhtindex.KeywordHit{
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "", S: 50, Sz: 0, F: 0},
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "Ubuntu Late", S: 100, Sz: 6 << 30, F: 12},
+	}})
+
+	l := dhtindex.NewLookup(g)
+	l.AddIndexer(pub, "indexer-one")
+	resp, err := l.Query(context.Background(), "ubuntu")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(resp.Hits) != 1 {
+		t.Fatalf("Hits = %d, want 1 (dedup)", len(resp.Hits))
+	}
+	hit := resp.Hits[0]
+	if hit.Name != "Ubuntu Late" {
+		t.Errorf("merged name = %q, want 'Ubuntu Late'", hit.Name)
+	}
+	if hit.Size != 6<<30 {
+		t.Errorf("merged Size = %d, want %d (filled from later hit)", hit.Size, int64(6<<30))
+	}
+	if hit.Files != 12 {
+		t.Errorf("merged Files = %d, want 12 (filled from later hit)", hit.Files)
+	}
+}
+
 func TestLookupQueryEmptyTokens(t *testing.T) {
 	t.Parallel()
 	l := dhtindex.NewLookup(newScriptedGetter())

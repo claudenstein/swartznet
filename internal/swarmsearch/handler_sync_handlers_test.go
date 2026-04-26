@@ -27,21 +27,26 @@ func TestOnSyncRecordsUnknownSession(t *testing.T) {
 	// guard branch without panicking.
 }
 
-// TestOnSyncRecordsApplyError — even when the session exists,
-// ApplyRecords can fail (wrong phase, malformed counts). Exercise
-// that path: register a session in PhaseIdle and feed it a
-// SyncRecords frame, which is invalid for that phase.
+// TestOnSyncRecordsApplyError covers the
+// `records, err := sess.ApplyRecords(m); if err != nil` arm.
+// Register a session at TxID=7, then feed onSyncRecords a
+// frame whose record has a wrong-length Pk so ApplyRecords'
+// "record[N] bad sizes" check fires; onSyncRecords must
+// log+return without invoking the sink.
 func TestOnSyncRecordsApplyError(t *testing.T) {
 	t.Parallel()
 	p := New(slog.Default())
 	sess := NewSyncSession(7, RoleResponder, nil)
 	p.registerSyncSession("p:1", sess)
-
-	// Frame for an idle responder — ApplyRecords requires
-	// PhaseSendingRecords for the responder; PhaseIdle is the
-	// wrong phase, so apply returns an error and we exit via
-	// the apply_err branch.
-	p.onSyncRecords("p:1", SyncRecords{TxID: 7})
+	// Record with Pk of length 5 — ApplyRecords requires 32.
+	// TxID matches the session so we get past the txid guard
+	// and into the size-check loop.
+	p.onSyncRecords("p:1", SyncRecords{
+		TxID: 7,
+		Records: []SyncRecord{
+			{Pk: make([]byte, 5), Ih: make([]byte, 20), Sig: make([]byte, 64)},
+		},
+	})
 }
 
 // TestOnSyncEndUnknownSession — the handler must not panic when

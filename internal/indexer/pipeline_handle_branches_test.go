@@ -96,6 +96,87 @@ func TestPipelineHandleOpenReaderError(t *testing.T) {
 	}
 }
 
+// TestPipelineHandleEmptyChunksSkipsCounter covers the
+// `if len(chunks) == 0 { skipped++; return }` arm of handle.
+// Submit a .txt file whose OpenReader returns an empty
+// stream; the plaintext extractor returns no chunks, so
+// handle increments Skipped without indexing anything.
+func TestPipelineHandleEmptyChunksSkipsCounter(t *testing.T) {
+	t.Parallel()
+	idx, err := Open(filepath.Join(t.TempDir(), "p_empty.bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+
+	p := NewPipeline(idx, slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	p.Start()
+	defer p.Stop()
+
+	const ih = "dddddddddddddddddddddddddddddddddddddddd"
+	if !p.Submit(FileInput{
+		InfoHash: ih,
+		Path:     "empty.txt",
+		Size:     0,
+		OpenReader: func() (io.Reader, error) {
+			return bytes.NewReader(nil), nil
+		},
+	}) {
+		t.Fatal("Submit returned false")
+	}
+	pollPipelineProcessed(t, p, ih)
+	st := p.Stats(ih)
+	if st.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 for empty-chunks file", st.Skipped)
+	}
+	if st.Extracted != 0 {
+		t.Errorf("Extracted = %d, want 0 for empty-chunks file", st.Extracted)
+	}
+}
+
+// TestPipelineHandleAllChunksFailedCounter covers the
+// `writeErrors == len(chunks) → failed++` arm of handle. We
+// close the underlying index between submit and processing so
+// every IndexContent call fails with "indexer: closed". After
+// the loop, writeErrors equals len(chunks), incrementing the
+// Failed counter rather than the Extracted one.
+func TestPipelineHandleAllChunksFailedCounter(t *testing.T) {
+	t.Parallel()
+	idx, err := Open(filepath.Join(t.TempDir(), "p_failed.bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewPipeline(idx, slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	p.Start()
+	defer p.Stop()
+
+	// Close the index now so IndexContent fails for every
+	// submitted chunk. The pipeline will still extract text
+	// from the input, but every Index call returns "closed".
+	idx.Close()
+
+	const ih = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	if !p.Submit(FileInput{
+		InfoHash: ih,
+		Path:     "blob.txt",
+		Size:     32,
+		OpenReader: func() (io.Reader, error) {
+			return bytes.NewReader([]byte("the quick brown fox jumps over")), nil
+		},
+	}) {
+		t.Fatal("Submit returned false")
+	}
+	pollPipelineProcessed(t, p, ih)
+	st := p.Stats(ih)
+	if st.Failed != 1 {
+		t.Errorf("Failed = %d, want 1 when all chunks fail to index", st.Failed)
+	}
+	if st.Extracted != 0 {
+		t.Errorf("Extracted = %d, want 0 when all chunks fail", st.Extracted)
+	}
+}
+
 // closingReader wraps a bytes.Reader with a Close method so the
 // pipeline's `r.(io.Closer); ok` type-assertion fires the
 // defer-Close branch.

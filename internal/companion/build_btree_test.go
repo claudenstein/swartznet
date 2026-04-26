@@ -235,6 +235,27 @@ func TestBuildBTreeMultiLeafWalk(t *testing.T) {
 	}
 }
 
+// TestBuildBTreePropagatesPackLeavesError covers BuildBTree's
+// `if err != nil { return out, err }` arm after packLeaves.
+// Pass a record with empty keyword so packLeaves rejects;
+// BuildBTree must surface that error.
+func TestBuildBTreePropagatesPackLeavesError(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	var pk [32]byte
+	copy(pk[:], pub)
+	bad := Record{Kw: ""} // packLeaves rejects empty keyword
+	if _, err := BuildBTree(BuildBTreeInput{
+		Records:   []Record{bad},
+		PubKey:    pk,
+		PrivKey:   priv,
+		Seq:       1,
+		PieceSize: MinPieceSize,
+		CreatedTs: 1,
+	}); err == nil {
+		t.Error("BuildBTree should propagate packLeaves errors")
+	}
+}
+
 func TestBuildBTreeRejectsEmpty(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	var pk [32]byte

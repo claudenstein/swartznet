@@ -49,6 +49,20 @@ func TestEncodeLeafEmptyRecords(t *testing.T) {
 	}
 }
 
+// TestEncodeLeafPropagatesEncodeRecordError covers EncodeLeaf's
+// `if err != nil { return nil, err }` arm inside the per-
+// record loop. Pass a record with an empty keyword so
+// EncodeRecord errors immediately, and verify EncodeLeaf
+// surfaces the error rather than producing a leaf with a
+// half-written payload.
+func TestEncodeLeafPropagatesEncodeRecordError(t *testing.T) {
+	t.Parallel()
+	bad := Record{Kw: ""} // EncodeRecord rejects empty keyword
+	if _, err := EncodeLeaf(0, []Record{bad}, MinPieceSize); err == nil {
+		t.Error("EncodeLeaf should propagate EncodeRecord errors")
+	}
+}
+
 // TestEncodeRecordOversizedKeyword — EncodeRecord rejects a
 // keyword longer than MaxKeywordBytes before attempting to
 // marshal. Same guard packLeaves uses, but exercised at the
@@ -59,5 +73,23 @@ func TestEncodeRecordOversizedKeyword(t *testing.T) {
 	r := Record{Kw: strings.Repeat("k", MaxKeywordBytes+1)}
 	if _, err := EncodeRecord(r); err == nil {
 		t.Error("EncodeRecord should reject oversize keyword")
+	}
+}
+
+// TestEncodeRecordExceedsByteCap covers EncodeRecord's
+// `if len(out) > MaxRecordBytes { return error }` guard —
+// the post-marshal size check for records whose encoded form
+// pushes past the 256-byte cap. With Kw at the keyword limit
+// plus max-width Pow + T values, the bencoded form of a
+// recordWire crosses the boundary.
+func TestEncodeRecordExceedsByteCap(t *testing.T) {
+	t.Parallel()
+	r := Record{
+		Kw:  strings.Repeat("k", MaxKeywordBytes),
+		T:   1<<63 - 1,
+		Pow: 1<<64 - 1,
+	}
+	if _, err := EncodeRecord(r); err == nil {
+		t.Error("EncodeRecord should reject record whose encoded form exceeds MaxRecordBytes")
 	}
 }
