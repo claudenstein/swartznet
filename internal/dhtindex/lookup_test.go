@@ -173,20 +173,22 @@ func TestLookupSomeIndexersSilent(t *testing.T) {
 }
 
 // TestLookupQueryMergeFillsEmptyNameWithinIndexer covers the
-// `if lh.Name == "" && h.N != "" { lh.Name = h.N }` arm of
+// `if lh.Name == "" && h.N != "" { lh.Name = h.N }` arm and
+// the matching Size/Files fill-from-later-hit arms of
 // legacyQuery's merge loop. A single indexer returns two hits
-// for the same infohash where the first has empty Name and
-// the second has a non-empty Name. The merge processes hits
-// in slice order, so the second hit's name fills in the
-// initially-empty merged entry deterministically.
+// for the same infohash where the first has empty Name/Size/
+// Files and the second has non-empty values for all three.
+// The merge processes hits in slice order, so the second
+// hit's metadata deterministically fills the initially-empty
+// merged entry.
 func TestLookupQueryMergeFillsEmptyNameWithinIndexer(t *testing.T) {
 	t.Parallel()
 	g := newScriptedGetter()
 	pub := newPubkey(t)
 	salt, _ := dhtindex.SaltForKeyword("ubuntu")
 	g.set(pub, salt, dhtindex.KeywordValue{Hits: []dhtindex.KeywordHit{
-		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "", S: 50},
-		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "Ubuntu Late", S: 100},
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "", S: 50, Sz: 0, F: 0},
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "Ubuntu Late", S: 100, Sz: 6 << 30, F: 12},
 	}})
 
 	l := dhtindex.NewLookup(g)
@@ -198,8 +200,15 @@ func TestLookupQueryMergeFillsEmptyNameWithinIndexer(t *testing.T) {
 	if len(resp.Hits) != 1 {
 		t.Fatalf("Hits = %d, want 1 (dedup)", len(resp.Hits))
 	}
-	if resp.Hits[0].Name != "Ubuntu Late" {
-		t.Errorf("merged name = %q, want 'Ubuntu Late' (filled from later hit)", resp.Hits[0].Name)
+	hit := resp.Hits[0]
+	if hit.Name != "Ubuntu Late" {
+		t.Errorf("merged name = %q, want 'Ubuntu Late'", hit.Name)
+	}
+	if hit.Size != 6<<30 {
+		t.Errorf("merged Size = %d, want %d (filled from later hit)", hit.Size, int64(6<<30))
+	}
+	if hit.Files != 12 {
+		t.Errorf("merged Files = %d, want 12 (filled from later hit)", hit.Files)
 	}
 }
 
