@@ -47,6 +47,29 @@ func TestEXIFExtractorBadTIFFByteOrderMarker(t *testing.T) {
 	}
 }
 
+// TestEXIFExtractorJPEGWithCOMSegmentSkipped covers
+// findExifTIFF's `i = bodyEnd` advance arm. A JPEG containing a
+// non-EXIF segment (COM) followed by EOI exercises the loop's
+// "segment didn't match, advance past its body" branch. The
+// extractor returns (nil, nil) because no EXIF segment exists.
+func TestEXIFExtractorJPEGWithCOMSegmentSkipped(t *testing.T) {
+	t.Parallel()
+	var jpeg bytes.Buffer
+	jpeg.Write([]byte{0xFF, 0xD8})       // SOI
+	jpeg.Write([]byte{0xFF, 0xFE})       // COM marker
+	_ = binary.Write(&jpeg, binary.BigEndian, uint16(6))
+	jpeg.Write([]byte("comm"))           // 4 body bytes (length=6 incl. length field)
+	jpeg.Write([]byte{0xFF, 0xD9})       // EOI
+
+	chunks, err := NewEXIFExtractor().Extract(bytes.NewReader(jpeg.Bytes()), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil for JPEG with only a COM segment", len(chunks))
+	}
+}
+
 // TestEXIFExtractorTIFFWithNoKnownTagsYieldsNoChunks covers the
 // `if text == "" { return nil, nil }` arm in Extract. A valid
 // TIFF with zero entries (count=0) means no tags in
