@@ -32,9 +32,9 @@ func TestID3ExtractorUnsupportedV22(t *testing.T) {
 	t.Parallel()
 	tag := []byte{
 		'I', 'D', '3',
-		2, // major version 2.2
-		0, // revision
-		0, // flags
+		2,          // major version 2.2
+		0,          // revision
+		0,          // flags
 		0, 0, 0, 0, // tag size (syncsafe, zero)
 	}
 	if _, err := NewID3Extractor().Extract(bytes.NewReader(tag), 0); err == nil {
