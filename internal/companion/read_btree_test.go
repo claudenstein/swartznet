@@ -253,20 +253,65 @@ func TestFindLeafPieceFetchError(t *testing.T) {
 	}
 }
 
-// leafFailSource forwards Piece(0) (root) but fails on a
-// designated leaf index. Used by TestFindLeafPieceFetchError.
+// leafFailSource fails on a specific leaf index, but only on
+// the second-or-later call. walkToLeaves and Find both fetch
+// the leaf piece — the first call (walkToLeaves) succeeds so
+// the walk completes, the second call (Find's outer loop)
+// fails so Find's leaf-fetch error arm fires.
 type leafFailSource struct {
 	inner       PageSource
 	leafFailIdx int
+	hits        int
 }
 
 func (l *leafFailSource) Piece(i int) ([]byte, error) {
 	if i == l.leafFailIdx {
-		return nil, fmt.Errorf("simulated leaf %d fetch error", i)
+		l.hits++
+		if l.hits >= 2 {
+			return nil, fmt.Errorf("simulated leaf %d fetch error", i)
+		}
 	}
 	return l.inner.Piece(i)
 }
 func (l *leafFailSource) NumPieces() int { return l.inner.NumPieces() }
+
+// TestFindLeafDecodeErrorReFetch covers Find's
+// `_, recs, err := DecodeLeaf(page); if err != nil` arm. The
+// existing TestFindLeafDecodeError corrupts the leaf bytes
+// before any read, so walkToLeaves's decodeHeader trips first.
+// Use a stateful source that returns the real leaf on the
+// walk, then garbage on Find's re-fetch — DecodeLeaf inside
+// the outer loop fires.
+func TestFindLeafDecodeErrorReFetch(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &leafGarbageSource{inner: r.src, garbageIdx: 1}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when leaf decode produces an error on re-fetch")
+	}
+}
+
+type leafGarbageSource struct {
+	inner      PageSource
+	garbageIdx int
+	hits       int
+}
+
+func (l *leafGarbageSource) Piece(i int) ([]byte, error) {
+	if i == l.garbageIdx {
+		l.hits++
+		if l.hits >= 2 {
+			// Return same-sized buffer of zeros — fails
+			// decodeHeader's magic check inside DecodeLeaf.
+			real, err := l.inner.Piece(i)
+			if err != nil {
+				return nil, err
+			}
+			return make([]byte, len(real)), nil
+		}
+	}
+	return l.inner.Piece(i)
+}
+func (l *leafGarbageSource) NumPieces() int { return l.inner.NumPieces() }
 
 // TestFindDropsRecordsWithBadSig covers Find's
 // `if err := VerifyRecordSig(rec); err != nil { continue }`
