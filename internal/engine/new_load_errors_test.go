@@ -47,6 +47,68 @@ func TestNewLogsBloomLoadError(t *testing.T) {
 	defer eng.Close()
 }
 
+// TestNewLogsSessionLoadError covers engine.New's loadSession
+// `if err != nil { log.Warn(...) }` arm. Plant a corrupt
+// session.json under DataDir; engine.New must continue and start
+// up with an empty session rather than fail.
+func TestNewLogsSessionLoadError(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	// Create the session manifest at its canonical location with
+	// invalid JSON so loadSession's json.Unmarshal errors.
+	sessPath := filepath.Join(dataDir, "session.json")
+	if err := os.WriteFile(sessPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("engine.New: %v (corrupt session must be tolerated)", err)
+	}
+	defer eng.Close()
+}
+
+// TestNewLogsIdentityLoadError covers engine.New's
+// identity.LoadOrCreate `if err != nil { log.Warn(...) }` arm.
+// Plant a directory at the identity path so LoadOrCreate's
+// IsDir check fires.
+func TestNewLogsIdentityLoadError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	identPath := filepath.Join(dir, "identity-as-directory")
+	if err := os.Mkdir(identPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	cfg.NoUpload = true
+	cfg.IdentityPath = identPath
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("engine.New: %v (identity load failure must be non-fatal)", err)
+	}
+	defer eng.Close()
+}
+
 // TestNewLogsReputationLoadError covers engine.New's reputation-
 // load `if err != nil { log.Warn(...) }` arm. Same pattern as
 // TestNewLogsBloomLoadError but pointed at the reputation path.
