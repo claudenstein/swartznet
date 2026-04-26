@@ -61,3 +61,21 @@ func TestEncodeRecordOversizedKeyword(t *testing.T) {
 		t.Error("EncodeRecord should reject oversize keyword")
 	}
 }
+
+// TestEncodeRecordExceedsByteCap covers EncodeRecord's
+// `if len(out) > MaxRecordBytes { return error }` guard —
+// the post-marshal size check for records whose encoded form
+// pushes past the 256-byte cap. With Kw at the keyword limit
+// plus max-width Pow + T values, the bencoded form of a
+// recordWire crosses the boundary.
+func TestEncodeRecordExceedsByteCap(t *testing.T) {
+	t.Parallel()
+	r := Record{
+		Kw:  strings.Repeat("k", MaxKeywordBytes),
+		T:   1<<63 - 1,
+		Pow: 1<<64 - 1,
+	}
+	if _, err := EncodeRecord(r); err == nil {
+		t.Error("EncodeRecord should reject record whose encoded form exceeds MaxRecordBytes")
+	}
+}
