@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -56,6 +57,23 @@ func TestWriteBloomBitsWriteError(t *testing.T) {
 	w := &failingWriter{allowedBytes: 24}
 	if err := writeBloom(w, bf); err == nil {
 		t.Error("writeBloom should surface bits-loop write error")
+	}
+}
+
+// TestEstimatedItemsSaturated covers EstimatedItems'
+// `if x >= m { return math.Inf(1) }` arm. Saturate every
+// bit in a small filter so popcount equals m.
+func TestEstimatedItemsSaturated(t *testing.T) {
+	t.Parallel()
+	bf := NewBloomFilter(8, 0.5)
+	// Set every bit by writing all-ones into the bits slice
+	// directly. We're inside the package so this is allowed.
+	for i := range bf.bits {
+		bf.bits[i] = ^uint64(0)
+	}
+	got := bf.EstimatedItems()
+	if !math.IsInf(got, 1) {
+		t.Errorf("EstimatedItems on saturated filter = %v, want +Inf", got)
 	}
 }
 
