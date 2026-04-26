@@ -161,6 +161,18 @@ func TestZimExtractorSkipsDeletedEntry(t *testing.T) {
 	}
 }
 
+// TestZimExtractorReadHeaderTruncated covers readZimHeader's
+// `_, err := ra.ReadAt(buf[:], 0); if err != nil { ... }` arm.
+// A reader shorter than the 80-byte header forces ReadAt to
+// return an error before the magic check runs.
+func TestZimExtractorReadHeaderTruncated(t *testing.T) {
+	t.Parallel()
+	short := []byte("ZIM\x04tooshort") // 12 bytes < 80
+	if _, err := NewZimExtractor().Extract(bytes.NewReader(short), 0); err == nil {
+		t.Error("Extract should fail when input is shorter than header")
+	}
+}
+
 // TestZimExtractorMimeListReadFails covers readZimMimeList's
 // `if err != nil { break }` + `if len(all) == 0 { error }`
 // arms when the mime-list position points past the file end.
