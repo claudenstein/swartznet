@@ -124,6 +124,33 @@ func TestZimDispatchByExtensionFallback(t *testing.T) {
 	}
 }
 
+// TestZimExtractorGetZimBlobErrContinues covers Extract's
+// `blob, err := getZimBlob(...); if err != nil { continue }`
+// arm. The cluster reads cleanly (uncompressed type byte = 1)
+// but the offset table inside is corrupted — getZimBlob's
+// first-offset alignment check rejects.
+func TestZimExtractorGetZimBlobErrContinues(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("doomed-article")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	hdr := readZimHeaderForTest(t, zim)
+	cpAt := int64(hdr.ClusterPtrPos)
+	clusterPos := int64(binary.LittleEndian.Uint64(zim[cpAt : cpAt+8]))
+	// Corrupt the first offset: skip the type byte (1 byte), then
+	// write a non-divisible-by-4 value.
+	binary.LittleEndian.PutUint32(zim[clusterPos+1:clusterPos+5], 7)
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — getZimBlob err must skip the article", len(chunks))
+	}
+}
+
 // patchClusterTypeByte rewrites the cluster's type byte (the
 // first byte of the cluster blob). cluster 0's offset lives in
 // the cluster ptr list at clusterPtrPos+0*8.
