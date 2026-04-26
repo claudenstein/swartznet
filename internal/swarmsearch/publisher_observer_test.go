@@ -127,6 +127,35 @@ func TestIngestSyncRecordsNotifiesPublisher(t *testing.T) {
 	}
 }
 
+// TestIngestSyncRecordsBadFieldLengthDefenceInDepth covers the
+// defence-in-depth `if len(wr.Pk) != 32 || len(wr.Ih) != 20 ||
+// len(wr.Sig) != 64 { continue }` arm. The wire-level decoder
+// already filters these (ApplyRecords + DecodeSyncRecords), but
+// ingestSyncRecords is also called from cache-restore-style
+// flows that don't go through the wire path. Pass a record
+// with 5-byte Pk so the per-record loop skips it without
+// invoking the sink.
+func TestIngestSyncRecordsBadFieldLengthDefenceInDepth(t *testing.T) {
+	p := New(nil)
+	obs := &capturePublisherObserver{}
+	p.SetPublisherObserver(obs)
+	sink := NewRecordCache()
+	p.SetRecordSink(sink)
+
+	// Bypass ApplyRecords / DecodeSyncRecords by calling
+	// ingestSyncRecords directly with a malformed record.
+	p.ingestSyncRecords("peer-bad", sink, []SyncRecord{
+		{Pk: make([]byte, 5), Ih: make([]byte, 20), Sig: make([]byte, 64)},
+	})
+
+	if obs.snapshot() != nil && len(obs.snapshot()) > 0 {
+		t.Errorf("observer saw a malformed record: %v", obs.snapshot())
+	}
+	if sink.Len() != 0 {
+		t.Errorf("sink received malformed record: len=%d", sink.Len())
+	}
+}
+
 // A record with a bad signature does NOT trigger NotePublisherSeen.
 // Signature is the filter; unsigned junk can't admit a pubkey
 // into the admission pipeline.
