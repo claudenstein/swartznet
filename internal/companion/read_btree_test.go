@@ -205,6 +205,69 @@ func TestVerifyFingerprintDetectsTamperedLeaf(t *testing.T) {
 	}
 }
 
+// pieceErrSource wraps a PageSource and returns a synthetic
+// error for one specific piece index. Used to drive Find's
+// per-piece I/O error arms without rebuilding the tree.
+type pieceErrSource struct {
+	inner   PageSource
+	failIdx int
+}
+
+func (p *pieceErrSource) Piece(i int) ([]byte, error) {
+	if i == p.failIdx {
+		return nil, fmt.Errorf("simulated piece %d fetch error", i)
+	}
+	return p.inner.Piece(i)
+}
+func (p *pieceErrSource) NumPieces() int { return p.inner.NumPieces() }
+
+// TestFindRootPieceFetchError covers Find's
+// `rootPage, err := r.src.Piece(0); if err != nil` arm. After
+// a successful OpenBTree (which only reads the trailer page),
+// swap the source for one that fails on piece 0 so Find's
+// subsequent fetch errors before any walk.
+func TestFindRootPieceFetchError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &pieceErrSource{inner: r.src, failIdx: 0}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when root piece fetch errors")
+	}
+}
+
+// TestFindLeafPieceFetchError covers Find's
+// `page, err := r.src.Piece(idx); if err != nil` arm for the
+// leaf-walk loop. We swap the source to fail on piece 1 (the
+// first leaf) after walkToLeaves has already gathered indices.
+// walkToLeaves itself reads piece 0, then Find iterates the
+// leaf indices and re-fetches each one — that re-fetch is the
+// path under test.
+func TestFindLeafPieceFetchError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Save inner so walkToLeaves can read piece 0 (the root).
+	// Then fail on the first leaf piece so Find's outer loop
+	// errors before decoding any leaf.
+	src := r.src
+	r.src = &leafFailSource{inner: src, leafFailIdx: 1}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when a leaf piece fetch errors")
+	}
+}
+
+// leafFailSource forwards Piece(0) (root) but fails on a
+// designated leaf index. Used by TestFindLeafPieceFetchError.
+type leafFailSource struct {
+	inner       PageSource
+	leafFailIdx int
+}
+
+func (l *leafFailSource) Piece(i int) ([]byte, error) {
+	if i == l.leafFailIdx {
+		return nil, fmt.Errorf("simulated leaf %d fetch error", i)
+	}
+	return l.inner.Piece(i)
+}
+func (l *leafFailSource) NumPieces() int { return l.inner.NumPieces() }
+
 // TestFindDropsRecordsWithBadSig covers Find's
 // `if err := VerifyRecordSig(rec); err != nil { continue }`
 // arm. Build records normally, corrupt one record's signature
