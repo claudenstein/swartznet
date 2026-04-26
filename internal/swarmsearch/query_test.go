@@ -129,6 +129,50 @@ func TestQueryNoCapablePeers(t *testing.T) {
 	}
 }
 
+// failingSender errors every Send call. Used to drive the
+// "asked == 0" arm of Query when the fan-out's only target
+// rejects synchronously.
+type failingSender struct {
+	calls int
+	mu    sync.Mutex
+}
+
+func (f *failingSender) Send(_ string, _ []byte) error {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return errSendFailed
+}
+
+var errSendFailed = errSimSend{}
+
+type errSimSend struct{}
+
+func (errSimSend) Error() string { return "simulated send failure" }
+
+// TestQueryAllSendsFailReturnsZeroAsked covers Query's
+// `if asked == 0 { return ... }` arm. Mark a peer capable
+// then plug in a sender that errors every call — the fan-out
+// loop counts every error, asked stays at 0, and Query
+// returns an empty response without waiting for replies.
+func TestQueryAllSendsFailReturnsZeroAsked(t *testing.T) {
+	t.Parallel()
+	p := swarmsearch.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p.SetSender(&failingSender{})
+	markCapable(p, "1.2.3.4:6881")
+
+	resp, err := p.Query(context.Background(), swarmsearch.QueryRequest{
+		Q:       "ubuntu",
+		Timeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if resp == nil || len(resp.Hits) != 0 {
+		t.Errorf("expected empty response, got %+v", resp)
+	}
+}
+
 func TestQueryEmptyRejected(t *testing.T) {
 	t.Parallel()
 	s := newFanoutSender()
