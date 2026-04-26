@@ -49,6 +49,20 @@ func TestEncodeLeafEmptyRecords(t *testing.T) {
 	}
 }
 
+// TestEncodeLeafPropagatesEncodeRecordError covers EncodeLeaf's
+// `if err != nil { return nil, err }` arm inside the per-
+// record loop. Pass a record with an empty keyword so
+// EncodeRecord errors immediately, and verify EncodeLeaf
+// surfaces the error rather than producing a leaf with a
+// half-written payload.
+func TestEncodeLeafPropagatesEncodeRecordError(t *testing.T) {
+	t.Parallel()
+	bad := Record{Kw: ""} // EncodeRecord rejects empty keyword
+	if _, err := EncodeLeaf(0, []Record{bad}, MinPieceSize); err == nil {
+		t.Error("EncodeLeaf should propagate EncodeRecord errors")
+	}
+}
+
 // TestEncodeRecordOversizedKeyword — EncodeRecord rejects a
 // keyword longer than MaxKeywordBytes before attempting to
 // marshal. Same guard packLeaves uses, but exercised at the
