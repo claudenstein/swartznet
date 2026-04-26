@@ -161,6 +161,25 @@ func TestZimExtractorSkipsDeletedEntry(t *testing.T) {
 	}
 }
 
+// TestZimExtractorMimeListReadFails covers readZimMimeList's
+// `if err != nil { break }` + `if len(all) == 0 { error }`
+// arms when the mime-list position points past the file end.
+// Extract surfaces the wrapped error.
+func TestZimExtractorMimeListReadFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("content")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	// Patch MimeListPos to a position past EOF. Header offset
+	// 56-64 holds MimeListPos (uint64 LE).
+	binary.LittleEndian.PutUint64(zim[56:64], uint64(len(zim))+1<<20)
+
+	if _, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0); err == nil {
+		t.Error("Extract should fail when MimeListPos is past EOF")
+	}
+}
+
 // TestZimExtractorXZClusterTypeRejected covers readZimCluster's
 // `zimCompXZ → "XZ/LZMA2 clusters not supported in v1"` arm.
 // Patch a valid uncompressed cluster's type byte to 4 (XZ); the
