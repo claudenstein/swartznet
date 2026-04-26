@@ -275,6 +275,26 @@ func (l *leafFailSource) Piece(i int) ([]byte, error) {
 }
 func (l *leafFailSource) NumPieces() int { return l.inner.NumPieces() }
 
+// TestWalkToLeavesUnexpectedKind covers walkToLeaves's
+// `if hdr.Kind != PageKindInterior && != Root` arm. Build a
+// tree, then on Find's recursion swap piece 1 for a valid
+// trailer-kind page so decodeHeader succeeds but the kind
+// gate rejects.
+func TestWalkToLeavesUnexpectedKind(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Fabricate a valid trailer-kind page header (kind 0x03).
+	trailerHdr := encodeHeader(PageHeader{
+		Version: BTreeVersion,
+		Kind:    PageKindTrailer,
+	})
+	page := make([]byte, MinPieceSize)
+	copy(page, trailerHdr)
+	r.src = &constPieceSource{inner: r.src, idx: 1, payload: page}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when walkToLeaves hits a trailer-kind sub-page")
+	}
+}
+
 // TestFindRootHeaderDecodeError covers Find's
 // `decodeHeader(rootPage) error` arm. Return zero-bytes for
 // piece 0 so decodeHeader fails on the magic check before
