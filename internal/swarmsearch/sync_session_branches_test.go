@@ -4,6 +4,31 @@ import (
 	"testing"
 )
 
+// TestApplySymbolsBudgetExceeded covers ApplySymbols'
+// `if s.symbolsIn+len(m.Symbols) > s.maxSymbols` arm. Lower
+// the budget via SetBudgets, advance to PhaseBegun, then
+// feed a SyncSymbols frame with more symbols than the cap
+// allows.
+func TestApplySymbolsBudgetExceeded(t *testing.T) {
+	t.Parallel()
+	s := NewSyncSession(7, RoleInitiator, nil)
+	if _, err := s.Begin(SyncFilter{}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	s.SetBudgets(2, 1024)
+	huge := SyncSymbols{
+		TxID: 7,
+		Symbols: []SyncSymbol{
+			{DataXOR: make([]byte, 32)},
+			{DataXOR: make([]byte, 32)},
+			{DataXOR: make([]byte, 32)}, // one over the budget
+		},
+	}
+	if err := s.ApplySymbols(huge); err == nil {
+		t.Error("ApplySymbols should reject a frame that would exceed maxSymbols")
+	}
+}
+
 // TestNeedFrameTooManyIDs covers NeedFrame's
 // `if len(ids) > MaxNeedIDsPerMessage` arm. The session must
 // be in PhaseBegun or PhaseSymbolsFlowing for the phase guard
