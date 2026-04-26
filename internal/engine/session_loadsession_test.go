@@ -57,6 +57,51 @@ func TestLoadSessionEmptyFileReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestLoadSessionMkdirFails covers loadSession's
+// `os.MkdirAll(s.torrentsDir, ...) error` arm. Plant a
+// regular file at <dataDir>/torrents so MkdirAll can't make
+// the path a directory; the wrapped "engine: mkdir torrents"
+// error must surface.
+func TestLoadSessionMkdirFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Pre-plant a regular file at the path that's about to be
+	// created as a directory.
+	if err := os.WriteFile(filepath.Join(dir, "torrents"), []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadSession(dir)
+	if err == nil {
+		t.Fatal("expected MkdirAll error when torrents path is a regular file")
+	}
+	if !strings.Contains(err.Error(), "mkdir torrents") {
+		t.Errorf("err = %q, want it to mention 'mkdir torrents'", err.Error())
+	}
+}
+
+// TestLoadSessionReadFileFails covers loadSession's
+// `os.ReadFile error not ErrNotExist` arm. Plant a directory
+// at session.json so os.ReadFile fails with EISDIR (Linux).
+func TestLoadSessionReadFileFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "torrents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Plant a directory where session.json is expected so
+	// os.ReadFile returns EISDIR (not ErrNotExist).
+	if err := os.MkdirAll(filepath.Join(dir, "session.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadSession(dir)
+	if err == nil {
+		t.Fatal("expected read error when session.json is a directory")
+	}
+	if !strings.Contains(err.Error(), "read session") {
+		t.Errorf("err = %q, want it to wrap 'read session'", err.Error())
+	}
+}
+
 // TestLoadSessionGarbageJSONErrors covers the json.Unmarshal
 // error branch: garbage bytes in session.json must return a
 // wrapped "decode session" error rather than silently dropping
