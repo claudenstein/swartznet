@@ -79,6 +79,51 @@ func TestHandleSyncFrameBadBencodeAcrossMsgTypes(t *testing.T) {
 	}
 }
 
+// TestHandleSyncFrameDispatchesRecords covers the
+// `case MsgTypeSyncRecords: ... onSyncRecords()` happy-path
+// dispatch. A capable peer sends a valid SyncRecords frame —
+// no decode error, no misbehavior; the call is forwarded to
+// onSyncRecords (which silently no-ops since no session is
+// registered for the txid).
+func TestHandleSyncFrameDispatchesRecords(t *testing.T) {
+	t.Parallel()
+	p := New(slog.Default())
+	addr := "7.7.7.7:1"
+	p.mu.Lock()
+	p.peers[addr] = &PeerState{Services: BitSetReconciliation}
+	p.mu.Unlock()
+	raw, err := EncodeSyncRecords(SyncRecords{TxID: 42, Records: []SyncRecord{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := func([]byte) error { return nil }
+	p.handleSyncFrame(addr, messageHeader{MsgType: MsgTypeSyncRecords, TxID: 42}, raw, reply)
+	// No misbehavior since the frame decoded fine.
+	if got := p.MisbehaviorScore(addr); got != 0 {
+		t.Errorf("MisbehaviorScore = %d, want 0 for valid frame", got)
+	}
+}
+
+// TestHandleSyncFrameDispatchesEnd covers the
+// `case MsgTypeSyncEnd: ... onSyncEnd()` happy-path dispatch.
+func TestHandleSyncFrameDispatchesEnd(t *testing.T) {
+	t.Parallel()
+	p := New(slog.Default())
+	addr := "8.8.8.8:1"
+	p.mu.Lock()
+	p.peers[addr] = &PeerState{Services: BitSetReconciliation}
+	p.mu.Unlock()
+	raw, err := EncodeSyncEnd(SyncEnd{TxID: 42, Status: SyncStatusConverged})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := func([]byte) error { return nil }
+	p.handleSyncFrame(addr, messageHeader{MsgType: MsgTypeSyncEnd, TxID: 42}, raw, reply)
+	if got := p.MisbehaviorScore(addr); got != 0 {
+		t.Errorf("MisbehaviorScore = %d, want 0 for valid frame", got)
+	}
+}
+
 // TestHandleSyncFrameUnknownMsgType — an out-of-range msg_type
 // past the sync-handler dispatch must not panic. The dispatch
 // switch falls through to no-op (the outer HandleMessage layer
