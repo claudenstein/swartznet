@@ -54,6 +54,29 @@ func TestPutInfohashPointerSaltTooLarge(t *testing.T) {
 	}
 }
 
+// TestGetInfohashPointerDHTTraversalFails covers the
+// `res, _, err := getput.Get(...); if err != nil { return ... }`
+// arm. With an isolated DHT server (no peers, Passive mode)
+// and a pre-canceled context, the traversal aborts immediately
+// and surfaces a wrapped error.
+func TestGetInfohashPointerDHTTraversalFails(t *testing.T) {
+	t.Parallel()
+	srv := newIsolatedDHTServer(t)
+	get, err := dhtindex.NewAnacrolixGetter(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var pub [32]byte
+	pub[0] = 0xab
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = get.GetInfohashPointer(ctx, pub, []byte("salt"))
+	if err == nil {
+		t.Error("GetInfohashPointer with canceled ctx should error from getput.Get")
+	}
+}
+
 // TestGetInfohashPointerEmptySalt covers the matching empty-salt
 // guard on the getter side.
 func TestGetInfohashPointerEmptySalt(t *testing.T) {
