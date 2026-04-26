@@ -136,6 +136,31 @@ func patchClusterTypeByte(t *testing.T, zim []byte, clusterIdx uint32, newType b
 	return zim
 }
 
+// TestZimExtractorSkipsDeletedEntry covers readZimDirEntry's
+// `case zimDeletedMime: return zimDirEntry{IsDeleted: true}` arm.
+// Patch a built ZIM's dir entry mimeIdx to zimDeletedMime; the
+// outer Extract loop then takes the IsDeleted skip branch.
+func TestZimExtractorSkipsDeletedEntry(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "good.txt", Mime: "text/plain", Body: []byte("hello world")},
+		{URL: "del.txt", Mime: "text/plain", Body: []byte("does not matter")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	zim = patchDirEntryMimeIdx(t, zim, 1, zimDeletedMime)
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want 1 (deleted entry must be skipped)", len(chunks))
+	}
+	if !strings.Contains(chunks[0].Text, "hello world") {
+		t.Errorf("unexpected text: %q", chunks[0].Text)
+	}
+}
+
 // TestZimExtractorXZClusterTypeRejected covers readZimCluster's
 // `zimCompXZ → "XZ/LZMA2 clusters not supported in v1"` arm.
 // Patch a valid uncompressed cluster's type byte to 4 (XZ); the
