@@ -14,6 +14,63 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
+// TestStartPublisherDisablePublishMode exercises the
+// `if e.cfg.DisableDHTPublish { ... } else { ... }` arm in
+// startPublisher. With DisableDHTPublish=true, the keyword
+// publisher worker is skipped but lookup + pointer
+// putter/getter are still wired so the node can subscribe to
+// other publishers.
+func TestStartPublisherDisablePublishMode(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	identPath := filepath.Join(dataDir, "identity.key")
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(identPath, priv, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.ListenPort = 0
+	cfg.ListenHost = "127.0.0.1"
+	cfg.DisableDHT = false
+	cfg.DisableDHTPublish = true // leech-only DHT mode
+	cfg.DHTInsecure = true
+	cfg.DHTBootstrapAddrs = []string{"127.0.0.1:1"}
+	cfg.DisableIPv6 = true
+	cfg.NoUpload = true
+	cfg.Seed = false
+	cfg.IdentityPath = identPath
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+	cfg.PublisherManifest = ""
+	cfg.CompanionDir = ""
+	cfg.CompanionFollowFile = ""
+
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	defer eng.Close()
+
+	// Publisher must be nil in leech-only mode; lookup and
+	// pointer pair must still be wired so subscribers can pull.
+	if eng.Publisher() != nil {
+		t.Error("Publisher must be nil with DisableDHTPublish=true")
+	}
+	if eng.Lookup() == nil {
+		t.Error("Lookup must still be wired in leech-only DHT mode")
+	}
+	if eng.PointerPutter() == nil {
+		t.Error("PointerPutter must still be wired (BEP-46 publishing is independent)")
+	}
+}
+
 // TestStartPublisherFullPath exercises engine.New's startPublisher
 // happy path: DHT enabled + identity loaded → publisher worker
 // constructed, lookup wired, pointer putter/getter populated.
