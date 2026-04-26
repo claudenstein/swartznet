@@ -118,8 +118,8 @@ func TestStartPublisherFullPath(t *testing.T) {
 	cfg.PublisherManifest = filepath.Join(dataDir, "manifest.json")
 	cfg.CompanionDir = ""
 	cfg.CompanionFollowFile = ""
-	cfg.Regtest = true            // exercises the Regtest publisher options arm
-	cfg.MinIndexerScore = 0.25    // exercises lookup.SetMinIndexerScore arm
+	cfg.Regtest = true         // exercises the Regtest publisher options arm
+	cfg.MinIndexerScore = 0.25 // exercises lookup.SetMinIndexerScore arm
 
 	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
