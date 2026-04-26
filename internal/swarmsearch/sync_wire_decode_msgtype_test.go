@@ -6,6 +6,47 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 )
 
+// TestDecodeSyncSymbolsBadDataXORLen covers DecodeSyncSymbols'
+// `if len(s.DataXOR) != 32` per-symbol validation. Hand-
+// marshal a frame whose first symbol carries a 5-byte
+// DataXOR — bencode round-trips fine but the post-decode
+// loop rejects.
+func TestDecodeSyncSymbolsBadDataXORLen(t *testing.T) {
+	t.Parallel()
+	bad, err := bencode.Marshal(SyncSymbols{
+		MsgType: MsgTypeSyncSymbols,
+		TxID:    1,
+		Symbols: []SyncSymbol{
+			{Count: 1, KeyXOR: 0xff, DataXOR: make([]byte, 5)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeSyncSymbols(bad); err == nil {
+		t.Error("DecodeSyncSymbols should reject 5-byte DataXOR")
+	}
+}
+
+// TestEncodeSyncRecordsNilRecordsDefault covers EncodeSyncRecords'
+// `if m.Records == nil { m.Records = []SyncRecord{} }` arm.
+// Pass a nil Records slice and verify the wire form is still
+// produced (with the empty default substituted).
+func TestEncodeSyncRecordsNilRecordsDefault(t *testing.T) {
+	t.Parallel()
+	raw, err := EncodeSyncRecords(SyncRecords{TxID: 1, Records: nil})
+	if err != nil {
+		t.Fatalf("EncodeSyncRecords nil records: %v", err)
+	}
+	got, err := DecodeSyncRecords(raw)
+	if err != nil {
+		t.Fatalf("DecodeSyncRecords round trip: %v", err)
+	}
+	if len(got.Records) != 0 {
+		t.Errorf("got %d records, want 0", len(got.Records))
+	}
+}
+
 // TestEncodeSyncNeedNilIDsDefault covers EncodeSyncNeed's
 // `if m.IDs == nil { m.IDs = [][]byte{} }` arm. Pass a nil
 // IDs slice — the encoder must substitute the empty slice
