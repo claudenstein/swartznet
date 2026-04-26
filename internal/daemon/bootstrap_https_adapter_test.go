@@ -147,6 +147,35 @@ func TestNewBootstrapNilLookup(t *testing.T) {
 	}
 }
 
+// TestIngestEndorsementBloomPolicyFallback covers the
+// `if b.bloomPolicy(cand) { admit("endorsed-bloom", ...) }`
+// arm. EndorsementThreshold=10 ensures countStrongEndorsers
+// with a single endorser falls short, forcing the policy
+// fallback. With bloom + tracker wired, bloomPolicy(cand)
+// returns true via tracker.Threshold(cand, 0.3) — the
+// default unknown score of 0.5 clears 0.3 — so admit fires.
+func TestIngestEndorsementBloomPolicyFallback(t *testing.T) {
+	t.Parallel()
+	lookup := newTestLookup()
+	bf := reputation.NewBloomFilter(16, 0.01)
+	tr := reputation.NewTracker()
+	opts := DefaultBootstrapOptions()
+	opts.EndorsementThreshold = 10
+	b, err := NewBootstrap(lookup, nil, bf, tr, opts, nil)
+	if err != nil {
+		t.Fatalf("NewBootstrap: %v", err)
+	}
+
+	endorser := pubkeyBytes("endorser-1")
+	cand := pubkeyBytes("cand-1")
+	if !b.IngestEndorsement(endorser, cand) {
+		t.Error("IngestEndorsement should admit via bloom-policy fallback")
+	}
+	if !b.IsAdmitted(cand) {
+		t.Error("cand should be admitted after bloom-policy fallback")
+	}
+}
+
 // TestNewBootstrapZeroOptionsFillDefaults covers the four
 // default-fill arms (MaxTrackedPublishers, AnchorReputation,
 // CandidateReputation, EndorsementThreshold) plus the nil-log
