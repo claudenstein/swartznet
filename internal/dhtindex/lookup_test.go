@@ -172,6 +172,37 @@ func TestLookupSomeIndexersSilent(t *testing.T) {
 	}
 }
 
+// TestLookupQueryDropsBadInfoHashLength covers the
+// `if len(ih) != 40 { continue }` arm of legacyQuery's merge
+// loop. KeywordHit.IH is a []byte so a malformed indexer can
+// publish a hit with an IH that's not exactly 20 bytes; the
+// merge must skip it without indexing into the empty slot.
+func TestLookupQueryDropsBadInfoHashLength(t *testing.T) {
+	t.Parallel()
+	g := newScriptedGetter()
+	pub := newPubkey(t)
+	salt, _ := dhtindex.SaltForKeyword("ubuntu")
+	g.set(pub, salt, dhtindex.KeywordValue{Hits: []dhtindex.KeywordHit{
+		// 19-byte IH → hex string is 38 chars → skipped.
+		{IH: bytes.Repeat([]byte{0xaa}, 19), N: "Wrong Length", S: 50},
+		// Valid 20-byte IH → kept.
+		{IH: bytes.Repeat([]byte{0xbb}, 20), N: "Right Length", S: 100},
+	}})
+
+	l := dhtindex.NewLookup(g)
+	l.AddIndexer(pub, "indexer-one")
+	resp, err := l.Query(context.Background(), "ubuntu")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(resp.Hits) != 1 {
+		t.Fatalf("Hits = %d, want 1 (bad-length one dropped)", len(resp.Hits))
+	}
+	if resp.Hits[0].Name != "Right Length" {
+		t.Errorf("kept hit name = %q, want 'Right Length'", resp.Hits[0].Name)
+	}
+}
+
 // TestLookupQueryMergeFillsEmptyNameWithinIndexer covers the
 // `if lh.Name == "" && h.N != "" { lh.Name = h.N }` arm and
 // the matching Size/Files fill-from-later-hit arms of
