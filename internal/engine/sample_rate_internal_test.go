@@ -41,6 +41,41 @@ func minimalTorrentFile(t *testing.T, dir string) (string, string) {
 	return path, metainfo.HashBytes(infoBytes).HexString()
 }
 
+// TestSampleRateNoMetadataReturnsZeros covers sampleRate's
+// `if h.T.Info() == nil { return 0, 0 }` early-return arm.
+// A magnet handle has no metadata until GotInfo fires; with
+// DHT disabled and no peers, that never happens, so
+// sampleRate must take the early return.
+func TestSampleRateNoMetadataReturnsZeros(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+
+	eng, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	const magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
+	h, err := eng.AddMagnet(magnet)
+	if err != nil {
+		t.Fatalf("AddMagnet: %v", err)
+	}
+	dr, ur := h.sampleRate()
+	if dr != 0 || ur != 0 {
+		t.Errorf("magnet without metadata sampleRate = (%d, %d), want (0, 0)", dr, ur)
+	}
+}
+
 // TestSampleRateFirstCallSeedsZeros pins the documented first-
 // call behaviour: sampleRate seeds its internal state and
 // returns (0, 0).
