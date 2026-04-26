@@ -63,6 +63,56 @@ func TestHTTPSearchWithSwarmConfigured(t *testing.T) {
 	}
 }
 
+// fixedHitGetter returns the same KeywordValue for every
+// (pubkey, salt) pair. Used to drive Lookup.Query into its
+// happy path so handleSearch's hit-iteration loop fires.
+type fixedHitGetter struct {
+	hits []dhtindex.KeywordHit
+}
+
+func (g fixedHitGetter) Get(_ context.Context, _ [32]byte, _ []byte) (dhtindex.KeywordValue, error) {
+	return dhtindex.KeywordValue{Hits: g.hits}, nil
+}
+
+// TestHTTPSearchDHTReturnsHits covers handleSearch's
+// `for _, h := range out.Hits { dhtResp.Hits = append(...) }`
+// arm. Wire a Lookup with a fixedHitGetter that returns one
+// hit, register an indexer, then post a query and verify the
+// HTTP response carries the hit translated into a DHTHit.
+func TestHTTPSearchDHTReturnsHits(t *testing.T) {
+	t.Parallel()
+	getter := fixedHitGetter{hits: []dhtindex.KeywordHit{
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "Ubuntu DHT", S: 100, F: 4, Sz: 6 << 30},
+	}}
+	lookup := dhtindex.NewLookup(getter)
+	var pub [32]byte
+	pub[0] = 0xab
+	lookup.AddIndexer(pub, "indexer-one")
+	idx := openTempIndex(t)
+	base := startServer(t, httpapi.Options{Index: idx, Lookup: lookup})
+
+	body, _ := json.Marshal(httpapi.SearchRequest{
+		Q:            "ubuntu",
+		DHT:          true,
+		DHTTimeoutMs: 200,
+	})
+	resp, err := http.Post(base+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got httpapi.SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DHT == nil || len(got.DHT.Hits) == 0 {
+		t.Fatalf("expected DHT hits, got %+v", got.DHT)
+	}
+	if got.DHT.Hits[0].Name != "Ubuntu DHT" {
+		t.Errorf("hit Name = %q, want 'Ubuntu DHT'", got.DHT.Hits[0].Name)
+	}
+}
+
 // TestHTTPSearchDHTQueryError covers handleSearch's
 // `if err != nil { dhtResp.Error = err.Error() }` arm in the
 // DHT path. dhtindex.Lookup.Query rejects queries that
