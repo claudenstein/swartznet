@@ -65,6 +65,25 @@ func TestTorrentFilesPreMetadataReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestSetFilePriorityUnknownInfoHashErrors covers the
+// `if err := handleByHex(...); err != nil { return err }`
+// arm. Pass an infohash that isn't registered with the
+// engine; the handle lookup fails and the function returns
+// before touching anacrolix state.
+func TestSetFilePriorityUnknownInfoHashErrors(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := newFilesErrorEngine(t)
+	defer cleanup()
+
+	var ih [20]byte
+	if _, err := rand.Read(ih[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.SetFilePriority(hex.EncodeToString(ih[:]), 0, engine.FilePriorityNormal); err == nil {
+		t.Error("SetFilePriority on unknown infohash should error")
+	}
+}
+
 // TestSetFilePriorityPreMetadataErrors covers the
 // "torrent metadata not yet available" branch.
 func TestSetFilePriorityPreMetadataErrors(t *testing.T) {
