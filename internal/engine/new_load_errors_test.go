@@ -109,6 +109,42 @@ func TestNewLogsIdentityLoadError(t *testing.T) {
 	defer eng.Close()
 }
 
+// TestNewLogsTrustLoadError covers engine.New's
+// trust.LoadOrCreate `if err != nil { log.Warn(...) }` arm.
+// Plant a directory at the trust path so the underlying
+// ReadFile fails on a non-NotExist error.
+func TestNewLogsTrustLoadError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	trustDir := filepath.Join(dir, "trust-as-directory")
+	if err := os.Mkdir(trustDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trustDir, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = trustDir
+
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("engine.New: %v (trust load failure must be non-fatal)", err)
+	}
+	defer eng.Close()
+	if eng.TrustStore() != nil {
+		t.Error("TrustStore should be nil when load failed")
+	}
+}
+
 // TestNewLogsReputationLoadError covers engine.New's reputation-
 // load `if err != nil { log.Warn(...) }` arm. Same pattern as
 // TestNewLogsBloomLoadError but pointed at the reputation path.
