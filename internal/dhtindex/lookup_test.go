@@ -172,6 +172,37 @@ func TestLookupSomeIndexersSilent(t *testing.T) {
 	}
 }
 
+// TestLookupQueryMergeFillsEmptyNameWithinIndexer covers the
+// `if lh.Name == "" && h.N != "" { lh.Name = h.N }` arm of
+// legacyQuery's merge loop. A single indexer returns two hits
+// for the same infohash where the first has empty Name and
+// the second has a non-empty Name. The merge processes hits
+// in slice order, so the second hit's name fills in the
+// initially-empty merged entry deterministically.
+func TestLookupQueryMergeFillsEmptyNameWithinIndexer(t *testing.T) {
+	t.Parallel()
+	g := newScriptedGetter()
+	pub := newPubkey(t)
+	salt, _ := dhtindex.SaltForKeyword("ubuntu")
+	g.set(pub, salt, dhtindex.KeywordValue{Hits: []dhtindex.KeywordHit{
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "", S: 50},
+		{IH: bytes.Repeat([]byte{0xaa}, 20), N: "Ubuntu Late", S: 100},
+	}})
+
+	l := dhtindex.NewLookup(g)
+	l.AddIndexer(pub, "indexer-one")
+	resp, err := l.Query(context.Background(), "ubuntu")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(resp.Hits) != 1 {
+		t.Fatalf("Hits = %d, want 1 (dedup)", len(resp.Hits))
+	}
+	if resp.Hits[0].Name != "Ubuntu Late" {
+		t.Errorf("merged name = %q, want 'Ubuntu Late' (filled from later hit)", resp.Hits[0].Name)
+	}
+}
+
 func TestLookupQueryEmptyTokens(t *testing.T) {
 	t.Parallel()
 	l := dhtindex.NewLookup(newScriptedGetter())
