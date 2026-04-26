@@ -46,6 +46,35 @@ func TestWriteCompanionFilesMkdirFails(t *testing.T) {
 	}
 }
 
+// TestWriteCompanionFilesAtomicWriteTorrentFails covers the
+// torrent-write error branch — JSON payload writes
+// successfully but the second atomicWrite for
+// companion.torrent fails because we pre-plant a non-empty
+// directory at companion.torrent.tmp.
+func TestWriteCompanionFilesAtomicWriteTorrentFails(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("opening a directory for writing has different semantics on Windows")
+	}
+	dir := t.TempDir()
+	// Plant blocker at companion.torrent.tmp so the second
+	// atomicWrite call (for the torrent) fails. Leave the
+	// JSON-payload tempfile path clean so the first
+	// atomicWrite succeeds.
+	tmp := filepath.Join(dir, "companion.torrent.tmp")
+	if err := os.MkdirAll(filepath.Join(tmp, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := companion.WriteCompanionFiles(dir, companion.CompanionIndex{})
+	if err == nil {
+		t.Error("expected torrent-write error")
+	}
+	if !strings.Contains(err.Error(), "write torrent") {
+		t.Errorf("err = %q, want it to mention 'write torrent'", err.Error())
+	}
+}
+
 // TestWriteCompanionFilesAtomicWritePayloadFails covers the
 // payload-write error branch — pre-plant a non-empty directory at
 // `<dir>/<FormatFileName>.tmp` so atomicWrite fails when it tries
