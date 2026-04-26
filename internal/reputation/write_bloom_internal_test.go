@@ -1,6 +1,8 @@
 package reputation
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -54,5 +56,44 @@ func TestWriteBloomBitsWriteError(t *testing.T) {
 	w := &failingWriter{allowedBytes: 24}
 	if err := writeBloom(w, bf); err == nil {
 		t.Error("writeBloom should surface bits-loop write error")
+	}
+}
+
+// TestReadBloomBitsLenInconsistent covers readBloom's
+// `if bitsLen > (m+63)/64+1` guard. Hand-craft a header whose
+// declared bitsLen exceeds what m would allow, and verify
+// readBloom rejects rather than allocating a huge slice.
+func TestReadBloomBitsLenInconsistent(t *testing.T) {
+	t.Parallel()
+	hdr := make([]byte, 24)
+	copy(hdr[0:4], bloomFileMagic)
+	binary.LittleEndian.PutUint16(hdr[4:6], bloomFileVersion)
+	binary.LittleEndian.PutUint16(hdr[6:8], 4)              // k=4
+	binary.LittleEndian.PutUint64(hdr[8:16], 64)            // m=64 → expected bitsLen ~1
+	binary.LittleEndian.PutUint64(hdr[16:24], 1_000_000_000) // huge claimed bitsLen
+	if _, err := readBloom(bytes.NewReader(hdr)); err == nil {
+		t.Error("readBloom should reject bitsLen inconsistent with m")
+	}
+}
+
+// TestReadBloomBitsReadError covers readBloom's
+// `io.ReadFull(r, buf)` error arm inside the bits-loop. We
+// supply a header whose bitsLen claims 2 entries but the
+// reader has only enough bytes for the header plus 1 entry.
+// The 2nd ReadFull returns io.EOF / unexpected EOF.
+func TestReadBloomBitsReadError(t *testing.T) {
+	t.Parallel()
+	// m=64 → expected bitsLen = (64+63)/64 + 1 = 2.
+	hdr := make([]byte, 24)
+	copy(hdr[0:4], bloomFileMagic)
+	binary.LittleEndian.PutUint16(hdr[4:6], bloomFileVersion)
+	binary.LittleEndian.PutUint16(hdr[6:8], 4)   // k=4
+	binary.LittleEndian.PutUint64(hdr[8:16], 64) // m=64
+	binary.LittleEndian.PutUint64(hdr[16:24], 2) // bitsLen=2
+	// Provide only 8 bytes of bits (= 1 entry); the second
+	// ReadFull fails.
+	body := append(hdr, make([]byte, 8)...)
+	if _, err := readBloom(bytes.NewReader(body)); err == nil {
+		t.Error("readBloom should fail when bits truncate mid-read")
 	}
 }
