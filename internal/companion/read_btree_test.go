@@ -275,6 +275,51 @@ func (l *leafFailSource) Piece(i int) ([]byte, error) {
 }
 func (l *leafFailSource) NumPieces() int { return l.inner.NumPieces() }
 
+// TestFindRootHeaderDecodeError covers Find's
+// `decodeHeader(rootPage) error` arm. Return zero-bytes for
+// piece 0 so decodeHeader fails on the magic check before
+// walkToLeaves runs.
+func TestFindRootHeaderDecodeError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &constPieceSource{inner: r.src, idx: 0, payload: make([]byte, MinPieceSize)}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when root header decode errors")
+	}
+}
+
+// TestFindRootKindNotRoot covers Find's
+// `if hdr.Kind != PageKindRoot` arm. Return a leaf-kind page
+// for piece 0 so decodeHeader succeeds but the kind check
+// rejects.
+func TestFindRootKindNotRoot(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Fabricate a valid leaf-kind page (just header) for piece 0.
+	leafHdr := encodeHeader(PageHeader{
+		Version: BTreeVersion,
+		Kind:    PageKindLeaf,
+	})
+	page := make([]byte, MinPieceSize)
+	copy(page, leafHdr)
+	r.src = &constPieceSource{inner: r.src, idx: 0, payload: page}
+	if _, err := r.Find("ubuntu"); err == nil {
+		t.Error("Find should fail when piece 0 is not root kind")
+	}
+}
+
+type constPieceSource struct {
+	inner   PageSource
+	idx     int
+	payload []byte
+}
+
+func (c *constPieceSource) Piece(i int) ([]byte, error) {
+	if i == c.idx {
+		return c.payload, nil
+	}
+	return c.inner.Piece(i)
+}
+func (c *constPieceSource) NumPieces() int { return c.inner.NumPieces() }
+
 // TestFindLeafDecodeErrorReFetch covers Find's
 // `_, recs, err := DecodeLeaf(page); if err != nil` arm. The
 // existing TestFindLeafDecodeError corrupts the leaf bytes
