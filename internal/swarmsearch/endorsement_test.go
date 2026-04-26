@@ -3,6 +3,8 @@ package swarmsearch
 import (
 	"bytes"
 	"testing"
+
+	"github.com/anacrolix/torrent/bencode"
 )
 
 // PeerAnnounce with endorsements round-trips through encode/decode
@@ -63,6 +65,37 @@ func TestPeerAnnounceEndorsedDecodeFiltersMalformed(t *testing.T) {
 	}
 	if len(got.Endorsed) != 1 {
 		t.Errorf("got %d endorsements, want 1 (short entry filtered)", len(got.Endorsed))
+	}
+}
+
+// TestDecodePeerAnnounceTruncatesOverrun covers the
+// `if len(pa.Endorsed) > MaxEndorsedPerAnnounce` truncation
+// arm by hand-marshaling a payload that bypasses
+// EncodePeerAnnounce's pre-publish cap check, then
+// re-decoding. The decoder must trim the slice rather than
+// blow out memory or surface an error.
+func TestDecodePeerAnnounceTruncatesOverrun(t *testing.T) {
+	huge := make([][]byte, MaxEndorsedPerAnnounce+5)
+	for i := range huge {
+		e := make([]byte, 32)
+		e[0] = byte(i)
+		huge[i] = e
+	}
+	// Bencode-marshal directly to get past the publisher-side
+	// cap check.
+	raw, err := bencode.Marshal(PeerAnnounce{
+		MsgType:  MsgTypePeerAnnounce,
+		Endorsed: huge,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodePeerAnnounce(raw)
+	if err != nil {
+		t.Fatalf("DecodePeerAnnounce: %v", err)
+	}
+	if len(got.Endorsed) != MaxEndorsedPerAnnounce {
+		t.Errorf("decode len = %d, want %d (truncated)", len(got.Endorsed), MaxEndorsedPerAnnounce)
 	}
 }
 
