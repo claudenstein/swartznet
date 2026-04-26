@@ -6,6 +6,26 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 )
 
+// TestEncodeSyncNeedNilIDsDefault covers EncodeSyncNeed's
+// `if m.IDs == nil { m.IDs = [][]byte{} }` arm. Pass a nil
+// IDs slice — the encoder must substitute the empty slice
+// before bencoding so the on-the-wire form has an explicit
+// (empty) list rather than nothing.
+func TestEncodeSyncNeedNilIDsDefault(t *testing.T) {
+	t.Parallel()
+	raw, err := EncodeSyncNeed(SyncNeed{TxID: 1, IDs: nil})
+	if err != nil {
+		t.Fatalf("EncodeSyncNeed nil IDs: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Error("EncodeSyncNeed produced empty payload")
+	}
+	// Round trip back so we know the bencoded form is valid.
+	if _, err := DecodeSyncNeed(raw); err != nil {
+		t.Errorf("DecodeSyncNeed of nil-IDs round trip: %v", err)
+	}
+}
+
 // TestDecodeSyncRecordsTooManyRecordsCap covers DecodeSyncRecords's
 // `if len(m.Records) > MaxRecordsPerMessage` cap arm. Encode a
 // SyncRecords frame with MaxRecordsPerMessage+1 records — the
