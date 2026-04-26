@@ -47,6 +47,22 @@ func TestEXIFExtractorBadTIFFByteOrderMarker(t *testing.T) {
 	}
 }
 
+// TestEXIFExtractorJPEGWithoutFFMarkerByte covers
+// findExifTIFF's `if b[i] != 0xFF { return nil, false }` arm.
+// A JPEG-shaped input (FF D8 + payload) where the byte after
+// SOI isn't 0xFF aborts the segment scan immediately.
+func TestEXIFExtractorJPEGWithoutFFMarkerByte(t *testing.T) {
+	t.Parallel()
+	jpeg := []byte{0xFF, 0xD8, 0x00, 0x00, 0x12, 0x34}
+	chunks, err := NewEXIFExtractor().Extract(bytes.NewReader(jpeg), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil for non-FF marker byte", len(chunks))
+	}
+}
+
 // TestEXIFExtractorJPEGWithCOMSegmentSkipped covers
 // findExifTIFF's `i = bodyEnd` advance arm. A JPEG containing a
 // non-EXIF segment (COM) followed by EOI exercises the loop's
