@@ -449,6 +449,48 @@ func TestFindDropsRecordsBelowMinPoW(t *testing.T) {
 	}
 }
 
+// TestVerifyFingerprintFetchError covers VerifyFingerprint's
+// `if err := r.src.Piece(i); err != nil` arm. Swap the source
+// with a wrapper that fails on piece 1 (the leaf) so the walk
+// errors out before any record is hashed.
+func TestVerifyFingerprintFetchError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &pieceErrSource{inner: r.src, failIdx: 1}
+	if err := r.VerifyFingerprint(); err == nil {
+		t.Error("VerifyFingerprint should propagate piece-fetch errors")
+	}
+}
+
+// TestVerifyFingerprintHeaderDecodeError covers
+// VerifyFingerprint's `if err := decodeHeader(page); err != nil`
+// arm. Replace piece 1 with all-zero bytes so decodeHeader
+// rejects on bad magic.
+func TestVerifyFingerprintHeaderDecodeError(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	r.src = &constPieceSource{inner: r.src, idx: 1, payload: make([]byte, MinPieceSize)}
+	if err := r.VerifyFingerprint(); err == nil {
+		t.Error("VerifyFingerprint should propagate header-decode errors")
+	}
+}
+
+// TestVerifyFingerprintHashMismatch covers the
+// `if got != r.trailer.TreeFingerprint` arm. Mutate the
+// in-memory trailer's TreeFingerprint after OpenBTree so the
+// reconstructed hash and the claim no longer match. The
+// counts still match (we don't touch leaves), so the count
+// guard passes and the fingerprint comparison is the
+// catch-all.
+func TestVerifyFingerprintHashMismatch(t *testing.T) {
+	r, _, _, _ := buildTestTree(t, 5, []string{"ubuntu"}, MinPieceSize)
+	// Flip a byte in the in-memory trailer fingerprint. The
+	// in-memory fingerprint diverges from what the leaves
+	// re-hash to, so the comparison fails.
+	r.trailer.TreeFingerprint[0] ^= 0xFF
+	if err := r.VerifyFingerprint(); err == nil {
+		t.Error("VerifyFingerprint should reject when reconstructed hash differs from trailer claim")
+	}
+}
+
 // TestVerifyFingerprintCountMismatch covers the
 // `if uint64(count) != r.trailer.NumRecords` arm of
 // VerifyFingerprint. Build a real tree, then artificially
