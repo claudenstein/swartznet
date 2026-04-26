@@ -163,6 +163,29 @@ func patchClusterTypeByte(t *testing.T, zim []byte, clusterIdx uint32, newType b
 	return zim
 }
 
+// TestZimExtractorZstdDecodeFails covers readZimCluster's
+// `decoded, err := dec.DecodeAll(body, nil); if err != nil { ... }`
+// arm. Patch a cluster's type byte to zimCompZstd (5) so the
+// decoder is invoked, but leave the body as raw uncompressed
+// content — DecodeAll will reject it. The Extract loop's
+// continue arm swallows the error.
+func TestZimExtractorZstdDecodeFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("content")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	zim = patchClusterTypeByte(t, zim, 0, 5) // zstd
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — zstd decode of uncompressed body should fail", len(chunks))
+	}
+}
+
 // TestZimExtractorSkipsDeletedEntry covers readZimDirEntry's
 // `case zimDeletedMime: return zimDirEntry{IsDeleted: true}` arm.
 // Patch a built ZIM's dir entry mimeIdx to zimDeletedMime; the
