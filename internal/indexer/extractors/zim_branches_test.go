@@ -173,6 +173,37 @@ func TestZimExtractorReadHeaderTruncated(t *testing.T) {
 	}
 }
 
+// TestZimExtractorDirEntryReadFailsContinue covers Extract's
+// `entry, err := readZimDirEntry(...); if err != nil { continue }`
+// arm. Patch entry 0's URL pointer to point past EOF; the dir
+// entry read fails and Extract skips that article. The second
+// article's pointer is intact so it still extracts.
+func TestZimExtractorDirEntryReadFailsContinue(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "bad.txt", Mime: "text/plain", Body: []byte("never seen")},
+		{URL: "good.txt", Mime: "text/plain", Body: []byte("hello-good")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	hdr := readZimHeaderForTest(t, zim)
+	// Overwrite entry 0's URL pointer (8 bytes at URLPtrPos+0*8)
+	// to a position past the file end so the dir-entry ReadAt
+	// inside readZimDirEntry returns an error.
+	urlPtrAt := int64(hdr.URLPtrPos)
+	binary.LittleEndian.PutUint64(zim[urlPtrAt:urlPtrAt+8], uint64(len(zim))+1<<20)
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want 1 (the bad-pointer entry must be skipped)", len(chunks))
+	}
+	if !strings.Contains(chunks[0].Text, "hello-good") {
+		t.Errorf("unexpected text: %q", chunks[0].Text)
+	}
+}
+
 // TestZimExtractorMimeListReadFails covers readZimMimeList's
 // `if err != nil { break }` + `if len(all) == 0 { error }`
 // arms when the mime-list position points past the file end.
