@@ -4,6 +4,48 @@ import (
 	"testing"
 )
 
+// TestProduceSymbolsWrongPhase covers ProduceSymbols's
+// `if s.phase != PhaseBegun && s.phase != PhaseSymbolsFlowing`
+// error arm. A fresh session is in PhaseIdle; ProduceSymbols
+// must reject before generating any symbols.
+func TestProduceSymbolsWrongPhase(t *testing.T) {
+	t.Parallel()
+	s := NewSyncSession(1, RoleResponder, nil)
+	if _, _, err := s.ProduceSymbols(8); err == nil {
+		t.Error("ProduceSymbols in PhaseIdle should error")
+	}
+}
+
+// TestProduceSymbolsCountClamping covers the two count-
+// clamping arms: count <= 0 falls back to MaxSymbolsPerMessage,
+// and count > MaxSymbolsPerMessage gets capped.
+func TestProduceSymbolsCountClamping(t *testing.T) {
+	t.Parallel()
+	s := NewSyncSession(1, RoleInitiator, nil)
+	if _, err := s.Begin(SyncFilter{}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	// count = 0 → MaxSymbolsPerMessage default applied; the
+	// initial symbol budget is also bounded by maxSymbols, so
+	// this just needs to not error.
+	syms, _, err := s.ProduceSymbols(0)
+	if err != nil {
+		t.Fatalf("ProduceSymbols(0): %v", err)
+	}
+	if len(syms) == 0 || len(syms) > MaxSymbolsPerMessage {
+		t.Errorf("count<=0 path: got %d symbols, want 1..%d", len(syms), MaxSymbolsPerMessage)
+	}
+
+	// count > MaxSymbolsPerMessage → capped.
+	syms2, _, err := s.ProduceSymbols(MaxSymbolsPerMessage + 100)
+	if err != nil {
+		t.Fatalf("ProduceSymbols(huge): %v", err)
+	}
+	if len(syms2) > MaxSymbolsPerMessage {
+		t.Errorf("count too large: got %d symbols, want <= %d", len(syms2), MaxSymbolsPerMessage)
+	}
+}
+
 // TestSyncSessionFinishEmptyStatus covers Finish's empty-string
 // default arm: passing "" must rewrite to SyncStatusConverged.
 func TestSyncSessionFinishEmptyStatus(t *testing.T) {
