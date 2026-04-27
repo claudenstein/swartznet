@@ -210,6 +210,55 @@ func TestCmdAddSigintWhileWaitingForMetadata(t *testing.T) {
 	}
 }
 
+// TestCmdAddRealTorrentSigint exercises cmdAdd's full happy
+// path: a real .torrent file (built via CreateTorrent), so
+// GotInfo fires immediately, printInfo and progressLoop both
+// run. SIGINT cancels the signal-context to make progressLoop
+// exit cleanly.
+func TestCmdAddRealTorrentSigint(t *testing.T) {
+	dataDir := t.TempDir()
+	indexDir := t.TempDir()
+
+	// Build a real torrent file via the in-process engine.
+	eng := newAddTestEngine(t)
+	src := filepath.Join(dataDir, "src.bin")
+	if err := os.WriteFile(src, []byte("realtorrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(t.TempDir(), "test.torrent")
+	if _, _, err := eng.CreateTorrentFile(engine.CreateTorrentOptions{Root: src}, torrentPath); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := cmdAdd([]string{
+			"--data-dir", dataDir,
+			"--index-dir", indexDir,
+			"--port", "0",
+			"--no-dht",
+			"--api-addr", "",
+			torrentPath,
+		}, &stdout, &stderr)
+		done <- code
+	}()
+
+	// Wait for cmdAdd to enter progressLoop, then SIGINT.
+	time.Sleep(500 * time.Millisecond)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatalf("SIGINT failed: %v", err)
+	}
+
+	select {
+	case <-done:
+		// Either exitOK (clean) or exitInterrupt — both are
+		// acceptable; the goal is to drive the lines.
+	case <-time.After(10 * time.Second):
+		t.Error("cmdAdd did not exit within 10s of SIGINT after metadata")
+	}
+}
+
 // TestPrintInfoTruncatesLongFileList covers printInfo's
 // `if i == maxListed { ... break }` arm at lines 157-159. A
 // torrent with 25 files exceeds the 20-file print cap, so the
