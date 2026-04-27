@@ -18,6 +18,32 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
+// TestCmdAddDaemonNewErr covers cmdAdd's
+// `d, err := daemon.New(...); if err != nil { return reportRunErr }`
+// arm at cmd_add.go:87-89. A --data-dir nested under a regular
+// file makes config.Validate fail (ENOTDIR on MkdirAll), which
+// engine.New surfaces and daemon.New propagates.
+func TestCmdAddDaemonNewErr(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(blocker, "data")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdAdd([]string{
+		"--data-dir", bad,
+		"--no-dht",
+		"--api-addr", "",
+		"magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
+	}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("daemon.New-err exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdAddBadFlag covers cmdAdd's `fs.Parse` err arm.
 func TestCmdAddBadFlag(t *testing.T) {
 	t.Parallel()
