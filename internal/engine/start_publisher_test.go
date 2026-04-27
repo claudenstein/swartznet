@@ -15,6 +15,64 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
+// TestStartPublisherManifestLoadError covers
+// startPublisher's `mf, err := LoadOrCreateManifest(...); if err != nil { return }`
+// arm. Plant a directory at the PublisherManifest path so
+// LoadOrCreateManifest fails on the read of an unreadable
+// path. Engine.New surfaces a non-fatal warn ('publisher_start_err')
+// rather than aborting startup.
+func TestStartPublisherManifestLoadError(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	identPath := filepath.Join(dataDir, "identity.key")
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(identPath, priv, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a directory at the manifest path so LoadOrCreateManifest's
+	// ReadFile fails with a non-NotExist error.
+	manifestDir := filepath.Join(dataDir, "manifest.json")
+	if err := os.Mkdir(manifestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.ListenPort = 0
+	cfg.ListenHost = "127.0.0.1"
+	cfg.DisableDHT = false
+	cfg.DHTInsecure = true
+	cfg.DHTBootstrapAddrs = []string{"127.0.0.1:1"}
+	cfg.DisableIPv6 = true
+	cfg.NoUpload = true
+	cfg.Seed = false
+	cfg.IdentityPath = identPath
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+	cfg.PublisherManifest = manifestDir
+	cfg.CompanionDir = ""
+	cfg.CompanionFollowFile = ""
+
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("engine.New: %v (publisher manifest failure must be non-fatal)", err)
+	}
+	defer eng.Close()
+
+	if eng.Publisher() != nil {
+		t.Error("Publisher must be nil when manifest load failed")
+	}
+}
+
 // TestStartPublisherDisablePublishMode exercises the
 // `if e.cfg.DisableDHTPublish { ... } else { ... }` arm in
 // startPublisher. With DisableDHTPublish=true, the keyword
