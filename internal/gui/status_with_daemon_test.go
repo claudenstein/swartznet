@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 
 	"fyne.io/fyne/v2/test"
@@ -27,9 +28,13 @@ func newTestDaemon(t *testing.T) *daemon.Daemon {
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
 	cfg.IdentityPath = ""
-	cfg.ReputationPath = ""
+	// Setting BloomPath + ReputationPath under TempDir makes the
+	// engine construct non-nil KnownGoodBloom + ReputationTracker
+	// so confirmHit / flagHit tests can exercise the daemon arms.
+	root := t.TempDir()
+	cfg.BloomPath = filepath.Join(root, "bloom.dat")
+	cfg.ReputationPath = filepath.Join(root, "reputation.json")
 	cfg.SeedListPath = ""
-	cfg.BloomPath = ""
 	cfg.TrustPath = ""
 
 	d, err := daemon.New(context.Background(), daemon.Options{
