@@ -7,6 +7,26 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// TestReadZimClusterNextPtrReadFails covers readZimCluster's
+// `if num+1 < hdr.ClusterCount { … err arm … }` body. We point
+// ClusterPtrPos right at end-of-file so the second ReadAt for
+// num+1 goes past the buffer and fails.
+func TestReadZimClusterNextPtrReadFails(t *testing.T) {
+	t.Parallel()
+
+	// 8-byte file holding only the first cluster ptr (zeroes).
+	file := make([]byte, 8)
+
+	hdr := &zimHeader{
+		ClusterCount:  2,
+		ClusterPtrPos: 0, // ptr 0 at byte 0; ptr 1 would be at byte 8 (past EOF)
+		ChecksumPos:   16,
+	}
+	if _, err := readZimCluster(bytes.NewReader(file), hdr, 0); err == nil {
+		t.Error("readZimCluster should fail when next-cluster ReadAt hits EOF")
+	}
+}
+
 // TestReadZimMimeListExceedsCap covers readZimMimeList's
 // `if len(all) > zimMaxMimeListBytes { return nil, errors.New(…) }`
 // guard at lines 222-225. We hand it a ReaderAt that returns a
