@@ -62,3 +62,38 @@ func TestCmdAggregateFindOpenBTreeError(t *testing.T) {
 		t.Errorf("garbage-file exit = %d, want exitRuntime", code)
 	}
 }
+
+// TestCmdAggregateFindVerifyFails covers the
+// `reader.VerifyFingerprint err → exitRuntime` arm. Build a valid
+// b-tree, flip a byte in the middle to corrupt a leaf page so
+// the recomputed fingerprint disagrees with the trailer's
+// signed value.
+func TestCmdAggregateFindVerifyFails(t *testing.T) {
+	t.Parallel()
+	path, _ := buildTestIndexFile(t)
+	// Read, corrupt one byte in the leaf area (well past the
+	// header), write back.
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) < 100 {
+		t.Fatalf("test index too small: %d bytes", len(body))
+	}
+	// 5 records build to root[0] + leaf[1] + trailer[2] each
+	// 16384 bytes. Flip a byte well inside the leaf page's
+	// payload (offset 16384 + 30 sits in record bytes, past the
+	// 16-byte page header and 2-byte record count).
+	const minPieceSize = 16384
+	body[minPieceSize+30] ^= 0xFF
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	code := cmdAggregate([]string{"find", "--verify", path, "linux"}, stdout, stderr)
+	if code != exitRuntime {
+		t.Errorf("verify-fail exit = %d, want exitRuntime; stderr: %s", code, stderr.String())
+	}
+}
