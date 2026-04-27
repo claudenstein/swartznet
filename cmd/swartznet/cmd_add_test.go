@@ -138,6 +138,33 @@ func TestCmdAddBadTorrentFilePath(t *testing.T) {
 	}
 }
 
+// TestCmdAddBadTorrentFilePathWithAPI extends the bad-torrent-
+// path coverage to also fire the `if d.API != nil { … HTTP API
+// listening … }` print arm. APIAddr=127.0.0.1:0 spins up a real
+// HTTP server, the print runs, then addTorrent fails as before.
+func TestCmdAddBadTorrentFilePathWithAPI(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	indexDir := t.TempDir()
+	missingTorrent := filepath.Join(dataDir, "no-such.torrent")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdAdd([]string{
+		"--data-dir", dataDir,
+		"--index-dir", indexDir,
+		"--port", "0",
+		"--no-dht",
+		"--api-addr", "127.0.0.1:0",
+		missingTorrent,
+	}, &stdout, &stderr)
+	if code != exitRuntime {
+		t.Errorf("missing-torrent exit = %d, want exitRuntime; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "HTTP API listening") {
+		t.Errorf("expected 'HTTP API listening' line, got %q", stdout.String())
+	}
+}
+
 // TestProgressLoopReturnsOnCtxCancel covers progressLoop's
 // `case <-ctx.Done(): return` arm. Cancel a short ctx and
 // confirm the loop exits without hanging.
