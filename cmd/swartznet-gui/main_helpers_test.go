@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"testing"
 )
@@ -24,6 +25,18 @@ func TestTorrentFileFlag(t *testing.T) {
 	}
 	if flags[0] != "a.torrent" || flags[1] != "b.torrent" {
 		t.Errorf("flag contents = %v, want [a.torrent b.torrent]", []string(flags))
+	}
+}
+
+// TestRunBadFlag covers swartznet-gui's run() flag-parse-err
+// arm at lines 49-51. flag.ContinueOnError + an unknown flag
+// makes Parse return ErrHelp; run returns exit code 2.
+func TestRunBadFlag(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--no-such-flag"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("bad-flag exit = %d, want 2", code)
 	}
 }
 
