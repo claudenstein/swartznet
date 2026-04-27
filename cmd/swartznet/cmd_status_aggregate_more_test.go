@@ -27,6 +27,23 @@ func TestStatusTextAggregateBlockCacheMaxFormat(t *testing.T) {
 	}
 }
 
+// TestStatusTextLocalIndexNotConfigured covers emitStatusText's
+// `else { fmt.Fprintln(w, "  not configured") }` arm — the
+// Indexed=false path that prints "not configured".
+func TestStatusTextLocalIndexNotConfigured(t *testing.T) {
+	t.Parallel()
+	s := &httpapi.StatusResponse{
+		Local: httpapi.LocalStatus{Indexed: false},
+	}
+	var buf bytes.Buffer
+	if code := emitStatusText(&buf, s, nil); code != exitOK {
+		t.Fatal(code)
+	}
+	if !strings.Contains(buf.String(), "not configured") {
+		t.Errorf("expected 'not configured' line for Indexed=false: %s", buf.String())
+	}
+}
+
 // TestStatusTextAggregateBlockBootstrapPending covers
 // emitAggregateBlock's `if a.Bootstrap.Pending > 0` arm — pending
 // > 0 emits the "bootstrap pending" line.
