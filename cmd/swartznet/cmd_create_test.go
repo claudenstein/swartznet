@@ -10,6 +10,38 @@ import (
 	"time"
 )
 
+// TestCmdCreateEngineNewErr covers cmdCreate's
+// `eng, err := engine.New(...); if err != nil` arm at
+// cmd_create.go:107-110. Passing a --data-dir under a regular
+// file (so MkdirAll cannot make the directory) makes
+// config.Validate fail, which engine.New surfaces.
+func TestCmdCreateEngineNewErr(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Write a regular file at a path we'll then nest underneath.
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(blocker, "data")
+
+	src := filepath.Join(root, "src.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(root, "out.torrent")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdCreate([]string{
+		"--data-dir", bad,
+		"-o", out,
+		src,
+	}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("engine.New-err exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdCreateBadFlag covers cmdCreate's `fs.Parse` err arm.
 func TestCmdCreateBadFlag(t *testing.T) {
 	t.Parallel()
