@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 )
@@ -34,11 +35,23 @@ func TestNewCompanionTabWithDHT(t *testing.T) {
 	copy(pub[:], []byte("32-byte-test-pubkey-padding-bbbbbbb"))
 	d.CompSub.Follow(pub, "pre-existing-publisher")
 
+	// Add a long pubkey label too so the >16-char truncation arm
+	// in the follow-list UpdateCell callback fires.
+	var longPub [32]byte
+	copy(longPub[:], []byte("longer-32byte-test-pubkey-padding"))
+	d.CompSub.Follow(longPub, "long-pubkey-label")
+
 	ct := newCompanionTab(ctx, d)
 	if ct == nil {
 		t.Fatal("expected companionTab")
 	}
 
-	// Drive refresh once more directly with the seeded row visible.
+	// Drive refresh once more directly with the seeded rows visible.
 	ct.refresh()
+
+	// Mount + resize so the follow-list UpdateCell callback runs
+	// for each visible row.
+	w.SetContent(ct.content)
+	w.Resize(fyne.NewSize(1200, 800))
+	ct.followList.Refresh()
 }
