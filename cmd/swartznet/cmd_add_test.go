@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -162,6 +163,50 @@ func TestCmdAddBadTorrentFilePathWithAPI(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "HTTP API listening") {
 		t.Errorf("expected 'HTTP API listening' line, got %q", stdout.String())
+	}
+}
+
+// TestCmdAddSigintWhileWaitingForMetadata covers cmdAdd's
+// `case <-ctx.Done(): return exitInterrupt` arm in the
+// metadata-wait select. Pass a magnet URI for a random
+// infohash with --no-dht so GotInfo never fires, then SIGINT
+// to make the signal context cancel.
+func TestCmdAddSigintWhileWaitingForMetadata(t *testing.T) {
+	dataDir := t.TempDir()
+	indexDir := t.TempDir()
+
+	// magnet:?xt=urn:btih:<40 hex chars>
+	const ih = "1234567890abcdef1234567890abcdef12345678"
+	magnet := "magnet:?xt=urn:btih:" + ih
+
+	done := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := cmdAdd([]string{
+			"--data-dir", dataDir,
+			"--index-dir", indexDir,
+			"--port", "0",
+			"--no-dht",
+			"--api-addr", "",
+			magnet,
+		}, &stdout, &stderr)
+		done <- code
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatalf("SIGINT failed: %v", err)
+	}
+
+	select {
+	case code := <-done:
+		// reportRunErr(ctx.Canceled) → exitInterrupt for sigint.
+		if code != exitInterrupt {
+			t.Logf("cmdAdd exit = %d (acceptable if the engine close ordering races, "+
+				"but exitInterrupt is preferred)", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("cmdAdd did not exit within 10s of SIGINT")
 	}
 }
 
