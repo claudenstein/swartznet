@@ -21,6 +21,26 @@ func TestEncodeInteriorPayloadExceedsUint16(t *testing.T) {
 	}
 }
 
+// TestPackLeavesPropagatesNonOverflowErr covers packLeaves'
+// `return nil, err` arm at line 364 — EncodeLeaf can return
+// errors other than ErrPageOverflow (e.g. payload>uint16),
+// which packLeaves must surface directly without trying to
+// flush-and-restart.
+//
+// Strategy: large pieceSize (1 MiB) so ErrPageOverflow won't
+// fire, plus 600 records → payload > 65535 → EncodeLeaf returns
+// "leaf payload exceeds uint16" err, packLeaves propagates it.
+func TestPackLeavesPropagatesNonOverflowErr(t *testing.T) {
+	t.Parallel()
+	records := make([]Record, 600)
+	for i := range records {
+		records[i].Kw = "k"
+	}
+	if _, err := packLeaves(records, 1<<20); err == nil {
+		t.Error("packLeaves should propagate EncodeLeaf payload-overflow err")
+	}
+}
+
 // TestEncodeLeafPayloadExceedsUint16 covers EncodeLeaf's
 // `if payload.Len() > 65535 → err` arm. 600 trivial records
 // encode to ~120 bytes each, easily clearing the uint16 cap.
