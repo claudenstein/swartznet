@@ -54,6 +54,18 @@ func TestFetchAggregateBlockReturnsNilOnDoError(t *testing.T) {
 	}
 }
 
+// TestFetchAggregateBlockReturnsNilOnBadAddr covers the
+// `req, err := http.NewRequestWithContext(...); if err != nil`
+// arm. An invalid percent-escape in apiAddr makes url.Parse
+// reject the URL before any IO.
+func TestFetchAggregateBlockReturnsNilOnBadAddr(t *testing.T) {
+	t.Parallel()
+	got := fetchAggregateBlock(context.Background(), "%ZZ")
+	if got != nil {
+		t.Errorf("got %+v, want nil for bad-addr", got)
+	}
+}
+
 // TestFetchAggregateBlockHappyPath covers the success path —
 // 200 OK with a valid JSON body returns the parsed response.
 func TestFetchAggregateBlockHappyPath(t *testing.T) {

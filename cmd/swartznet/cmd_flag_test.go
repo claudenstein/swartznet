@@ -51,6 +51,18 @@ func TestCmdFlagUnreachableDaemon(t *testing.T) {
 	}
 }
 
+// TestCmdFlagBadAPIAddr covers cmdFlagOrConfirm's
+// `http.NewRequestWithContext err → reportRunErr` arm. Invalid
+// percent-escape in --api-addr trips url.Parse.
+func TestCmdFlagBadAPIAddr(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := cmdFlag([]string{"--api-addr", "%ZZ", validIH}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-addr exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdFlagNon200 covers the `resp.StatusCode != 200` arm.
 func TestCmdFlagNon200(t *testing.T) {
 	t.Parallel()

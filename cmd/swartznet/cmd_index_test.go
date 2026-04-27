@@ -49,6 +49,18 @@ func TestCmdIndexBadMode(t *testing.T) {
 	}
 }
 
+// TestCmdIndexBadAPIAddr covers cmdIndex's
+// `http.NewRequestWithContext err → reportRunErr` arm. Invalid
+// percent-escape in --api-addr trips url.Parse.
+func TestCmdIndexBadAPIAddr(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := cmdIndex([]string{"--api-addr", "%ZZ", validIH, "on"}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-addr exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdIndexUnreachableDaemon covers the
 // `Do err → cannot reach the daemon` arm.
 func TestCmdIndexUnreachableDaemon(t *testing.T) {

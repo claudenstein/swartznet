@@ -20,6 +20,19 @@ func TestCmdStatusBadFlag(t *testing.T) {
 	}
 }
 
+// TestCmdStatusBadAPIAddr covers cmdStatus's
+// `http.NewRequestWithContext err → reportRunErr` arm at
+// cmd_status.go:36-39. An invalid percent-escape in --api-addr
+// makes url.Parse reject the URL.
+func TestCmdStatusBadAPIAddr(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := cmdStatus([]string{"--api-addr", "%ZZ"}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-addr exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdStatusCannotReachDaemon covers the
 // `resp, err := http.DefaultClient.Do(req); if err != nil { … return exitRuntime }`
 // arm. Point at a port nothing's listening on.
