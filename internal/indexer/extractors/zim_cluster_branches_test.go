@@ -32,6 +32,12 @@ func patchHeaderClusterPtrPos(zim []byte, newPos uint64) {
 	binary.LittleEndian.PutUint64(zim[48:56], newPos)
 }
 
+// patchHeaderClusterCount rewrites the ClusterCount field. It
+// lives at offset 28 in the buildTestZim header (uint32 LE).
+func patchHeaderClusterCount(zim []byte, newCount uint32) {
+	binary.LittleEndian.PutUint32(zim[28:32], newCount)
+}
+
 // patchClusterPtrAt rewrites the i-th cluster pointer. The
 // pointer table lives at hdr.ClusterPtrPos and each entry is 8
 // bytes (uint64 LE).
@@ -108,6 +114,29 @@ func TestZimExtractorClusterPtrReadFails(t *testing.T) {
 	}
 	if chunks != nil {
 		t.Errorf("got %d chunks, want nil — cluster-ptr ReadAt must fail", len(chunks))
+	}
+}
+
+// TestZimExtractorNextClusterPtrReadFails covers readZimCluster's
+// `if num+1 < hdr.ClusterCount { … ra.ReadAt(endBuf[:], …) }` arm
+// AND its err-return at lines 318-322. Patch the header's
+// ClusterCount to 2 so reading cluster 0 also tries to read
+// cluster 1's start ptr — but only one ptr is actually written,
+// so ReadAt at the next slot fails with EOF.
+func TestZimExtractorNextClusterPtrReadFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	patchHeaderClusterCount(zim, 2) // claim 2 clusters; only 1 ptr written
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — next-cluster ReadAt must fail", len(chunks))
 	}
 }
 
