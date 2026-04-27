@@ -63,6 +63,46 @@ func TestCmdAggregateFindOpenBTreeError(t *testing.T) {
 	}
 }
 
+// TestCmdAggregateFindReaderFindErr covers cmdAggregateFind's
+// `hits, err := reader.Find(prefix); if err != nil` arm at
+// cmd_aggregate.go:146-150. Build a valid tree, then corrupt a
+// leaf page byte so DecodeLeaf rejects when Find walks to it.
+// OpenBTree only validates the trailer, so it passes; the err
+// only surfaces in reader.Find. Skip --verify so VerifyFingerprint
+// (which would also error) doesn't short-circuit first.
+func TestCmdAggregateFindReaderFindErr(t *testing.T) {
+	t.Parallel()
+	path, _ := buildTestIndexFile(t)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const minPieceSize = 16384
+	if len(body) < 2*minPieceSize {
+		t.Fatalf("test index too small: %d bytes", len(body))
+	}
+	// Wreck the leaf page beyond repair: zero its 16-byte header
+	// so decodeHeader (called from DecodeLeaf) rejects the
+	// version/kind. The trailer, root header, and root payload
+	// are intact, so OpenBTree + walkToLeaves still succeed and
+	// the err only fires inside Find's per-leaf DecodeLeaf call.
+	for i := 0; i < 16; i++ {
+		body[minPieceSize+i] = 0
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	// No --verify, so VerifyFingerprint doesn't run; the leaf
+	// corruption only matters when Find walks to it.
+	code := cmdAggregate([]string{"find", path, "linux"}, stdout, stderr)
+	if code != exitRuntime {
+		t.Errorf("find-err exit = %d, want exitRuntime; stderr: %s", code, stderr.String())
+	}
+}
+
 // TestCmdAggregateFindVerifyFails covers the
 // `reader.VerifyFingerprint err → exitRuntime` arm. Build a valid
 // b-tree, flip a byte in the middle to corrupt a leaf page so
