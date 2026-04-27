@@ -42,6 +42,21 @@ func TestCmdTrustUnknownSub(t *testing.T) {
 	}
 }
 
+// TestTrustListDefaultFile covers openTrustStore's empty-path
+// arm — when --file is omitted, it falls back to
+// config.Default().TrustPath. Override HOME so the test never
+// touches the user's real trust list.
+func TestTrustListDefaultFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", "")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdTrust([]string{"list"}, &stdout, &stderr)
+	if code != exitOK {
+		t.Errorf("default-file list exit = %d, stderr: %s", code, stderr.String())
+	}
+}
+
 // TestCmdTrustHelp covers the `case "help"` arm.
 func TestCmdTrustHelp(t *testing.T) {
 	t.Parallel()
