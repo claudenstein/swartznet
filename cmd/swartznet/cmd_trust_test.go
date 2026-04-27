@@ -214,6 +214,43 @@ func TestTrustRemoveBadFlag(t *testing.T) {
 	}
 }
 
+// TestTrustListBadFile covers trustList's `openTrustStore err →
+// reportRunErr` arm at lines 68-70. --file points at a directory
+// so trust.LoadOrCreate's ReadFile fails with EISDIR.
+func TestTrustListBadFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Path is a directory, not a file.
+	var stdout, stderr bytes.Buffer
+	code := cmdTrust([]string{"list", "--file", dir}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-file exit = %d, want non-zero", code)
+	}
+}
+
+// TestTrustAddBadFile covers trustAdd's openTrustStore err arm.
+func TestTrustAddBadFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := cmdTrust([]string{"add", "--file", dir, validPub}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-file add exit = %d, want non-zero", code)
+	}
+}
+
+// TestTrustRemoveBadFile covers trustRemove's openTrustStore err
+// arm.
+func TestTrustRemoveBadFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := cmdTrust([]string{"remove", "--file", dir, validPub}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-file remove exit = %d, want non-zero", code)
+	}
+}
+
 // trust.Store.Remove is idempotent + only errors on save (e.g.
 // disk failure), so trustRemove's `store.Remove err → reportRunErr`
 // arm is hard to trigger portably; left uncovered.
