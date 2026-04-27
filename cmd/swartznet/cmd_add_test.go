@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
@@ -104,6 +105,45 @@ func TestAddTorrentFromFile(t *testing.T) {
 	}
 	if h == nil {
 		t.Fatal("addTorrent file returned nil handle")
+	}
+}
+
+// TestProgressLoopReturnsOnCtxCancel covers progressLoop's
+// `case <-ctx.Done(): return` arm. Cancel a short ctx and
+// confirm the loop exits without hanging.
+func TestProgressLoopReturnsOnCtxCancel(t *testing.T) {
+	t.Parallel()
+	eng := newAddTestEngine(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, []byte("progressLoop ctx-cancel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mi, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hAny, err := eng.AddTorrentMetaInfo(mi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hAny.(*engine.Handle)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	done := make(chan struct{})
+	go func() {
+		var buf bytes.Buffer
+		progressLoop(ctx, &buf, h)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("progressLoop did not exit within 2s of ctx cancel")
 	}
 }
 
