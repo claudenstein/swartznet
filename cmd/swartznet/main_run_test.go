@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"syscall"
@@ -76,6 +77,46 @@ func TestRunDispatchesSubcommand(t *testing.T) {
 	}
 }
 
+// TestRunDispatchesEachSubcommand walks every case in run's
+// switch by sending each subcommand bad/empty args so the arm is
+// taken and the inner cmd returns an exit code without doing
+// any HTTP. Asserts the exit code is one we recognise.
+func TestRunDispatchesEachSubcommand(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		argv    []string
+		wantNZ  bool // wantNZ=true → any non-zero is fine
+		wantExt int  // exact match if wantNZ=false
+	}{
+		{"add", []string{"add"}, false, exitUsage},
+		{"search", []string{"search"}, false, exitUsage},
+		{"flag", []string{"flag"}, false, exitUsage},
+		{"confirm", []string{"confirm"}, false, exitUsage},
+		{"create", []string{"create"}, false, exitUsage},
+		{"index", []string{"index"}, false, exitUsage},
+		{"files", []string{"files"}, false, exitUsage},
+		{"trust", []string{"trust"}, false, exitUsage},
+		{"crawl-probe", []string{"crawl-probe"}, false, exitUsage},
+		{"status", []string{"status", "--api-addr", "127.0.0.1:1"}, true, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			got := run(c.argv, &stdout, &stderr)
+			if c.wantNZ {
+				if got == exitOK {
+					t.Errorf("%s: exit = %d, want non-zero", c.name, got)
+				}
+				return
+			}
+			if got != c.wantExt {
+				t.Errorf("%s: exit = %d, want %d", c.name, got, c.wantExt)
+			}
+		})
+	}
+}
+
 // TestPrintUsage covers printUsage directly.
 func TestPrintUsage(t *testing.T) {
 	t.Parallel()
@@ -115,6 +156,43 @@ func TestSignalContextCancelsViaParent(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
 		t.Error("ctx not cancelled within 1s after parent cancel")
+	}
+}
+
+// TestReportRunErrNil covers reportRunErr's
+// `if err == nil { return exitOK }` arm.
+func TestReportRunErrNil(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	if got := reportRunErr(nil, &stderr); got != exitOK {
+		t.Errorf("reportRunErr(nil) = %d, want exitOK", got)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("reportRunErr(nil) wrote to stderr: %s", stderr.String())
+	}
+}
+
+// TestReportRunErrCtxCanceled covers the
+// `errors.Is(err, context.Canceled) → exitInterrupt` arm.
+func TestReportRunErrCtxCanceled(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	if got := reportRunErr(context.Canceled, &stderr); got != exitInterrupt {
+		t.Errorf("reportRunErr(ctx.Canceled) = %d, want exitInterrupt", got)
+	}
+}
+
+// TestReportRunErrGeneric covers the default arm — generic error
+// printed to stderr + exitRuntime.
+func TestReportRunErrGeneric(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	err := errors.New("synthetic boom")
+	if got := reportRunErr(err, &stderr); got != exitRuntime {
+		t.Errorf("reportRunErr(boom) = %d, want exitRuntime", got)
+	}
+	if !strings.Contains(stderr.String(), "synthetic boom") {
+		t.Errorf("expected err message in stderr, got %q", stderr.String())
 	}
 }
 
