@@ -244,8 +244,10 @@ func TestCmdAddRealTorrentSigint(t *testing.T) {
 		done <- code
 	}()
 
-	// Wait for cmdAdd to enter progressLoop, then SIGINT.
-	time.Sleep(500 * time.Millisecond)
+	// Wait long enough for progressLoop's 3 s tick to fire at
+	// least once, then SIGINT. This hits both the tick.C arm
+	// and the ctx.Done() exit arm.
+	time.Sleep(3500 * time.Millisecond)
 	if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatalf("SIGINT failed: %v", err)
 	}
