@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestCmdCreateBadFlag covers cmdCreate's `fs.Parse` err arm.
@@ -195,6 +197,47 @@ func TestCmdCreateMissingRoot(t *testing.T) {
 	}, &stdout, &stderr)
 	if code == exitOK {
 		t.Errorf("missing-root exit = %d, want non-zero", code)
+	}
+}
+
+// TestCmdCreateSeedThenSigint covers cmdCreate's `if startSeed`
+// branch at lines 121-130. Spawn cmdCreate --seed in a goroutine,
+// give it a moment to enter the seeding loop, then SIGINT the
+// process. The seeding loop should observe ctx.Done() and
+// return cleanly.
+func TestCmdCreateSeedThenSigint(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, []byte("seed test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(dir, "out.torrent")
+
+	done := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := cmdCreate([]string{
+			"-o", outPath,
+			"--seed",
+			"--data-dir", dir,
+			src,
+		}, &stdout, &stderr)
+		done <- code
+	}()
+
+	// Give the goroutine time to enter the seeding loop.
+	time.Sleep(200 * time.Millisecond)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatalf("SIGINT failed: %v", err)
+	}
+
+	select {
+	case code := <-done:
+		if code != exitOK {
+			t.Errorf("cmdCreate --seed exit = %d, want exitOK", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("cmdCreate --seed did not exit within 5s of SIGINT")
 	}
 }
 
