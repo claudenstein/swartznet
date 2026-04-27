@@ -5,11 +5,68 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/swartznet/swartznet/internal/httpapi"
 )
+
+// TestCmdSearchLocalOnlyHappyText covers the local-only branch of
+// cmdSearch (no --swarm/--dht/--signed-by): opens indexer, runs
+// the query, and routes through emitText.
+func TestCmdSearchLocalOnlyHappyText(t *testing.T) {
+	t.Parallel()
+	indexDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := cmdSearch([]string{
+		"--index-dir", indexDir,
+		"ubuntu",
+	}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("local-only exit = %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Query: ubuntu") {
+		t.Errorf("expected 'Query: ubuntu' in stdout: %s", stdout.String())
+	}
+}
+
+// TestCmdSearchLocalOnlyHappyJSON covers the local-only branch's
+// `if asJSON { return emitJSON(...) }` arm.
+func TestCmdSearchLocalOnlyHappyJSON(t *testing.T) {
+	t.Parallel()
+	indexDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := cmdSearch([]string{
+		"--index-dir", indexDir,
+		"--json",
+		"ubuntu",
+	}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("local-only --json exit = %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"Hits"`) {
+		t.Errorf("expected 'Hits' field in JSON: %s", stdout.String())
+	}
+}
+
+// TestCmdSearchLocalOnlyIndexOpenError covers the local-only
+// `idx, err := indexer.Open(cfg.IndexDir); if err != nil` arm.
+// Plant a regular file at the index dir path so Open fails.
+func TestCmdSearchLocalOnlyIndexOpenError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bogus := filepath.Join(dir, "bogus.idx")
+	if err := os.WriteFile(bogus, []byte("not an index"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cmdSearch([]string{"--index-dir", bogus, "ubuntu"}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-index exit = %d, want non-zero", code)
+	}
+}
 
 // TestCmdSearchBadFlag covers cmdSearch's `fs.Parse` err arm.
 func TestCmdSearchBadFlag(t *testing.T) {
