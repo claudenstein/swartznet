@@ -157,6 +157,29 @@ func TestCmdSearchSwarmHappyText(t *testing.T) {
 	}
 }
 
+// TestCmdSearchSwarmBadJSON covers cmdSearchViaAPI's
+// `json.NewDecoder(resp.Body).Decode err → reportRunErr` arm.
+func TestCmdSearchSwarmBadJSON(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "this is not json {")
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSearch([]string{
+		"--swarm",
+		"--api-addr", addr,
+		"ubuntu",
+	}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-json exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdSearchSwarmHappyJSON covers cmdSearchViaAPI's --json branch.
 func TestCmdSearchSwarmHappyJSON(t *testing.T) {
 	t.Parallel()
