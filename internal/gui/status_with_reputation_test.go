@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -38,4 +39,10 @@ func TestStatusRefreshWithReputationEntries(t *testing.T) {
 	cancel()
 	st := newStatusTab(ctx, d)
 	st.refresh()
+
+	// Mount + resize so the rep-list UpdateCell callback runs
+	// for each visible row.
+	w.SetContent(st.content)
+	w.Resize(fyne.NewSize(1200, 800))
+	st.repList.Refresh()
 }

@@ -36,7 +36,7 @@ func newTestDaemon(t *testing.T) *daemon.Daemon {
 	cfg.BloomPath = filepath.Join(root, "bloom.dat")
 	cfg.ReputationPath = filepath.Join(root, "reputation.json")
 	cfg.SeedListPath = ""
-	cfg.TrustPath = ""
+	cfg.TrustPath = filepath.Join(root, "trust.json")
 
 	d, err := daemon.New(context.Background(), daemon.Options{
 		Cfg:     cfg,
