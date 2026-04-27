@@ -108,6 +108,36 @@ func TestAddTorrentFromFile(t *testing.T) {
 	}
 }
 
+// TestCmdAddBadTorrentFilePath drives cmdAdd far enough to spin
+// up daemon.New + signalContext, then fail at addTorrent because
+// the .torrent file path doesn't exist. Exercises the daemon
+// startup path, the no-CompPub/no-CompSub print branches (since
+// our test config has no companion dir/manifest), and the
+// addTorrent err arm — all without leaving the goroutine blocked
+// on metadata.
+//
+// Uses --no-dht and a self-allocated --port to avoid touching
+// the network or pinning a port.
+func TestCmdAddBadTorrentFilePath(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	indexDir := t.TempDir()
+	missingTorrent := filepath.Join(dataDir, "no-such.torrent")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdAdd([]string{
+		"--data-dir", dataDir,
+		"--index-dir", indexDir,
+		"--port", "0",
+		"--no-dht",
+		"--api-addr", "", // disable HTTP API
+		missingTorrent,
+	}, &stdout, &stderr)
+	if code != exitRuntime {
+		t.Errorf("missing-torrent exit = %d, want exitRuntime; stderr: %s", code, stderr.String())
+	}
+}
+
 // TestProgressLoopReturnsOnCtxCancel covers progressLoop's
 // `case <-ctx.Done(): return` arm. Cancel a short ctx and
 // confirm the loop exits without hanging.
