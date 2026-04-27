@@ -72,7 +72,7 @@ func TestZimExtractorClusterCacheEviction(t *testing.T) {
 	_ = binary.Write(out, binary.LittleEndian, uint32(zimMagic))
 	_ = binary.Write(out, binary.LittleEndian, uint16(5))
 	_ = binary.Write(out, binary.LittleEndian, uint16(0))
-	out.Write(make([]byte, 16))                                  // UUID
+	out.Write(make([]byte, 16)) // UUID
 	_ = binary.Write(out, binary.LittleEndian, uint32(articleCount))
 	_ = binary.Write(out, binary.LittleEndian, uint32(clusterCount))
 	_ = binary.Write(out, binary.LittleEndian, urlPtrPos)
