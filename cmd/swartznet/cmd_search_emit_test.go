@@ -29,6 +29,28 @@ func TestEmitJSONHappyPath(t *testing.T) {
 	}
 }
 
+// TestEmitJSONWriteErr covers emitJSON's `enc.Encode err →
+// reportRunErr` arm. failingWriter always returns ErrShortWrite so
+// json.Encoder bubbles up the failure.
+func TestEmitJSONWriteErr(t *testing.T) {
+	t.Parallel()
+	res := &indexer.SearchResponse{Total: 0, Hits: nil}
+	var stderr bytes.Buffer
+	if code := emitJSON(failingWriter{}, res, &stderr); code == exitOK {
+		t.Errorf("expected non-zero exit on write err, stderr=%q", stderr.String())
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errFailingWriter }
+
+var errFailingWriter = stubErr("failing-writer-err")
+
+type stubErr string
+
+func (e stubErr) Error() string { return string(e) }
+
 // TestEmitTextNoResults covers emitText's `(no results — try ...)`
 // arm.
 func TestEmitTextNoResults(t *testing.T) {
