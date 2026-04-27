@@ -68,6 +68,31 @@ func TestCmdCreateHappyPath(t *testing.T) {
 	}
 }
 
+// TestCmdCreateSignDefaultIdentityPath covers cmdCreate's
+// `if path == "" { path = cfg.IdentityPath }` arm at lines 83-85
+// (--sign without --identity). Setting HOME to a tmpdir keeps
+// the test from touching the user's real identity file.
+func TestCmdCreateSignDefaultIdentityPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", "")
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, []byte("default-id-path test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(dir, "out.torrent")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdCreate([]string{"-o", outPath, "--sign", src}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("default-id-path exit = %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Signing with identity") {
+		t.Errorf("expected 'Signing with identity' line, got %q", stdout.String())
+	}
+}
+
 // TestCmdCreateBadIdentityPath covers the
 // `if sign { … if err != nil { return reportRunErr ... } }` arm.
 // Plant a directory at the identity path so LoadOrCreate fails.
