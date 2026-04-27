@@ -140,6 +140,31 @@ func TestZimExtractorNextClusterPtrReadFails(t *testing.T) {
 	}
 }
 
+// TestZimExtractorClusterBodyReadFails covers readZimCluster's
+// `ra.ReadAt(raw, start) err` arm at lines 336-338. Push
+// ChecksumPos so the cluster's implied size extends well past
+// EOF — small enough to dodge the size>cap guard but big enough
+// to fail the ReadAt at the cluster body.
+func TestZimExtractorClusterBodyReadFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	hdr := readZimHeaderForTest(t, zim)
+	// Bump ChecksumPos by 1024 — that's a ~1 KiB cluster the file
+	// can't satisfy, well below the 64 MiB cap.
+	patchHeaderChecksumPos(zim, hdr.ChecksumPos+1024)
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — cluster body ReadAt must fail", len(chunks))
+	}
+}
+
 // TestZimMimeListAllEmpty covers readZimMimeList's
 // `if len(mimes) == 0 { return nil, errors.New(...) }` arm.
 // Build a ZIM whose mime list is just two consecutive nulls so
