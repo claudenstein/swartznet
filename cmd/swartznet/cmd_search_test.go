@@ -103,6 +103,23 @@ func TestCmdSearchSwarmUnreachable(t *testing.T) {
 	}
 }
 
+// TestCmdSearchSwarmBadAPIAddr covers cmdSearchViaAPI's
+// `http.NewRequestWithContext err → reportRunErr` arm by passing
+// an --api-addr that produces a URL url.Parse rejects (invalid
+// percent-escape).
+func TestCmdSearchSwarmBadAPIAddr(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := cmdSearch([]string{
+		"--swarm",
+		"--api-addr", "%ZZ",
+		"ubuntu",
+	}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-addr exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdSearchSwarmNon200 covers cmdSearchViaAPI's non-200 arm.
 func TestCmdSearchSwarmNon200(t *testing.T) {
 	t.Parallel()

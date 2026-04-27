@@ -57,6 +57,35 @@ func TestCmdFilesUnreachableDaemon(t *testing.T) {
 	}
 }
 
+// TestCmdFilesListBadAPIAddr covers filesList's
+// `http.NewRequestWithContext err → reportRunErr` arm. An
+// --api-addr containing an invalid percent-escape makes
+// url.Parse fail before any network IO is attempted.
+func TestCmdFilesListBadAPIAddr(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := cmdFiles([]string{"--api-addr", "%ZZ", validIH}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-addr list exit = %d, want non-zero", code)
+	}
+}
+
+// TestCmdFilesSetPriorityBadAPIAddr covers filesSetPriority's
+// `http.NewRequestWithContext err` arm via the same trick. The
+// 3-positional-arg form (<ih> <index> <priority>) routes
+// cmdFiles into filesSetPriority.
+func TestCmdFilesSetPriorityBadAPIAddr(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := cmdFiles([]string{
+		"--api-addr", "%ZZ",
+		validIH, "0", "normal",
+	}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-addr set-priority exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdFilesNon200 covers filesList's non-200 arm.
 func TestCmdFilesNon200(t *testing.T) {
 	t.Parallel()
