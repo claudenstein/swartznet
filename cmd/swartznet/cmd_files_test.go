@@ -159,3 +159,60 @@ func TestCmdFilesSetPriorityBadPriority(t *testing.T) {
 		t.Errorf("bad-priority exit = %d, want exitUsage", code)
 	}
 }
+
+// TestCmdFilesSetPriorityUnreachable covers filesSetPriority's
+// `Do err → cannot reach the daemon` arm via the 3-arg branch.
+func TestCmdFilesSetPriorityUnreachable(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := cmdFiles([]string{
+		"--api-addr", "127.0.0.1:1",
+		validIH, "0", "high",
+	}, &stdout, &stderr)
+	if code != exitRuntime {
+		t.Errorf("unreachable exit = %d, want exitRuntime", code)
+	}
+}
+
+// TestCmdFilesSetPriorityNon200 covers the non-200 arm of
+// filesSetPriority.
+func TestCmdFilesSetPriorityNon200(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "kaboom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdFiles([]string{
+		"--api-addr", addr,
+		validIH, "0", "normal",
+	}, &stdout, &stderr)
+	if code != exitRuntime {
+		t.Errorf("non-200 exit = %d, want exitRuntime", code)
+	}
+}
+
+// TestCmdFilesSetPriorityHappy covers filesSetPriority's success
+// path: server returns 200 → "file 0 of <ih>: priority=high".
+func TestCmdFilesSetPriorityHappy(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdFiles([]string{
+		"--api-addr", addr,
+		validIH, "0", "high",
+	}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("happy exit = %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "priority=high") {
+		t.Errorf("expected 'priority=high' in stdout, got %q", stdout.String())
+	}
+}
