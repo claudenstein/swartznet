@@ -2,9 +2,24 @@ package extractors
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
+
+// TestPlaintextReadAllErr covers Plaintext Extract's
+// `io.ReadAll(limited) err → wrap "plaintext: read"` arm at
+// plaintext.go:68-70. iotest.ErrReader fails the post-Peek
+// ReadAll while leaving the no-NUL-byte sniff path intact.
+func TestPlaintextReadAllErr(t *testing.T) {
+	t.Parallel()
+	e := NewPlaintextExtractor()
+	r := iotest.ErrReader(errors.New("simulated read failure"))
+	if _, err := e.Extract(r, 0); err == nil {
+		t.Error("Extract should surface ReadAll error from faulty reader")
+	}
+}
 
 func TestPlaintextExtractsSimpleUTF8(t *testing.T) {
 	t.Parallel()
