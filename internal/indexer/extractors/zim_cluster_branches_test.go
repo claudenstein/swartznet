@@ -26,6 +26,12 @@ func patchHeaderChecksumPos(zim []byte, newPos uint64) {
 	binary.LittleEndian.PutUint64(zim[72:80], newPos)
 }
 
+// patchHeaderClusterPtrPos rewrites the ClusterPtrPos field of
+// the ZIM header. It lives at byte offset 48 (per buildTestZim).
+func patchHeaderClusterPtrPos(zim []byte, newPos uint64) {
+	binary.LittleEndian.PutUint64(zim[48:56], newPos)
+}
+
 // patchClusterPtrAt rewrites the i-th cluster pointer. The
 // pointer table lives at hdr.ClusterPtrPos and each entry is 8
 // bytes (uint64 LE).
@@ -79,6 +85,29 @@ func TestZimExtractorClusterEndLeqStart(t *testing.T) {
 	}
 	if chunks != nil {
 		t.Errorf("got %d chunks, want nil — end ≤ start cluster must be rejected", len(chunks))
+	}
+}
+
+// TestZimExtractorClusterPtrReadFails covers readZimCluster's
+// `ra.ReadAt(startBuf[:], …)` err arm. Push the ClusterPtrPos
+// in the header beyond the end of the ZIM bytes so the very
+// first cluster-ptr ReadAt fails with io.EOF; Extract's outer
+// `if err != nil { continue }` swallows it and chunks come back
+// nil for the only article.
+func TestZimExtractorClusterPtrReadFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	patchHeaderClusterPtrPos(zim, uint64(len(zim))+1024)
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — cluster-ptr ReadAt must fail", len(chunks))
 	}
 }
 
