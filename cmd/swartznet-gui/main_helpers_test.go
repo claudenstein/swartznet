@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"io"
+	"net"
+	"strconv"
 	"testing"
 )
 
@@ -37,6 +39,43 @@ func TestRunBadFlag(t *testing.T) {
 	code := run([]string{"--no-such-flag"}, &stdout, &stderr)
 	if code != 2 {
 		t.Errorf("bad-flag exit = %d, want 2", code)
+	}
+}
+
+// TestRunDaemonNewErr covers run's
+// `d, err := daemon.New(...); if err != nil { return 1 }` arm.
+// Take a TCP port, then point --port at the same port so
+// engine.New (called from daemon.New) fails to bind.
+func TestRunDaemonNewErr(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dataDir := t.TempDir()
+	indexDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--data-dir", dataDir,
+		"--index-dir", indexDir,
+		"--port", strconv.Itoa(port),
+		"--no-dht",
+		"--api-addr", "",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Skip("kernel allowed port reuse; daemon.New didn't fail")
 	}
 }
 
