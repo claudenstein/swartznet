@@ -38,6 +38,12 @@ func patchHeaderClusterCount(zim []byte, newCount uint32) {
 	binary.LittleEndian.PutUint32(zim[28:32], newCount)
 }
 
+// patchHeaderArticleCount rewrites the ArticleCount field. It
+// lives at offset 24 in the buildTestZim header (uint32 LE).
+func patchHeaderArticleCount(zim []byte, newCount uint32) {
+	binary.LittleEndian.PutUint32(zim[24:28], newCount)
+}
+
 // patchClusterPtrAt rewrites the i-th cluster pointer. The
 // pointer table lives at hdr.ClusterPtrPos and each entry is 8
 // bytes (uint64 LE).
@@ -162,6 +168,30 @@ func TestZimExtractorClusterBodyReadFails(t *testing.T) {
 	}
 	if chunks != nil {
 		t.Errorf("got %d chunks, want nil — cluster body ReadAt must fail", len(chunks))
+	}
+}
+
+// TestZimExtractorArticleCountClamp covers Extract's
+// `if articleCount > zimDefaultMaxArticles { articleCount = … }`
+// arm at lines 90-92. Patch the header's ArticleCount to claim
+// 6000 articles even though only one is actually present —
+// Extract clamps to 5000 and processes whatever's reachable.
+func TestZimExtractorArticleCountClamp(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("hello")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	// Bump claimed article count past the 5000 cap.
+	patchHeaderArticleCount(zim, 6000)
+
+	// Extract should succeed (or return nil chunks): every URL
+	// pointer past index 0 reads garbage / EOF and falls through
+	// the `continue` arm. The single real article either extracts
+	// or its dir-entry mimeIdx happens to be wrong; either way we
+	// only care that Extract doesn't blow up.
+	if _, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0); err != nil {
+		t.Fatalf("Extract: %v", err)
 	}
 }
 
