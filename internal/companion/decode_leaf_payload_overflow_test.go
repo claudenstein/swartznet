@@ -21,6 +21,23 @@ func TestEncodeInteriorPayloadExceedsUint16(t *testing.T) {
 	}
 }
 
+// TestPackInteriorLevelPropagatesNonOverflowErr covers
+// packInteriorLevel's `return nil, err` arm at line 415 — the
+// fallthrough for EncodeInterior errors that aren't
+// ErrPageOverflow. A child with a 65536-byte minKey makes the
+// trial payload exceed uint16 inside EncodeInterior; the
+// 1 MiB pieceSize keeps the overflow guard from firing first.
+func TestPackInteriorLevelPropagatesNonOverflowErr(t *testing.T) {
+	t.Parallel()
+	children := []pageBuild{
+		{minKey: nil}, // 1st: empty separator
+		{minKey: bytes.Repeat([]byte{'x'}, 65536)}, // 2nd: huge separator
+	}
+	if _, err := packInteriorLevel(children, 1<<20); err == nil {
+		t.Error("packInteriorLevel should propagate EncodeInterior payload-overflow err")
+	}
+}
+
 // TestPackLeavesPropagatesNonOverflowErr covers packLeaves'
 // `return nil, err` arm at line 364 — EncodeLeaf can return
 // errors other than ErrPageOverflow (e.g. payload>uint16),
