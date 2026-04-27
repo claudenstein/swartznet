@@ -21,6 +21,20 @@ func TestEncodeInteriorPayloadExceedsUint16(t *testing.T) {
 	}
 }
 
+// TestEncodeLeafPayloadExceedsUint16 covers EncodeLeaf's
+// `if payload.Len() > 65535 → err` arm. 600 trivial records
+// encode to ~120 bytes each, easily clearing the uint16 cap.
+func TestEncodeLeafPayloadExceedsUint16(t *testing.T) {
+	t.Parallel()
+	records := make([]Record, 600)
+	for i := range records {
+		records[i].Kw = "k"
+	}
+	if _, err := EncodeLeaf(0, records, 1<<20); err == nil {
+		t.Error("EncodeLeaf should reject payload > uint16")
+	}
+}
+
 // TestDecodeLeafPayloadOverflow covers DecodeLeaf's
 // `if hdr.PayloadLength + PageHeaderSize > len(page)` arm at
 // lines 400-402. Build a small page whose header claims a
