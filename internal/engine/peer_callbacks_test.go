@@ -11,7 +11,120 @@ import (
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
+	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
+
+// TestEngineSwarmSearchReplyBetweenPeers wires two engines, has
+// them establish an LTEP handshake (which advertises the
+// sn_search extension), then has engine A issue a swarmsearch
+// query that engine B handles. The handler's reply closure
+// fires the previously-cold body inside engine.New's
+// PeerConnReadExtensionMessage callback (lines 688-700) where
+// the reply payload is queued for write back to the peer.
+func TestEngineSwarmSearchReplyBetweenPeers(t *testing.T) {
+	t.Parallel()
+	cfgFor := func(dataDir string) config.Config {
+		c := config.Default()
+		c.DataDir = dataDir
+		c.ListenPort = 0
+		c.ListenHost = "127.0.0.1"
+		c.DisableDHT = true
+		c.NoUpload = false
+		c.Seed = true
+		c.IdentityPath = ""
+		c.ReputationPath = ""
+		c.SeedListPath = ""
+		c.BloomPath = ""
+		c.TrustPath = ""
+		c.PublisherManifest = ""
+		c.CompanionDir = ""
+		c.CompanionFollowFile = ""
+		c.DisableIPv6 = true
+		return c
+	}
+
+	dataDirA := t.TempDir()
+	dataDirB := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	engA, err := engine.New(context.Background(), cfgFor(dataDirA), logger)
+	if err != nil {
+		t.Fatalf("engine.New A: %v", err)
+	}
+	defer engA.Close()
+	engB, err := engine.New(context.Background(), cfgFor(dataDirB), logger)
+	if err != nil {
+		t.Fatalf("engine.New B: %v", err)
+	}
+	defer engB.Close()
+
+	idxA, err := indexer.Open(filepath.Join(t.TempDir(), "idxA.bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idxA.Close()
+	engA.SetIndex(idxA)
+	idxB, err := indexer.Open(filepath.Join(t.TempDir(), "idxB.bleve"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idxB.Close()
+	engB.SetIndex(idxB)
+
+	// Seed a doc on engine B so the search query has something to match.
+	if err := idxB.IndexTorrent(indexer.TorrentDoc{
+		InfoHash: "1111111111111111111111111111111111111111",
+		Name:     "ubuntu desktop iso",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(fillTo(32 * 1024))
+	for _, dir := range []string{dataDirA, dataDirB} {
+		if err := os.WriteFile(filepath.Join(dir, "shared.bin"), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mi, err := engA.CreateTorrent(engine.CreateTorrentOptions{Root: filepath.Join(dataDirA, "shared.bin")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engA.AddTorrentMetaInfo(mi); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engB.AddTorrentMetaInfo(mi); err != nil {
+		t.Fatal(err)
+	}
+
+	ih := mi.HashInfoBytes()
+	var ihArr [20]byte
+	copy(ihArr[:], ih[:])
+	if _, err := engA.AddTrustedPeerEngine(ihArr, engB); err != nil {
+		t.Fatalf("AddTrustedPeerEngine A→B: %v", err)
+	}
+	if _, err := engB.AddTrustedPeerEngine(ihArr, engA); err != nil {
+		t.Fatalf("AddTrustedPeerEngine B→A: %v", err)
+	}
+
+	// Wait for at least one capable peer in A's view.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if engA.SwarmSearch().CapablePeerCount() >= 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Issue a swarmsearch query from A to B. The reply closure
+	// fires when B handles the query and sends back a result.
+	queryCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_, _ = engA.SwarmSearch().Query(queryCtx, swarmsearch.QueryRequest{
+		Q:            "ubuntu",
+		PerPeerLimit: 50,
+	})
+}
 
 // TestFileTrackerPieceEventsViaPeerDownload wires two engines
 // on loopback where the leech (engine B) has NO data on disk
