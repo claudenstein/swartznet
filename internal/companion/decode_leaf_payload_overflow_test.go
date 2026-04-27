@@ -1,6 +1,25 @@
 package companion
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
+
+// TestEncodeInteriorPayloadExceedsUint16 covers EncodeInterior's
+// `if payload.Len() > 65535 → err` arm. One child with a
+// 65536-byte separator drives the encoded payload past the
+// uint16 cap (separator + 3-byte uvarint length prefix + 4-byte
+// child index ≈ 65543 bytes).
+func TestEncodeInteriorPayloadExceedsUint16(t *testing.T) {
+	t.Parallel()
+	children := []InteriorChild{{
+		Separator:  bytes.Repeat([]byte{'x'}, 65536),
+		ChildIndex: 0,
+	}}
+	if _, err := EncodeInterior(PageKindInterior, 0, children, 1<<20); err == nil {
+		t.Error("EncodeInterior should reject payload > uint16")
+	}
+}
 
 // TestDecodeLeafPayloadOverflow covers DecodeLeaf's
 // `if hdr.PayloadLength + PageHeaderSize > len(page)` arm at
