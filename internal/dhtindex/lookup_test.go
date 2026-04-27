@@ -140,6 +140,60 @@ func TestLookupQueryFanoutAndMerge(t *testing.T) {
 	}
 }
 
+// TestLookupQuerySortTiesByOnSourcesCount covers the
+// `if len(resp.Hits[i].Sources) != len(resp.Hits[j].Sources)`
+// tie-breaker arm at lookup.go:478-480. The bonus on
+// scoreLookupHit saturates at 5 sources (0.05*(N-1) capped at
+// 0.20), so two infohashes — one with 5 sources, one with 6 —
+// produce identical Score. The sort then falls through to the
+// Sources-count tie-breaker, putting the 6-sourced hit first.
+func TestLookupQuerySortTiesByOnSourcesCount(t *testing.T) {
+	t.Parallel()
+	g := newScriptedGetter()
+	salt, _ := dhtindex.SaltForKeyword("alpha")
+
+	// 6 indexers all carry hit 0xaa; 5 of those 6 also carry 0xbb.
+	// Both hits saturate the +0.20 multi-source bonus, so the
+	// Score field is equal between them. The tie-breaker drops to
+	// Sources count: 6 wins over 5.
+	pubs := make([][32]byte, 6)
+	for i := range pubs {
+		pubs[i] = newPubkey(t)
+	}
+	for i, pk := range pubs {
+		hits := []dhtindex.KeywordHit{
+			{IH: bytes.Repeat([]byte{0xaa}, 20), N: "alpha-aa"},
+		}
+		if i < 5 {
+			hits = append(hits, dhtindex.KeywordHit{
+				IH: bytes.Repeat([]byte{0xbb}, 20), N: "alpha-bb",
+			})
+		}
+		g.set(pk, salt, dhtindex.KeywordValue{Hits: hits})
+	}
+
+	l := dhtindex.NewLookup(g)
+	for _, pk := range pubs {
+		l.AddIndexer(pk, "")
+	}
+
+	resp, err := l.Query(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(resp.Hits) != 2 {
+		t.Fatalf("Hits = %d, want 2", len(resp.Hits))
+	}
+	if resp.Hits[0].Score != resp.Hits[1].Score {
+		t.Errorf("scores differ: %v vs %v — tie-breaker arm not exercised",
+			resp.Hits[0].Score, resp.Hits[1].Score)
+	}
+	if len(resp.Hits[0].Sources) <= len(resp.Hits[1].Sources) {
+		t.Errorf("first hit Sources = %d, second = %d; want first > second",
+			len(resp.Hits[0].Sources), len(resp.Hits[1].Sources))
+	}
+}
+
 func TestLookupSomeIndexersSilent(t *testing.T) {
 	t.Parallel()
 	g := newScriptedGetter()

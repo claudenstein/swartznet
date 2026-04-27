@@ -82,3 +82,43 @@ func TestDaemonBootstrapAttachesWithDHT(t *testing.T) {
 		t.Errorf("AdmittedCount = %d, want 0 on fresh bootstrap", got)
 	}
 }
+
+// TestDaemonBootstrapWiredIntoAPI covers daemon.New's
+// `if d.Bootstrap != nil { apiOpts.Bootstrap = d.Bootstrap }` arm
+// that fires when both DHT is enabled (Bootstrap exists) AND an
+// APIAddr is set so the HTTP server is constructed. Asserts that
+// d.API is non-nil, which means apiOpts construction reached the
+// Bootstrap-injection line.
+func TestDaemonBootstrapWiredIntoAPI(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.IndexDir = t.TempDir()
+	cfg.ListenPort = 0
+	cfg.DisableDHT = false
+	cfg.NoUpload = true
+	cfg.IdentityPath = filepath.Join(dir, "identity.key")
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+	cfg.Regtest = true
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d, err := daemon.New(context.Background(), daemon.Options{
+		Cfg:     cfg,
+		Log:     log,
+		APIAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	if d.Bootstrap == nil {
+		t.Fatal("Bootstrap should attach when DHT is enabled")
+	}
+	if d.API == nil {
+		t.Error("API should attach when APIAddr is set")
+	}
+}

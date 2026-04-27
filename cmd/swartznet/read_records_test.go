@@ -65,6 +65,34 @@ func TestReadRecordsEmptyKwError(t *testing.T) {
 	}
 }
 
+// TestReadRecordsStdinPath covers readRecords' `if path == "-" { r = os.Stdin }`
+// arm at lines 148-150. Replace os.Stdin with a pipe that
+// supplies a single valid JSONL record, restore it on cleanup.
+func TestReadRecordsStdinPath(t *testing.T) {
+	origStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = origStdin })
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = pr
+
+	const ih = "0123456789abcdef0123456789abcdef01234567"
+	go func() {
+		defer pw.Close()
+		_, _ = pw.Write([]byte(`{"ih":"` + ih + `","kw":"alpha","t":1}` + "\n"))
+	}()
+
+	recs, err := readRecords("-")
+	if err != nil {
+		t.Fatalf("readRecords(\"-\"): %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("got %d records, want 1", len(recs))
+	}
+}
+
 // TestReadRecordsScannerError covers the
 // `if err := scanner.Err(); err != nil` arm. A line longer than
 // the 1 MiB scanner buffer triggers bufio.ErrTooLong, which

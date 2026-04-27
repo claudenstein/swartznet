@@ -26,6 +26,24 @@ func patchHeaderChecksumPos(zim []byte, newPos uint64) {
 	binary.LittleEndian.PutUint64(zim[72:80], newPos)
 }
 
+// patchHeaderClusterPtrPos rewrites the ClusterPtrPos field of
+// the ZIM header. It lives at byte offset 48 (per buildTestZim).
+func patchHeaderClusterPtrPos(zim []byte, newPos uint64) {
+	binary.LittleEndian.PutUint64(zim[48:56], newPos)
+}
+
+// patchHeaderClusterCount rewrites the ClusterCount field. It
+// lives at offset 28 in the buildTestZim header (uint32 LE).
+func patchHeaderClusterCount(zim []byte, newCount uint32) {
+	binary.LittleEndian.PutUint32(zim[28:32], newCount)
+}
+
+// patchHeaderArticleCount rewrites the ArticleCount field. It
+// lives at offset 24 in the buildTestZim header (uint32 LE).
+func patchHeaderArticleCount(zim []byte, newCount uint32) {
+	binary.LittleEndian.PutUint32(zim[24:28], newCount)
+}
+
 // patchClusterPtrAt rewrites the i-th cluster pointer. The
 // pointer table lives at hdr.ClusterPtrPos and each entry is 8
 // bytes (uint64 LE).
@@ -79,6 +97,118 @@ func TestZimExtractorClusterEndLeqStart(t *testing.T) {
 	}
 	if chunks != nil {
 		t.Errorf("got %d chunks, want nil — end ≤ start cluster must be rejected", len(chunks))
+	}
+}
+
+// TestZimExtractorClusterPtrReadFails covers readZimCluster's
+// `ra.ReadAt(startBuf[:], …)` err arm. Push the ClusterPtrPos
+// in the header beyond the end of the ZIM bytes so the very
+// first cluster-ptr ReadAt fails with io.EOF; Extract's outer
+// `if err != nil { continue }` swallows it and chunks come back
+// nil for the only article.
+func TestZimExtractorClusterPtrReadFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	patchHeaderClusterPtrPos(zim, uint64(len(zim))+1024)
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — cluster-ptr ReadAt must fail", len(chunks))
+	}
+}
+
+// TestZimExtractorNextClusterPtrReadFails covers readZimCluster's
+// `if num+1 < hdr.ClusterCount { … ra.ReadAt(endBuf[:], …) }` arm
+// AND its err-return at lines 318-322. Patch the header's
+// ClusterCount to 2 so reading cluster 0 also tries to read
+// cluster 1's start ptr — but only one ptr is actually written,
+// so ReadAt at the next slot fails with EOF.
+func TestZimExtractorNextClusterPtrReadFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	patchHeaderClusterCount(zim, 2) // claim 2 clusters; only 1 ptr written
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — next-cluster ReadAt must fail", len(chunks))
+	}
+}
+
+// TestZimExtractorClusterBodyReadFails covers readZimCluster's
+// `ra.ReadAt(raw, start) err` arm at lines 336-338. Push
+// ChecksumPos so the cluster's implied size extends well past
+// EOF — small enough to dodge the size>cap guard but big enough
+// to fail the ReadAt at the cluster body.
+func TestZimExtractorClusterBodyReadFails(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	hdr := readZimHeaderForTest(t, zim)
+	// Bump ChecksumPos by 1024 — that's a ~1 KiB cluster the file
+	// can't satisfy, well below the 64 MiB cap.
+	patchHeaderChecksumPos(zim, hdr.ChecksumPos+1024)
+
+	chunks, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if chunks != nil {
+		t.Errorf("got %d chunks, want nil — cluster body ReadAt must fail", len(chunks))
+	}
+}
+
+// TestZimExtractorArticleCountClamp covers Extract's
+// `if articleCount > zimDefaultMaxArticles { articleCount = … }`
+// arm at lines 90-92. Patch the header's ArticleCount to claim
+// 6000 articles even though only one is actually present —
+// Extract clamps to 5000 and processes whatever's reachable.
+func TestZimExtractorArticleCountClamp(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "text/plain", Body: []byte("hello")},
+	}
+	zim := buildTestZim(t, articles, "text/plain")
+	// Bump claimed article count past the 5000 cap.
+	patchHeaderArticleCount(zim, 6000)
+
+	// Extract should succeed (or return nil chunks): every URL
+	// pointer past index 0 reads garbage / EOF and falls through
+	// the `continue` arm. The single real article either extracts
+	// or its dir-entry mimeIdx happens to be wrong; either way we
+	// only care that Extract doesn't blow up.
+	if _, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+}
+
+// TestZimMimeListAllEmpty covers readZimMimeList's
+// `if len(mimes) == 0 { return nil, errors.New(...) }` arm.
+// Build a ZIM whose mime list is just two consecutive nulls so
+// every split-part is empty and the loop produces zero MIMEs.
+// The Extract call surfaces a wrapped readZimMimeList err.
+func TestZimMimeListAllEmpty(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "")
+
+	if _, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0); err == nil {
+		t.Error("Extract should fail when the mime list parses to zero MIMEs")
 	}
 }
 

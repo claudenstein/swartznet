@@ -333,6 +333,25 @@ func TestCrawlOnceContextCancelMidLoop(t *testing.T) {
 // TestCrawlOnceNilGuards locks the nil-fetch / nil-sink
 // validation paths. Both must error cleanly rather than
 // panic deep inside the sample query.
+// TestCrawlOnceSampleInfohashesErr covers CrawlOnce's
+// `sr, err := SampleInfohashes(...); if err != nil { return … }`
+// arm at lines 74-76. Pre-cancelled ctx makes the underlying
+// DHT query fail before any reply lands.
+func TestCrawlOnceSampleInfohashesErr(t *testing.T) {
+	t.Parallel()
+	srv := newIsolatedDHTServer(t)
+	addr := dht.NewAddr(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := dhtindex.CrawlOnce(ctx, srv, addr, krpc.ID{},
+		func(context.Context, krpc.ID) ([]byte, error) { return nil, nil },
+		func([32]byte, bool) {})
+	if err == nil {
+		t.Error("CrawlOnce should propagate SampleInfohashes err on cancelled ctx")
+	}
+}
+
 func TestCrawlOnceNilGuards(t *testing.T) {
 	t.Parallel()
 	srv := newIsolatedDHTServer(t)

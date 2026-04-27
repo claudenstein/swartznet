@@ -40,7 +40,15 @@ func TestFetchCompanionTorrentReturnsAbsolutePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}
-	defer eng.Close()
+	// t.Cleanup runs LIFO and BEFORE t.TempDir's RemoveAll, so closing
+	// the engine here (rather than via defer) plus a short grace
+	// period lets anacrolix's storage goroutines flush before the
+	// dataDir is unlinked. Otherwise the test occasionally races
+	// the TempDir cleanup.
+	t.Cleanup(func() {
+		eng.Close()
+		time.Sleep(50 * time.Millisecond)
+	})
 
 	srcPath := filepath.Join(dataDir, "fetch.bin")
 	if err := os.WriteFile(srcPath, []byte(fillTo(32*1024)), 0o644); err != nil {

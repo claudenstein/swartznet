@@ -69,6 +69,35 @@ func TestCreateTorrentWalkDirFails(t *testing.T) {
 	}
 }
 
+// TestCreateTorrentBuildFromFilePathFails covers CreateTorrent's
+// `if err := info.BuildFromFilePath(opts.Root); err != nil` arm
+// at create.go:127-129. WalkDir's pre-pass only stats files (which
+// works regardless of read perm), but BuildFromFilePath's
+// GeneratePieces opens each file and reads its bytes. A 0o000
+// regular file inside opts.Root makes os.Open fail with EACCES.
+//
+// Skipped as root (which can read any file).
+func TestCreateTorrentBuildFromFilePathFails(t *testing.T) {
+	t.Parallel()
+	if os.Getuid() == 0 {
+		t.Skip("running as root, chmod 0 doesn't deny read")
+	}
+	eng := newTestEngine(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ok.bin"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(root, "unreadable.bin")
+	if err := os.WriteFile(bad, []byte("secret"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o644) })
+
+	if _, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: root}); err == nil {
+		t.Error("CreateTorrent should fail when BuildFromFilePath cannot read a file")
+	}
+}
+
 // TestCreateTorrentFileMissingRootPropagates covers the
 // `mi, err := e.CreateTorrent(opts); if err != nil` arm in
 // CreateTorrentFile. Pass an opts.Root that doesn't exist so

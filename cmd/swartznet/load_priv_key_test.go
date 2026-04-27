@@ -75,3 +75,22 @@ func TestLoadPrivKeyDefaultPathHomeUnset(t *testing.T) {
 		t.Error("loadPrivKey(\"\") should fail when HOME is unset")
 	}
 }
+
+// TestLoadPrivKeyDefaultPathLoadFails covers the empty-keyPath
+// branch's `id, err := identity.LoadOrCreate(path); if err !=
+// nil { return nil, nil, err }` arm at lines 118-121. HOME
+// points at a regular file, so the .local/share/swartznet
+// parent dir can't be MkdirAll'd → LoadOrCreate fails → loadPrivKey
+// surfaces the err.
+func TestLoadPrivKeyDefaultPathLoadFails(t *testing.T) {
+	dir := t.TempDir()
+	homeAsFile := filepath.Join(dir, "fakehome")
+	if err := os.WriteFile(homeAsFile, []byte("regular file, not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeAsFile)
+
+	if _, _, err := loadPrivKey(""); err == nil {
+		t.Error("loadPrivKey should fail when default-path MkdirAll can't run")
+	}
+}

@@ -73,6 +73,58 @@ func buildODTContentXML(paragraphs []string) string {
 	return b.String()
 }
 
+// TestODTExtractsTextSpaceTabAndLineBreak covers extractODTText's
+// `case "s", "tab", "line-break": out.WriteByte(' ')` arm at
+// odt.go:130-131. The element-name switch fires on each of these
+// short text decorators, emitting a single space; the existing
+// happy-path test only uses <text:p> bodies and never reaches
+// the decorator arm.
+func TestODTExtractsTextSpaceTabAndLineBreak(t *testing.T) {
+	t.Parallel()
+	xmlBody := `<?xml version="1.0"?>` +
+		`<office:document-content ` +
+		`xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ` +
+		`xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">` +
+		`<office:body><office:text>` +
+		`<text:p>alpha<text:s/>beta<text:tab/>gamma<text:line-break/>delta</text:p>` +
+		`</office:text></office:body></office:document-content>`
+
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	mh, err := w.CreateHeader(&zip.FileHeader{Name: "mimetype", Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mh.Write([]byte("application/vnd.oasis.opendocument.text"))
+	cf, err := w.Create("content.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf.Write([]byte(xmlBody))
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	chunks, err := NewODTExtractor().Extract(bytes.NewReader(buf.Bytes()), 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+	got := chunks[0].Text
+	for _, want := range []string{"alpha", "beta", "gamma", "delta"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output: %q", want, got)
+		}
+	}
+	// Each <text:s/>, <text:tab/>, and <text:line-break/> emits a
+	// single space, so the four words must be space-separated.
+	if !strings.Contains(got, "alpha beta") {
+		t.Errorf("expected 'alpha beta' (space from <text:s/>): %q", got)
+	}
+}
+
 func TestODTExtractsParagraphs(t *testing.T) {
 	t.Parallel()
 	data := buildMinimalODT(t, []string{
