@@ -194,6 +194,25 @@ func TestCmdFilesSetPriorityNon200(t *testing.T) {
 	}
 }
 
+// TestCmdFilesListBadJSON covers filesList's
+// `json.NewDecoder(resp.Body).Decode err → reportRunErr` arm.
+func TestCmdFilesListBadJSON(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "this is not json {")
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdFiles([]string{"--api-addr", addr, validIH}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("bad-json exit = %d, want non-zero", code)
+	}
+}
+
 // TestCmdFilesSetPriorityHappy covers filesSetPriority's success
 // path: server returns 200 → "file 0 of <ih>: priority=high".
 func TestCmdFilesSetPriorityHappy(t *testing.T) {
