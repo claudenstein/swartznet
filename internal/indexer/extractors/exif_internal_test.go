@@ -21,6 +21,25 @@ func TestParseTIFFBadByteOrderMarker(t *testing.T) {
 	}
 }
 
+// TestFindExifTIFFFallthroughNoExif covers findExifTIFF's
+// `return nil, false` arm at line 132 when the loop completes
+// without finding the APP1 EXIF segment. We hand it a JPEG-like
+// buffer with a non-EXIF APP segment that consumes the entire
+// payload.
+func TestFindExifTIFFFallthroughNoExif(t *testing.T) {
+	t.Parallel()
+	// 0xFF 0xE0 (APP0, JFIF marker) | seg-len 4 | one byte of payload
+	// Then 0xFF 0xFF (fill byte) | end of buffer.
+	jpeg := []byte{
+		0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, // APP0 (not EXIF), len=4
+		0xFF, 0xFF, // fill bytes — loop continues but i goes past buffer
+	}
+	got, ok := findExifTIFF(jpeg)
+	if ok || got != nil {
+		t.Errorf("findExifTIFF on non-EXIF JPEG = (%v, %v), want (nil, false)", got, ok)
+	}
+}
+
 // TestParseTIFFBigEndianHeader covers the `case "MM": bo = binary.BigEndian`
 // arm. A minimal TIFF header with the "MM" byte-order marker and
 // a 4-byte IFD offset of 8 (just past the header) followed by an
