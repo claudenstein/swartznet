@@ -338,6 +338,58 @@ func TestProgressLoopReturnsOnCtxCancel(t *testing.T) {
 	}
 }
 
+// TestProgressLoopHandlesClosedFileEvents covers progressLoop's
+// `case ev, ok := <-fileEvents: if !ok { continue }` arm at
+// cmd_add.go:185-189. Engine.Close closes the file-event fan-out
+// channel, so the next select pulls a zero-value with ok=false.
+// We then cancel the ctx to let the loop exit cleanly.
+func TestProgressLoopHandlesClosedFileEvents(t *testing.T) {
+	t.Parallel()
+	eng := newAddTestEngine(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, []byte("progressLoop closed-events"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mi, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hAny, err := eng.AddTorrentMetaInfo(mi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hAny.(*engine.Handle)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		var buf bytes.Buffer
+		progressLoop(ctx, &buf, h)
+		close(done)
+	}()
+
+	// Close the engine — fileSub.Close() shuts the fan-out, so
+	// progressLoop's fileEvents channel closes and the !ok arm
+	// fires (continues without exiting).
+	eng.Close()
+
+	// Give the loop one scheduler tick to consume the close.
+	time.Sleep(50 * time.Millisecond)
+
+	// Now cancel ctx so the loop returns via the Done arm.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("progressLoop did not exit within 2s after close+cancel")
+	}
+}
+
 // TestPrintInfoSmokeTest covers printInfo on a real handle —
 // ensures the formatter walks all the paths (Name/Hash/Size/
 // Pieces/Files lines).
