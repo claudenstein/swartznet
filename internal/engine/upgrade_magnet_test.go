@@ -72,6 +72,66 @@ func TestUpgradeMagnetSessionWriteCopyError(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 }
 
+// TestUpgradeMagnetSessionUpdateError covers the
+// `e.sess.update(...) err != nil → log.Warn` arm in
+// upgradeMagnetSession. Torrent copy must SUCCEED first, so we
+// keep DataDir/torrents writable but strip write on DataDir
+// itself — saveLocked's WriteFile of session.json.tmp then
+// fails.
+//
+// Skipped on Windows + as root.
+func TestUpgradeMagnetSessionUpdateError(t *testing.T) {
+	t.Parallel()
+	if os.Getuid() == 0 {
+		t.Skip("running as root, chmod 0o500 doesn't deny writes")
+	}
+	dataDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	defer eng.Close()
+
+	srcPath := filepath.Join(dataDir, "src.bin")
+	if err := os.WriteFile(srcPath, []byte(fillTo(32*1024)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mi, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: srcPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ih := mi.HashInfoBytes()
+
+	if _, err := eng.AddInfoHash(ih); err != nil {
+		t.Fatalf("AddInfoHash: %v", err)
+	}
+
+	// Strip write on DataDir but keep DataDir/torrents writable
+	// so writeTorrentCopy (which writes to DataDir/torrents/)
+	// succeeds but session.update (which writes to
+	// DataDir/session.json.tmp via WriteFile) fails.
+	if err := os.Chmod(dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o755) })
+
+	if _, err := eng.AddTorrentMetaInfo(mi); err != nil {
+		t.Fatalf("AddTorrentMetaInfo: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+}
+
 // TestUpgradeMagnetSessionWritesTorrentCopy exercises
 // engine.upgradeMagnetSession's happy path: GotInfo fires (via
 // a follow-up AddTorrentMetaInfo for the same infohash), the
