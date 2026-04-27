@@ -27,11 +27,12 @@ func newTestDaemon(t *testing.T) *daemon.Daemon {
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
 	cfg.NoUpload = true
-	cfg.IdentityPath = ""
-	// Setting BloomPath + ReputationPath under TempDir makes the
-	// engine construct non-nil KnownGoodBloom + ReputationTracker
-	// so confirmHit / flagHit tests can exercise the daemon arms.
+	// Setting these under TempDir makes the engine construct
+	// non-nil Identity + KnownGoodBloom + ReputationTracker so
+	// confirmHit / flagHit / showAbout tests can exercise the
+	// daemon arms.
 	root := t.TempDir()
+	cfg.IdentityPath = filepath.Join(root, "identity.key")
 	cfg.BloomPath = filepath.Join(root, "bloom.dat")
 	cfg.ReputationPath = filepath.Join(root, "reputation.json")
 	cfg.SeedListPath = ""
