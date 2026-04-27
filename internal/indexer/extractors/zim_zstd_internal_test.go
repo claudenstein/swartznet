@@ -27,6 +27,18 @@ func TestReadZimClusterNextPtrReadFails(t *testing.T) {
 	}
 }
 
+// TestReadZimDirEntryURLPtrReadFails covers readZimDirEntry's
+// `ra.ReadAt(ptrBuf[:], …); if err != nil { return …, err }`
+// arm at lines 258-260. Point URLPtrPos past EOF so the very
+// first ReadAt fails.
+func TestReadZimDirEntryURLPtrReadFails(t *testing.T) {
+	t.Parallel()
+	hdr := &zimHeader{URLPtrPos: 1024} // past EOF on a tiny file
+	if _, err := readZimDirEntry(bytes.NewReader([]byte{}), hdr, 0); err == nil {
+		t.Error("readZimDirEntry should fail when URLPtrPos is past EOF")
+	}
+}
+
 // TestReadZimMimeListExceedsCap covers readZimMimeList's
 // `if len(all) > zimMaxMimeListBytes { return nil, errors.New(…) }`
 // guard at lines 222-225. We hand it a ReaderAt that returns a
