@@ -82,6 +82,23 @@ func TestZimExtractorClusterEndLeqStart(t *testing.T) {
 	}
 }
 
+// TestZimMimeListAllEmpty covers readZimMimeList's
+// `if len(mimes) == 0 { return nil, errors.New(...) }` arm.
+// Build a ZIM whose mime list is just two consecutive nulls so
+// every split-part is empty and the loop produces zero MIMEs.
+// The Extract call surfaces a wrapped readZimMimeList err.
+func TestZimMimeListAllEmpty(t *testing.T) {
+	t.Parallel()
+	articles := []zimTestArticle{
+		{URL: "x.txt", Mime: "", Body: []byte("doomed")},
+	}
+	zim := buildTestZim(t, articles, "")
+
+	if _, err := NewZimExtractor().Extract(bytes.NewReader(zim), 0); err == nil {
+		t.Error("Extract should fail when the mime list parses to zero MIMEs")
+	}
+}
+
 // TestZimExtractorClusterSizeExceedsCap covers readZimCluster's
 // `size > zimMaxClusterBytes` guard. Patch ChecksumPos far
 // beyond clusterPtr+64MiB so end-start > the cap.
