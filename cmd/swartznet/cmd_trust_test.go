@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -251,6 +253,46 @@ func TestTrustRemoveBadFile(t *testing.T) {
 	}
 }
 
-// trust.Store.Remove is idempotent + only errors on save (e.g.
-// disk failure), so trustRemove's `store.Remove err → reportRunErr`
-// arm is hard to trigger portably; left uncovered.
+// TestTrustRemoveSaveErr covers trustRemove's
+// `store.Remove err → reportRunErr` arm. trust.Store.Remove only
+// errors on save() failure. We make save's WriteFile fail by
+// stripping write permission from the parent dir between
+// LoadOrCreate (which reads the file) and Remove (which writes a
+// tempfile alongside it).
+//
+// Skipped on Windows (different perm semantics) and as root
+// (chmod 0o500 doesn't actually deny writes for uid 0).
+func TestTrustRemoveSaveErr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("dir-perm semantics differ on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses chmod 0o500")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "trust.json")
+
+	// Pre-populate the trust file with one entry so Remove finds
+	// something to delete (idempotent for missing keys, but the
+	// save() always fires regardless).
+	var stdout, stderr bytes.Buffer
+	if code := cmdTrust([]string{"add", "--file", file, validPub}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("setup add exit = %d, stderr: %s", code, stderr.String())
+	}
+
+	// Strip write on parent so Remove's save() fails at WriteFile
+	// (open of <file>.tmp). Read on the file itself stays intact,
+	// so LoadOrCreate inside openTrustStore still succeeds.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	stdout.Reset()
+	stderr.Reset()
+	code := cmdTrust([]string{"remove", "--file", file, validPub}, &stdout, &stderr)
+	if code == exitOK {
+		t.Errorf("save-err remove exit = %d, want non-zero", code)
+	}
+}
