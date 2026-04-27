@@ -3,6 +3,9 @@ package gui
 import (
 	"testing"
 
+	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
+
 	"github.com/swartznet/swartznet/internal/daemon"
 )
 
@@ -34,6 +37,44 @@ func TestUnfollowAtIndexOutOfRange(t *testing.T) {
 		follows: []followRow{},
 	}
 	ct.unfollowAt(99) // out of range, must not panic
+}
+
+// TestDoFollowEarlyReturns covers doFollow's three early-return
+// arms at companion.go:235-247. ShowError needs a window so we
+// run under test.NewApp + a minimal anchor window. The happy
+// path requires a real CompSub and is left uncovered.
+func TestDoFollowEarlyReturns(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	// nil-CompSub arm.
+	ct := &companionTab{
+		d:       &daemon.Daemon{},
+		content: widget.NewLabel("ct"),
+	}
+	ct.doFollow("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "")
+
+	// len != 64 arm.
+	ct.doFollow("too-short", "")
+
+	// hex.DecodeString err arm: 64 chars but with non-hex char.
+	bad := "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+	ct.doFollow(bad, "")
+}
+
+// TestRefreshPublisherNilCompPubShortCircuits covers
+// refreshPublisher's `if ct.d.CompPub == nil { return }` arm at
+// companion.go:221-223. With nil CompPub the function returns
+// immediately without spawning the background goroutine.
+func TestRefreshPublisherNilCompPubShortCircuits(t *testing.T) {
+	t.Parallel()
+	ct := &companionTab{
+		d: &daemon.Daemon{}, // CompPub is nil
+	}
+	ct.refreshPublisher() // must not panic, must return immediately
 }
 
 // TestUnfollowAtBadHexInFollows covers the `hex.DecodeString err →
