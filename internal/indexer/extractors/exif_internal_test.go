@@ -21,6 +21,27 @@ func TestParseTIFFBadByteOrderMarker(t *testing.T) {
 	}
 }
 
+// TestParseTIFFBigEndianHeader covers the `case "MM": bo = binary.BigEndian`
+// arm. A minimal TIFF header with the "MM" byte-order marker and
+// a 4-byte IFD offset of 8 (just past the header) followed by an
+// IFD with zero entries — parseTIFF should accept it and return
+// no tags rather than error.
+func TestParseTIFFBigEndianHeader(t *testing.T) {
+	t.Parallel()
+	tiff := []byte{
+		'M', 'M', 0x00, 0x2a, // big-endian magic 0x002a
+		0x00, 0x00, 0x00, 0x08, // IFD offset = 8 (BE)
+		0x00, 0x00, // IFD entry count = 0 (BE)
+	}
+	tags, err := parseTIFF(tiff)
+	if err != nil {
+		t.Fatalf("parseTIFF MM: %v", err)
+	}
+	if len(tags) != 0 {
+		t.Errorf("expected 0 tags from empty IFD, got %d", len(tags))
+	}
+}
+
 func TestParseTIFFIFDOffsetOutOfRange(t *testing.T) {
 	t.Parallel()
 	// "II" header + a 4-byte IFD offset past end-of-buffer.
