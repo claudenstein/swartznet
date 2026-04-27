@@ -7,6 +7,22 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// TestReadZimMimeListExceedsCap covers readZimMimeList's
+// `if len(all) > zimMaxMimeListBytes { return nil, errors.New(…) }`
+// guard at lines 222-225. We hand it a ReaderAt that returns a
+// stream of non-zero bytes — the function never finds the
+// double-null terminator and bails out once `all` exceeds the
+// 64 KiB cap.
+func TestReadZimMimeListExceedsCap(t *testing.T) {
+	t.Parallel()
+	// 70 KiB of 'a' bytes (no nulls) — well past zimMaxMimeListBytes.
+	huge := bytes.Repeat([]byte{'a'}, 70*1024)
+
+	if _, err := readZimMimeList(bytes.NewReader(huge), 0); err == nil {
+		t.Error("readZimMimeList should fail when no terminator within cap")
+	}
+}
+
 // TestReadZimClusterZstdHappyPath covers readZimCluster's
 // `case zimCompZstd: …` success arm at lines 361-364. Calling
 // readZimCluster directly with a synthetic ReaderAt + hand-built
