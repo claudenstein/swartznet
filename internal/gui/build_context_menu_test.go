@@ -2,6 +2,7 @@ package gui
 
 import (
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -97,4 +98,42 @@ func TestBuildContextMenuPauseActionsRun(t *testing.T) {
 			item.Action()
 		}
 	}
+}
+
+// TestBuildContextMenuQueuedActionsRun invokes the menu-item
+// Action closures that don't open dialogs: index-toggle,
+// "Move to top of queue", and "Move to bottom of queue". The
+// queue-reorder items only appear when snap.Queued is true.
+// We deliberately skip "Files..." and "Remove" because their
+// callbacks open dialogs whose rendering would race other
+// tests' font-cache writes under -race.
+func TestBuildContextMenuQueuedActionsRun(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+
+	ih := "0123456789abcdef0123456789abcdef01234567"
+	dl := &downloadsTab{
+		d:        d,
+		content:  widget.NewLabel("downloads"),
+		selected: 0,
+		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Paused: false, Indexing: true, Queued: true}},
+	}
+	menu := dl.buildContextMenu()
+	for _, item := range menu.Items {
+		switch item.Label {
+		case "Stop indexing", "Start indexing",
+			"Move to top of queue", "Move to bottom of queue":
+			if item.Action != nil {
+				item.Action()
+			}
+		}
+	}
+	// Drain spawned goroutines (toggleIndex / queue moves all
+	// fire engine goroutines that no-op on the missing torrent).
+	time.Sleep(200 * time.Millisecond)
 }
