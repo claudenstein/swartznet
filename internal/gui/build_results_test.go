@@ -17,7 +17,6 @@ import (
 // err, dht resp / dht err. Plus the no-layers parts append. Card
 // callbacks reference st.confirmHit/flagHit but aren't fired.
 func TestBuildResultsArms(t *testing.T) {
-	t.Parallel()
 	st := &searchTab{
 		resultBox:  container.NewVBox(),
 		emptyState: container.NewVBox(),

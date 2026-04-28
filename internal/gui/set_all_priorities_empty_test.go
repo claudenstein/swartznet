@@ -15,7 +15,6 @@ import (
 // daemon-free path. We sleep briefly to let the goroutine
 // run and exit before the test returns.
 func TestSetAllPrioritiesEmptyFiles(t *testing.T) {
-	t.Parallel()
 	fd := &filesDialog{
 		// d intentionally nil — goroutine never dereferences it
 		// because indices is empty and the for-loop body skips.
