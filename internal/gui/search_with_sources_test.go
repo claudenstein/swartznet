@@ -55,3 +55,29 @@ func TestFlagHitWithSources(t *testing.T) {
 	}
 	st.flagHit(ih)
 }
+
+// TestFlagHitFallbackSnapshot covers flagHit's `len(pks) == 0`
+// fallback at search.go:367-374. We pre-record reputation
+// entries so tracker.Snapshot returns rows, but flag an
+// infohash that has no sources — the function then iterates
+// the snapshot to populate pks.
+func TestFlagHitFallbackSnapshot(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+
+	// Seed a tracker entry so Snapshot is non-empty.
+	d.Eng.ReputationTracker().RecordReturned("known-publisher", 1)
+
+	st := &searchTab{
+		d:       d,
+		content: widget.NewLabel("search"),
+	}
+	// This infohash has no sources recorded, so the empty-pks
+	// fallback path fires.
+	st.flagHit("ffffffffffffffffffffffffffffffffffffffff")
+}
