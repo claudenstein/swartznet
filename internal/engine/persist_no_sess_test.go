@@ -13,8 +13,12 @@ import (
 // arm at the top of persistAdd, persistState, upgradeMagnetSession,
 // and RestoreSession (engine.go:1325, 1363, 1407, 1460). New()
 // always populates e.sess, but the explicit guards future-proof
-// callers that might construct an engine without one. Reach the
-// arms via the internal entry points after force-clearing e.sess.
+// callers that might construct an engine without one.
+//
+// Each function tests `if e.sess == nil { return }` BEFORE touching
+// the *Handle argument, so we can safely pass nil. This avoids
+// AddMagnet/AddInfoHash, both of which spawn upgradeMagnetSession
+// goroutines that race with the e.sess = nil write under -race.
 func TestPersistFnsNoSessReturnEarly(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default()
@@ -34,27 +38,19 @@ func TestPersistFnsNoSessReturnEarly(t *testing.T) {
 	}
 	defer eng.Close()
 
-	const magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
-	h, err := eng.AddMagnet(magnet)
-	if err != nil {
-		t.Fatalf("AddMagnet: %v", err)
-	}
-
-	// Force-clear sess so the nil-sess guards short-circuit.
+	// Force-clear sess so the nil-sess guards short-circuit. No
+	// goroutines reading e.sess exist yet because we haven't
+	// added any magnets/infohashes.
+	eng.mu.Lock()
 	eng.sess = nil
+	eng.mu.Unlock()
 
-	// persistAdd: void return; success means it didn't panic.
-	eng.persistAdd(h, "magnet", magnet, "")
-
-	// persistState: same.
-	eng.persistState(h)
-
-	// RestoreSession: returns nil on nil-sess.
+	// All four functions check `if e.sess == nil` first; passing
+	// nil h is safe because they short-circuit before touching it.
+	eng.persistAdd(nil, "magnet", "magnet:?xt=urn:btih:00", "")
+	eng.persistState(nil)
 	if err := eng.RestoreSession(); err != nil {
 		t.Errorf("RestoreSession with nil sess = %v, want nil", err)
 	}
-
-	// upgradeMagnetSession is a goroutine entrypoint that returns
-	// immediately on nil-sess. Calling synchronously is safe.
-	eng.upgradeMagnetSession(h)
+	eng.upgradeMagnetSession(nil)
 }

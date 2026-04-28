@@ -57,6 +57,15 @@ var dlColumns = []struct {
 }
 
 func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
+	dl := buildDownloadsTab(d)
+	go dl.pollLoop(ctx)
+	return dl
+}
+
+// buildDownloadsTab constructs the downloadsTab struct without
+// spawning the pollLoop goroutine. Tests use it to avoid the
+// goroutine racing test-thread widget operations under -race.
+func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 	dl := &downloadsTab{
 		d:        d,
 		selected: -1,
@@ -230,9 +239,6 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 
 	body := container.NewStack(tableWithMenu, dl.emptyState)
 	dl.content = container.NewBorder(toolbar, nil, nil, nil, body)
-
-	// Background polling goroutine.
-	go dl.pollLoop(ctx)
 
 	return dl
 }

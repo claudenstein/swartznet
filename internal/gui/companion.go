@@ -41,6 +41,16 @@ type followRow struct {
 }
 
 func newCompanionTab(ctx context.Context, d *daemon.Daemon) *companionTab {
+	ct := buildCompanionTab(d)
+	go ct.pollLoop(ctx)
+	return ct
+}
+
+// buildCompanionTab constructs the companionTab struct without
+// spawning the pollLoop goroutine. Tests use it to avoid the
+// pollLoop's fyne.Do refresh racing test-thread widget reads
+// under -race.
+func buildCompanionTab(d *daemon.Daemon) *companionTab {
 	ct := &companionTab{d: d}
 
 	// Publisher status labels.
@@ -134,8 +144,6 @@ func newCompanionTab(ctx context.Context, d *daemon.Daemon) *companionTab {
 		followForm,
 		followCard,
 	)
-
-	go ct.pollLoop(ctx)
 
 	return ct
 }
