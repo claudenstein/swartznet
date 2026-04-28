@@ -3,6 +3,9 @@ package gui
 import (
 	"testing"
 
+	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
+
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
@@ -45,6 +48,53 @@ func TestBuildContextMenu(t *testing.T) {
 		menu := dl.buildContextMenu()
 		if menu == nil {
 			t.Errorf("case %d: expected non-nil menu, got nil", i)
+		}
+	}
+}
+
+// TestBuildContextMenuPauseActionsRun covers the closures
+// `pauseAction = func() { dl.pauseSelected() }` and the
+// resume variant inside buildContextMenu (downloads.go:264-269).
+// We invoke each menu item's Action directly so the closure
+// runs against a live daemon — pauseSelected/resumeSelected
+// each spawn a goroutine, so we use a real daemon and tolerate
+// "torrent not found" silently.
+func TestBuildContextMenuPauseActionsRun(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+
+	ih := "0123456789abcdef0123456789abcdef01234567"
+
+	// Paused=false → menu has "Pause" → tapping it calls pauseSelected.
+	dl := &downloadsTab{
+		d:        d,
+		content:  widget.NewLabel("downloads"),
+		selected: 0,
+		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Paused: false, Indexing: true}},
+	}
+	menu := dl.buildContextMenu()
+	for _, item := range menu.Items {
+		if item.Label == "Pause" && item.Action != nil {
+			item.Action()
+		}
+	}
+
+	// Paused=true → menu has "Resume" → tapping it calls resumeSelected.
+	dl2 := &downloadsTab{
+		d:        d,
+		content:  widget.NewLabel("downloads"),
+		selected: 0,
+		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Paused: true, Indexing: true}},
+	}
+	menu2 := dl2.buildContextMenu()
+	for _, item := range menu2.Items {
+		if item.Label == "Resume" && item.Action != nil {
+			item.Action()
 		}
 	}
 }
