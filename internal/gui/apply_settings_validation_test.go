@@ -32,6 +32,34 @@ func TestApplyQueueSettingsInvalidInput(t *testing.T) {
 	st.applyQueueSettings()
 }
 
+// TestApplyQueueSettingsZeroAndEmpty covers applyQueueSettings'
+// `if s == ""` (empty input → s = "0") arm and `if n == 0`
+// (label = "unlimited") arm at settings.go:114-128. Both are
+// daemon-touching arms — they call SetMaxActiveDownloads — so
+// the test requires a real daemon.
+func TestApplyQueueSettingsZeroAndEmpty(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+	st := newSettingsTab(d)
+
+	// Empty input: TrimSpace returns "", trips the `s == ""`
+	// fallback to "0", then `n == 0` triggers the "unlimited"
+	// label arm.
+	st.maxActiveEntry.SetText("")
+	st.applyQueueSettings()
+
+	// Explicit "0" — already triggers the "unlimited" arm; left
+	// here as a redundant check that the empty-string handling
+	// converges on the same path.
+	st.maxActiveEntry.SetText("0")
+	st.applyQueueSettings()
+}
+
 // TestApplyRateLimitsInvalidInput covers applyRateLimits'
 // upload-err and download-err validation arms at
 // settings.go:139-148. Each malformed input trips parseKiB and

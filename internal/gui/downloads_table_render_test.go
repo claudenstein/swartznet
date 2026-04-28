@@ -6,6 +6,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/swartznet/swartznet/internal/engine"
 )
@@ -73,4 +74,17 @@ func TestDownloadsTableUpdateCellArms(t *testing.T) {
 	w.SetContent(dl.content)
 	w.Resize(fyne.NewSize(1600, 800))
 	dl.table.Refresh()
+
+	// Set sortCol + sortDesc so the header arrow-indicator
+	// arms fire on the next refresh.
+	dl.sortCol = 0
+	dl.sortDesc = false
+	dl.table.Refresh()
+	dl.sortDesc = true
+	dl.table.Refresh()
+
+	// Drive OnSelected: a header cell (Row=-1 hits the toggleSort
+	// arm) and a body cell (Row=0 sets selected).
+	dl.table.Select(widget.TableCellID{Row: -1, Col: 0})
+	dl.table.Select(widget.TableCellID{Row: 0, Col: 0})
 }
