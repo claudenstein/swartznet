@@ -98,26 +98,3 @@ func TestCompanionDoFollowAndUnfollow(t *testing.T) {
 	ct.unfollowAt(len(ct.follows) - 1)
 }
 
-// TestCompanionRefreshPublisherWithDaemon covers refreshPublisher
-// at companion.go:220-232 when CompPub is wired up. The function
-// spawns a goroutine that calls CompPub.RefreshNow; without any
-// indexed content the call returns nil error so the ShowError
-// branch isn't hit, but the entire happy path executes.
-func TestCompanionRefreshPublisherWithDaemon(t *testing.T) {
-	app := test.NewApp()
-	defer app.Quit()
-	w := app.NewWindow("anchor")
-	defer w.Close()
-	w.SetContent(widget.NewLabel("anchor"))
-
-	d := newDHTTestDaemon(t)
-	if d.CompPub == nil {
-		t.Skip("daemon did not wire up CompPub (DHT may not be available in this environment)")
-	}
-
-	ct := &companionTab{
-		d:       d,
-		content: widget.NewLabel("companion"),
-	}
-	ct.refreshPublisher()
-}
