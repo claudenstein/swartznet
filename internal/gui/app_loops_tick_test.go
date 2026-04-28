@@ -24,6 +24,10 @@ func TestTitleLoopTickAndNotificationLoopTick(t *testing.T) {
 	w.SetContent(widget.NewLabel("anchor"))
 
 	d := newTestDaemon(t)
+	// Add a torrent so titleLoop's totalDown/totalUp aggregation
+	// has rows to walk and notificationLoop's snapshot range
+	// loop body fires.
+	addTestTorrent(t, d.Eng)
 
 	a := &App{
 		fyne:         app,
