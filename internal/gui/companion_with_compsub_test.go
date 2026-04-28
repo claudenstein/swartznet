@@ -90,6 +90,12 @@ func TestCompanionDoFollowAndUnfollow(t *testing.T) {
 	// unfollowAt happy path: follow row 0 has a valid 64-char hex
 	// pubkey, hex.DecodeString succeeds, CompSub.Unfollow runs.
 	ct.unfollowAt(0)
+
+	// unfollowAt hex.DecodeString-err arm: CompSub non-nil but
+	// follow row has a non-hex pubkey, so DecodeString fails and
+	// the function returns silently before calling Unfollow.
+	ct.follows = append(ct.follows, followRow{pubkey: "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"})
+	ct.unfollowAt(len(ct.follows) - 1)
 }
 
 // TestCompanionRefreshPublisherWithDaemon covers refreshPublisher
