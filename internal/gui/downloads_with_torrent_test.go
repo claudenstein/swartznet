@@ -72,11 +72,13 @@ func TestDownloadsSelectedActionsHappyPath(t *testing.T) {
 	}
 
 	// Each go-routine launches against the real engine. They
-	// return without panicking.
+	// return without panicking. We DON'T call showFilesForSelected:
+	// it builds a filesDialog that spawns a 2s-tick pollLoop, and
+	// that goroutine bleeds across the test boundary to race other
+	// tests' Fyne caches under -race.
 	dl.pauseSelected()
 	dl.resumeSelected()
 	dl.toggleIndexSelected()
-	dl.showFilesForSelected()
 	// Wait briefly so the goroutines have a chance to run their
 	// engine calls; without this the test ends before they fire.
 	time.Sleep(100 * time.Millisecond)
