@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 )
@@ -37,6 +39,23 @@ func TestInstallShortcutsWiring(t *testing.T) {
 		// dl, sr left nil — the shortcut closures handle nil safely.
 	}
 	a.installShortcuts()
-	// No assertion on shortcut state — Fyne stores them on the
-	// canvas; we only care that the install path executes.
+
+	// Drive each registered shortcut so its handler closure runs.
+	type shortcutTyper interface {
+		TypedShortcut(fyne.Shortcut)
+	}
+	st, ok := w.Canvas().(shortcutTyper)
+	if !ok {
+		t.Skip("test canvas does not expose TypedShortcut")
+	}
+	ctrl := fyne.KeyModifierControl
+	st.TypedShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: ctrl})
+	st.TypedShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: ctrl})
+	st.TypedShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyQ, Modifier: ctrl})
+
+	// SetOnTypedKey handler — invoke the Delete-key arm directly
+	// via the canvas getter.
+	if h := w.Canvas().OnTypedKey(); h != nil {
+		h(&fyne.KeyEvent{Name: fyne.KeyDelete})
+	}
 }
