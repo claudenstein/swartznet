@@ -100,13 +100,89 @@ func TestBuildContextMenuPauseActionsRun(t *testing.T) {
 	}
 }
 
+// TestBuildContextMenuFilesActionWithRealTorrent covers the
+// "Files..." menu-item action closure with a real torrent
+// in the engine so showFilesForSelected → showFilesDialog
+// reaches its happy path (build a real filesDialog), then
+// taps Close to drain the spawned pollLoop.
+func TestBuildContextMenuFilesActionWithRealTorrent(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+	ih := addTestTorrent(t, d.Eng)
+
+	dl := &downloadsTab{
+		d:        d,
+		content:  widget.NewLabel("downloads"),
+		selected: 0,
+		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Name: "test", Indexing: true}},
+	}
+	menu := dl.buildContextMenu()
+	for _, item := range menu.Items {
+		if item.Label == "Files..." && item.Action != nil {
+			item.Action()
+		}
+	}
+
+	// showFilesDialog spawns a 2s pollLoop goroutine. Tap the
+	// dialog's Close button so SetOnClosed → cancel() fires.
+	for _, ov := range w.Canvas().Overlays().List() {
+		for _, child := range test.LaidOutObjects(ov) {
+			if btn, ok := child.(*widget.Button); ok && btn.Text == "Close" && btn.OnTapped != nil {
+				btn.OnTapped()
+			}
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+}
+
+// TestBuildContextMenuRemoveActionTapsNo covers the "Remove"
+// menu-item action closure. The action calls removeSelected
+// which opens a confirm dialog; we tap "No" so no engine
+// goroutine spawns.
+func TestBuildContextMenuRemoveActionTapsNo(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+
+	dl := &downloadsTab{
+		d:        d,
+		content:  widget.NewLabel("downloads"),
+		selected: 0,
+		snaps: []engine.TorrentSnapshot{
+			{InfoHash: "0123456789abcdef0123456789abcdef01234567", Name: "test"},
+		},
+	}
+	menu := dl.buildContextMenu()
+	for _, item := range menu.Items {
+		if item.Label == "Remove" && item.Action != nil {
+			item.Action()
+		}
+	}
+	for _, ov := range w.Canvas().Overlays().List() {
+		for _, child := range test.LaidOutObjects(ov) {
+			if btn, ok := child.(*widget.Button); ok && btn.Text == "No" && btn.OnTapped != nil {
+				btn.OnTapped()
+			}
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
 // TestBuildContextMenuQueuedActionsRun invokes the menu-item
 // Action closures that don't open dialogs: index-toggle,
 // "Move to top of queue", and "Move to bottom of queue". The
 // queue-reorder items only appear when snap.Queued is true.
 // We deliberately skip "Files..." and "Remove" because their
-// callbacks open dialogs whose rendering would race other
-// tests' font-cache writes under -race.
+// callbacks open dialogs (covered by the two tests above).
 func TestBuildContextMenuQueuedActionsRun(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()
