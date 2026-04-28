@@ -164,19 +164,26 @@ func (fd *filesDialog) pollLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			files, err := fd.d.Eng.TorrentFiles(fd.infoHashHex)
-			if err != nil {
-				continue
-			}
-			fyne.Do(func() {
-				fd.mu.Lock()
-				fd.files = files
-				fd.sortFilesLocked()
-				fd.mu.Unlock()
-				fd.list.Refresh()
-			})
+			fd.tickRefresh()
 		}
 	}
+}
+
+// tickRefresh is the per-tick body of pollLoop. Extracted so
+// tests can drive the refresh path without waiting for the 2s
+// ticker.
+func (fd *filesDialog) tickRefresh() {
+	files, err := fd.d.Eng.TorrentFiles(fd.infoHashHex)
+	if err != nil {
+		return
+	}
+	fyne.Do(func() {
+		fd.mu.Lock()
+		fd.files = files
+		fd.sortFilesLocked()
+		fd.mu.Unlock()
+		fd.list.Refresh()
+	})
 }
 
 // sortFilesLocked reorders fd.files in place according to fd.sortBy.
