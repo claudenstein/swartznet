@@ -78,6 +78,15 @@ func TestCompanionDoFollowAndUnfollow(t *testing.T) {
 	// doFollow happy path: 64-char hex pubkey decodes, CompSub.Follow runs.
 	ct.doFollow("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "test-publisher")
 
+	// doFollow `len(pubkeyHex) != 64` ShowError arm — daemon
+	// has CompSub so we get past the first guard, but length
+	// mismatch trips the second.
+	ct.doFollow("too-short", "label")
+
+	// doFollow hex.DecodeString-err arm — 64-char string but
+	// contains non-hex characters.
+	ct.doFollow("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", "label")
+
 	// unfollowAt happy path: follow row 0 has a valid 64-char hex
 	// pubkey, hex.DecodeString succeeds, CompSub.Unfollow runs.
 	ct.unfollowAt(0)
