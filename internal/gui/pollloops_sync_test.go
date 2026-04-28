@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -63,4 +64,44 @@ func TestCompanionPollLoopSync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	ct.pollLoop(ctx)
+}
+
+// TestNewStatusTabWrapper covers newStatusTab's 3-line wrapper
+// (buildStatusTab + go pollLoop). The pollLoop goroutine runs an
+// initial refresh that calls fyne.Do; we drain the goroutine
+// before the test returns so its callbacks don't bleed.
+func TestNewStatusTabWrapper(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	st := newStatusTab(ctx, d)
+	if st == nil {
+		t.Fatal("expected non-nil statusTab")
+	}
+	time.Sleep(500 * time.Millisecond)
+}
+
+// TestNewCompanionTabWrapper covers newCompanionTab's 3-line
+// wrapper. Same drain pattern.
+func TestNewCompanionTabWrapper(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ct := newCompanionTab(ctx, d)
+	if ct == nil {
+		t.Fatal("expected non-nil companionTab")
+	}
+	time.Sleep(500 * time.Millisecond)
 }
