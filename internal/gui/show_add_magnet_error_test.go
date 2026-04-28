@@ -23,7 +23,15 @@ func TestShowAddMagnetErrorOpensDialog(t *testing.T) {
 		content: widget.NewLabel("downloads"),
 	}
 	showAddMagnetError(dl, "test failure msg", "magnet:?xt=urn:btih:1234", true)
-	// No assertion on dialog state — we only care that the call
-	// returns without panicking and exercises the dialog.New +
-	// SetOnClosed + Show path.
+
+	// Tap the dialog's OK button to fire OnClosed which calls
+	// showAddMagnetDialogPrefilled with the same URI/index args.
+	for _, ov := range w.Canvas().Overlays().List() {
+		for _, child := range test.LaidOutObjects(ov) {
+			if btn, ok := child.(*widget.Button); ok && btn.Text == "OK" && btn.OnTapped != nil {
+				btn.OnTapped()
+			}
+		}
+	}
 }
+
