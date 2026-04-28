@@ -64,20 +64,18 @@ func TestNewStatusTabAndRefresh(t *testing.T) {
 
 	d := newTestDaemon(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // pollLoop runs initial refresh, then returns
-
-	st := newStatusTab(ctx, d)
+	// Use buildStatusTab to skip the pollLoop goroutine — tests
+	// that use newStatusTab race the goroutine's fyne.Do(SetText)
+	// against any other widget rendering they trigger. Calling
+	// refresh() ourselves covers the same code path without the
+	// race.
+	st := buildStatusTab(d)
 	if st == nil {
 		t.Fatal("expected non-nil statusTab")
 	}
 	if st.content == nil {
 		t.Error("expected content wired up")
 	}
-
-	// Drive refresh once more directly so the function gets full
-	// in-test coverage rather than just the goroutine pre-cancel
-	// snapshot.
 	st.refresh()
 }
 

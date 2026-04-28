@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"context"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -35,9 +34,7 @@ func TestStatusRefreshWithReputationEntries(t *testing.T) {
 		"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
 	))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	st := newStatusTab(ctx, d)
+	st := buildStatusTab(d)
 	st.refresh()
 
 	// Mount + resize so the rep-list UpdateCell callback runs

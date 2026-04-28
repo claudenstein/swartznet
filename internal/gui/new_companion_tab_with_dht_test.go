@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"context"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -26,9 +25,6 @@ func TestNewCompanionTabWithDHT(t *testing.T) {
 		t.Skip("daemon did not wire up CompSub")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	// Pre-seed a follow so the follow-list UpdateCell callback has
 	// work to do during the initial refresh.
 	var pub [32]byte
@@ -41,12 +37,12 @@ func TestNewCompanionTabWithDHT(t *testing.T) {
 	copy(longPub[:], []byte("longer-32byte-test-pubkey-padding"))
 	d.CompSub.Follow(longPub, "long-pubkey-label")
 
-	ct := newCompanionTab(ctx, d)
+	ct := buildCompanionTab(d)
 	if ct == nil {
 		t.Fatal("expected companionTab")
 	}
 
-	// Drive refresh once more directly with the seeded rows visible.
+	// Drive refresh directly (no pollLoop goroutine).
 	ct.refresh()
 
 	// Mount + resize so the follow-list UpdateCell callback runs

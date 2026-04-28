@@ -54,8 +54,6 @@ func TestStatusRefreshFullDHTPublisher(t *testing.T) {
 		t.Skip("publisher did not start in this environment")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	st := newStatusTab(ctx, d)
+	st := buildStatusTab(d)
 	st.refresh()
 }

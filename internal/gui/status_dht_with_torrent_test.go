@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"context"
 	"testing"
 
 	"fyne.io/fyne/v2/test"
@@ -27,8 +26,6 @@ func TestStatusRefreshDHTWithTorrent(t *testing.T) {
 	}
 	addTestTorrent(t, d.Eng)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	st := newStatusTab(ctx, d)
+	st := buildStatusTab(d)
 	st.refresh()
 }

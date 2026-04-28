@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"context"
 	"testing"
 
 	"fyne.io/fyne/v2/test"
@@ -23,10 +22,7 @@ func TestNewCompanionTabConstructs(t *testing.T) {
 	defer w.Close()
 	w.SetContent(widget.NewLabel("anchor"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	ct := newCompanionTab(ctx, &daemon.Daemon{})
+	ct := buildCompanionTab(&daemon.Daemon{})
 	if ct == nil {
 		t.Fatal("expected non-nil companionTab")
 	}
@@ -36,7 +32,4 @@ func TestNewCompanionTabConstructs(t *testing.T) {
 	if ct.followList == nil {
 		t.Error("expected followList wired up")
 	}
-
-	// Cancel so the pollLoop goroutine exits and doesn't leak.
-	cancel()
 }

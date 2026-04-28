@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"context"
 	"testing"
 
 	"fyne.io/fyne/v2/test"
@@ -25,9 +24,7 @@ func TestStatusRefreshWithDHT(t *testing.T) {
 		t.Skip("daemon did not wire up Lookup (DHT may not be available)")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	st := newStatusTab(ctx, d)
+	st := buildStatusTab(d)
 	st.refresh()
 }
 
@@ -48,9 +45,7 @@ func TestCompanionRefreshWithDHT(t *testing.T) {
 		t.Skip("daemon did not wire up CompPub/CompSub")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ct := newCompanionTab(ctx, d)
+	ct := buildCompanionTab(d)
 	ct.refresh()
 
 	// Add a follow so the follows-loop iterates at least once,

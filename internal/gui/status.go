@@ -46,6 +46,16 @@ type repRow struct {
 }
 
 func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
+	st := buildStatusTab(d)
+	go st.pollLoop(ctx)
+	return st
+}
+
+// buildStatusTab constructs the statusTab struct (cards, labels,
+// lists, content) without spawning the pollLoop goroutine. Tests
+// use it to avoid the goroutine-vs-test-goroutine race on Fyne's
+// shared widget caches.
+func buildStatusTab(d *daemon.Daemon) *statusTab {
 	st := &statusTab{d: d}
 
 	// Torrents card — aggregate counts + throughput across every
@@ -164,8 +174,6 @@ func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
 	)
 
 	st.content = container.NewBorder(grid, nil, nil, nil, st.repCard)
-
-	go st.pollLoop(ctx)
 
 	return st
 }
