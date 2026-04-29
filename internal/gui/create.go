@@ -294,7 +294,18 @@ func runCreateTorrent(d *daemon.Daemon, win fyne.Window, opts engine.CreateTorre
 
 			msg := fmt.Sprintf("Created:\n  %s\n\nInfoHash:\n  %s", outPath, ih)
 			if andSeed && mi != nil {
-				if _, err := d.Eng.AddTorrentMetaInfo(mi); err != nil {
+				// Seed from the user's source location rather than
+				// re-locating the bytes under cfg.DataDir. anacrolix's
+				// default storage roots every torrent at DataDir, so
+				// without the per-torrent override the just-hashed
+				// content is effectively invisible — VerifyData runs
+				// against an empty directory and the row sits at 0%.
+				// filepath.Dir(opts.Root) is the layout anacrolix
+				// expects: parent dir + info.Name resolves to the
+				// real file (single-file) or the real folder
+				// (multi-file).
+				dataParent := filepath.Dir(strings.TrimRight(opts.Root, string(filepath.Separator)))
+				if _, err := d.Eng.AddTorrentMetaInfoSeedFrom(mi, dataParent); err != nil {
 					msg += "\n\nSeed start failed: " + err.Error()
 				} else {
 					msg += "\n\nSeeding started."

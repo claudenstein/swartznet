@@ -19,6 +19,7 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	pp "github.com/anacrolix/torrent/peer_protocol"
+	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/time/rate"
 
 	"github.com/swartznet/swartznet/internal/companion"
@@ -1248,6 +1249,36 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infoHash [20]byte) (
 // the companion package, which only needs to know "this seeded ok"
 // and would otherwise pull a hard import on internal/engine.
 func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
+	return e.addTorrentMetaInfo(mi, "")
+}
+
+// AddTorrentMetaInfoSeedFrom is the variant of AddTorrentMetaInfo
+// used by the Create Torrent flow: it adds the torrent with a
+// per-torrent storage rooted at dataParent so anacrolix locates
+// the source content where it actually lives instead of looking
+// for it under cfg.DataDir. Without this, a freshly-created
+// torrent whose Root sat outside DataDir would always rehash
+// against an empty directory and show 0% progress, even though
+// the user's bytes were already on disk.
+//
+// dataParent must be the directory ABOVE info.Name on the
+// publisher's filesystem — for a single-file torrent at
+// /foo/bar/baz.txt with info.Name="baz.txt" pass "/foo/bar"; for
+// a multi-file torrent rooted at /foo/bar/album/ with
+// info.Name="album" pass "/foo/bar". Empty dataParent falls back
+// to the default DataDir storage (matches AddTorrentMetaInfo).
+//
+// The dataParent is persisted in the session manifest so a
+// restart re-applies the same per-torrent storage and the
+// restored handle continues to seed from the original location.
+func (e *Engine) AddTorrentMetaInfoSeedFrom(mi *metainfo.MetaInfo, dataParent string) (any, error) {
+	return e.addTorrentMetaInfo(mi, dataParent)
+}
+
+// addTorrentMetaInfo is the shared implementation behind
+// AddTorrentMetaInfo and AddTorrentMetaInfoSeedFrom. dataParent
+// empty means "use the engine's default storage (cfg.DataDir)".
+func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, dataParent string) (any, error) {
 	if mi == nil {
 		return nil, errors.New("engine: nil metainfo")
 	}
@@ -1256,7 +1287,21 @@ func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
 		e.mu.Unlock()
 		return nil, errors.New("engine: closed")
 	}
-	t, err := e.client.AddTorrent(mi)
+	var (
+		t   *torrent.Torrent
+		err error
+	)
+	if dataParent == "" {
+		t, err = e.client.AddTorrent(mi)
+	} else {
+		spec, serr := torrent.TorrentSpecFromMetaInfoErr(mi)
+		if serr != nil {
+			e.mu.Unlock()
+			return nil, fmt.Errorf("engine: build torrent spec: %w", serr)
+		}
+		spec.Storage = storage.NewFile(dataParent)
+		t, _, err = e.client.AddTorrentSpec(spec)
+	}
 	if err != nil {
 		e.mu.Unlock()
 		return nil, fmt.Errorf("engine: add torrent metainfo: %w", err)
@@ -1297,6 +1342,13 @@ func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
 	if miBytes, merr := bencode.Marshal(*mi); merr == nil {
 		if tname, werr := e.sess.writeTorrentCopy(ihHex, miBytes); werr == nil {
 			e.persistAdd(h, "metainfo", "", tname)
+			if dataParent != "" {
+				if uerr := e.sess.update(ihHex, func(entry *sessionEntry) {
+					entry.DataPath = dataParent
+				}); uerr != nil {
+					e.log.Warn("engine.session_update_err", "info_hash", ihHex, "err", uerr)
+				}
+			}
 		} else {
 			e.log.Warn("engine.session_torrent_copy_err", "info_hash", ihHex, "err", werr)
 		}
@@ -1530,7 +1582,24 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 			err = lerr
 			break
 		}
-		t, err = e.client.AddTorrent(mi)
+		// Re-apply the per-torrent storage override saved at
+		// Create-Torrent time so the restored handle continues
+		// reading from the user's source location instead of the
+		// default DataDir layout. Falling back to AddTorrent (no
+		// override) when DataPath is empty preserves existing
+		// behaviour for every torrent that was added before this
+		// field existed.
+		if entry.DataPath != "" {
+			spec, serr := torrent.TorrentSpecFromMetaInfoErr(mi)
+			if serr != nil {
+				err = serr
+				break
+			}
+			spec.Storage = storage.NewFile(entry.DataPath)
+			t, _, err = e.client.AddTorrentSpec(spec)
+		} else {
+			t, err = e.client.AddTorrent(mi)
+		}
 	case entry.MagnetURI != "":
 		t, err = e.client.AddMagnet(entry.MagnetURI)
 	default:

@@ -166,6 +166,26 @@ cells. Cell labels now use `TextTruncateEllipsis` so long names
 show "Project Hail Mary 2026 1080p WEB Lin..." and stop cleanly at
 the column edge.
 
+### Fixed — Create Torrent seeds from the source path
+
+`Engine.AddTorrentMetaInfo` was relying on anacrolix's default
+storage backend, which roots every torrent at `cfg.DataDir`.
+The Create Torrent flow hashes whatever path the user picked
+(typically `~/Documents/...`), so the freshly-seeded torrent's
+`info.Name` resolved to a non-existent file under DataDir and
+the post-add VerifyData found zero bytes — the row sat at 0%
+even though the source content was already on disk. New
+`Engine.AddTorrentMetaInfoSeedFrom(mi, dataParent)` adds the
+torrent with a per-torrent `storage.NewFile(dataParent)` so
+anacrolix locates the real bytes at `dataParent + info.Name`.
+The GUI's `runCreateTorrent` calls the new method with
+`filepath.Dir(opts.Root)`, and the value is persisted as
+`sessionEntry.DataPath` so RestoreSession reapplies the same
+override on the next launch instead of bouncing the row back
+to 0%. Regression tests:
+`TestAddTorrentMetaInfoSeedFromExternalPath` and
+`TestAddTorrentMetaInfoSeedFromSurvivesRestart`.
+
 ### Fixed — Restored torrents resume at their real progress
 
 Two engine bugs combined to make every restart appear to wipe
