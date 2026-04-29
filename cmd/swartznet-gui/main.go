@@ -21,9 +21,11 @@ import (
 
 var (
 	// Version is the human-readable release tag, set via -ldflags
-	// at build time. Defaults to "0.0.1-dev" for go-run / IDE
-	// launches.
-	Version = "0.0.1-dev"
+	// at build time. The default tracks the latest released tag so
+	// go-run / IDE launches show a meaningful version instead of
+	// drifting forever on "0.0.1-dev"; bump this in the same
+	// commit that cuts a release.
+	Version = "v0.8.0"
 
 	// BuildDate is the UTC build timestamp set by build-gui.sh /
 	// build-release.sh via -ldflags. Empty for go-run launches,
