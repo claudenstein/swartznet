@@ -2,6 +2,7 @@ package gui
 
 import (
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -64,4 +65,15 @@ func TestShowAddMagnetDialogPrefilledSubmit(t *testing.T) {
 		e.SetText("http://not-a-magnet")
 		b.OnTapped()
 	}
+
+	// Engine.AddMagnetURI happy path: valid magnet URI with
+	// shouldIndex=true (default). Spawns goroutine that calls
+	// AddMagnetURI; with DHT off, the call adds the torrent and
+	// returns quickly. A 500 ms drain bounds the goroutine.
+	dl.showAddMagnetDialog()
+	if e, b := findEntryAndAdd(); e != nil && b != nil {
+		e.SetText("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
+		b.OnTapped()
+	}
+	time.Sleep(500 * time.Millisecond)
 }

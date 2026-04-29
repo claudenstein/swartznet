@@ -43,3 +43,37 @@ func TestRemoveSelectedConfirmAction(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 }
+
+// TestRemoveSelectedConfirmCanceled covers the `if !ok { return }`
+// arm of removeSelected's confirm callback. Tapping "No" yields
+// ok=false; the goroutine never fires and no engine work runs.
+func TestRemoveSelectedConfirmCanceled(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+	w.SetContent(widget.NewLabel("anchor"))
+
+	d := newTestDaemon(t)
+
+	dl := &downloadsTab{
+		d:        d,
+		content:  widget.NewLabel("downloads"),
+		selected: 0,
+		snaps: []engine.TorrentSnapshot{
+			{InfoHash: "0123456789abcdef0123456789abcdef01234567", Name: "test"},
+		},
+	}
+	dl.removeSelected()
+
+	for _, ov := range w.Canvas().Overlays().List() {
+		for _, child := range test.LaidOutObjects(ov) {
+			if btn, ok := child.(*widget.Button); ok && btn.Text == "No" && btn.OnTapped != nil {
+				btn.OnTapped()
+			}
+		}
+	}
+	// No goroutine spawned on cancel; brief drain just for any
+	// dialog rendering to settle.
+	time.Sleep(100 * time.Millisecond)
+}

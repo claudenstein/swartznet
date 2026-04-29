@@ -72,16 +72,24 @@ func TestDownloadsSelectedActionsHappyPath(t *testing.T) {
 	}
 
 	// Each go-routine launches against the real engine. They
-	// return without panicking. We DON'T call showFilesForSelected:
-	// it builds a filesDialog that spawns a 2s-tick pollLoop, and
-	// that goroutine bleeds across the test boundary to race other
-	// tests' Fyne caches under -race.
+	// return without panicking.
 	dl.pauseSelected()
 	dl.resumeSelected()
 	dl.toggleIndexSelected()
-	// Wait briefly so the goroutines have a chance to run their
-	// engine calls; without this the test ends before they fire.
-	time.Sleep(100 * time.Millisecond)
+	dl.showFilesForSelected()
+	// showFilesForSelected builds a filesDialog that spawns a
+	// 2 s-tick pollLoop. Tap the "Close" button to fire
+	// SetOnClosed → cancel(), so the goroutine exits before
+	// next test starts.
+	for _, ov := range w.Canvas().Overlays().List() {
+		for _, child := range test.LaidOutObjects(ov) {
+			if btn, ok := child.(*widget.Button); ok && btn.Text == "Close" && btn.OnTapped != nil {
+				btn.OnTapped()
+			}
+		}
+	}
+	// Wait so the per-action goroutines + pollLoop fully drain.
+	time.Sleep(300 * time.Millisecond)
 }
 
 // TestShowSignatureDialogSigned covers showSignatureDialog at

@@ -78,11 +78,13 @@ func TestLayerDPublisherRefreshKeepsItemFresh(t *testing.T) {
 
 			// Sanity: the leech's Lookup can still resolve the
 			// keyword post-refresh (the re-put didn't corrupt
-			// anything).
+			// anything). The query timeout has to absorb several
+			// DHT round-trips under -race; 15 s leaves slack so
+			// a slow loopback DHT traversal doesn't fail us.
 			leech := c.Nodes[total-1]
 			look := leech.Eng.Lookup()
 			look.AddIndexer(c.Nodes[0].Eng.Identity().PublicKeyBytes(), "seed")
-			qctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			qctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			resp, qerr := look.Query(qctx, keyword)
 			cancel()
 			if qerr != nil {

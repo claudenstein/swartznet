@@ -85,6 +85,17 @@ LocalRecord sync was wired up in earlier commits so nodes do
 share records over the responder path; the engine attaches a
 RecordCache as both source and sink in `engine.New`.
 
+### Changed — Create Torrent dialog auto-fills the Output path
+
+The native GUI's Create Torrent dialog now pre-populates the
+`Output .torrent path` field with `<root>.torrent` whenever the
+user browses for a root file/folder or types into the Root entry.
+Same edit-survives policy as the existing Name auto-fill: the
+output is only overwritten while the user has not typed anything
+custom into it. Eliminates the `Output path required` error users
+hit when clicking Create after picking a root but before picking
+an output.
+
 ### Added — `swartznet crawl-probe` ops command
 
 One-shot CLI that issues a single BEP-51 `sample_infohashes`

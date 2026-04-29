@@ -69,3 +69,23 @@ func TestRightClickCaptureNilCanvas(t *testing.T) {
 	// r is never SetContent'd anywhere, so its canvas is nil.
 	r.TappedSecondary(&fyne.PointEvent{})
 }
+
+// TestRightClickCaptureHappyPath covers TappedSecondary's final
+// statement — ShowPopUpMenuAtPosition — by attaching the
+// wrapper to a window so CanvasForObject returns non-nil and
+// the menu actually pops.
+func TestRightClickCaptureHappyPath(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	w := app.NewWindow("anchor")
+	defer w.Close()
+
+	child := widget.NewLabel("inner")
+	r := newRightClickCapture(child, func() *fyne.Menu {
+		return fyne.NewMenu("ctx", fyne.NewMenuItem("act", func() {}))
+	})
+	w.SetContent(r)
+	r.TappedSecondary(&fyne.PointEvent{
+		AbsolutePosition: fyne.NewPos(10, 10),
+	})
+}
