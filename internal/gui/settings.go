@@ -8,8 +8,10 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/daemon"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
@@ -91,17 +93,107 @@ func newSettingsTab(d *daemon.Daemon) *settingsTab {
 		applyQueueBtn,
 	))
 
-	// Info card.
-	cfgInfo := widget.NewCard("Configuration", "", container.NewVBox(
-		labelRow("Data directory:", widget.NewLabel(d.Cfg.DataDir)),
-		labelRow("Index directory:", widget.NewLabel(d.Cfg.IndexDir)),
+	// Storage paths card — DataDir / IndexDir live on disk and
+	// are wired into the engine + indexer at startup, so changing
+	// them requires a restart. We persist edits to the user
+	// config file and tell the user to restart for them to take
+	// effect; reflecting them live would mean tearing down and
+	// re-bringing-up the engine, indexer, and companion publisher
+	// in-place, which is not safe to do while torrents are
+	// active.
+	dataDirEntry := widget.NewEntry()
+	dataDirEntry.SetText(d.Cfg.DataDir)
+	indexDirEntry := widget.NewEntry()
+	indexDirEntry.SetText(d.Cfg.IndexDir)
+
+	browseDataBtn := widget.NewButton("Browse...", func() {
+		fd := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
+			if err != nil || lu == nil {
+				return
+			}
+			dataDirEntry.SetText(lu.Path())
+		}, st.win())
+		if cur := strings.TrimSpace(dataDirEntry.Text); cur != "" {
+			if loc, err := storage.ListerForURI(storage.NewFileURI(cur)); err == nil {
+				fd.SetLocation(loc)
+			}
+		}
+		fd.Show()
+	})
+	browseIndexBtn := widget.NewButton("Browse...", func() {
+		fd := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
+			if err != nil || lu == nil {
+				return
+			}
+			indexDirEntry.SetText(lu.Path())
+		}, st.win())
+		if cur := strings.TrimSpace(indexDirEntry.Text); cur != "" {
+			if loc, err := storage.ListerForURI(storage.NewFileURI(cur)); err == nil {
+				fd.SetLocation(loc)
+			}
+		}
+		fd.Show()
+	})
+
+	saveDirsBtn := widget.NewButton("Save", func() {
+		st.savePaths(dataDirEntry.Text, indexDirEntry.Text)
+	})
+	resetDirsBtn := widget.NewButton("Reset to defaults", func() {
+		def := config.Default()
+		dataDirEntry.SetText(def.DataDir)
+		indexDirEntry.SetText(def.IndexDir)
+	})
+
+	dataRow := container.NewBorder(nil, nil, nil, browseDataBtn, dataDirEntry)
+	indexRow := container.NewBorder(nil, nil, nil, browseIndexBtn, indexDirEntry)
+
+	dirsCard := widget.NewCard(
+		"Storage Paths",
+		"Where downloaded content and the local search index live. Changes take effect on next restart.",
+		container.NewVBox(
+			widget.NewLabel("Data directory"),
+			dataRow,
+			widget.NewLabel("Index directory"),
+			indexRow,
+			container.NewHBox(saveDirsBtn, resetDirsBtn),
+		),
+	)
+
+	// Read-only details for the rest of the runtime config.
+	cfgInfo := widget.NewCard("Runtime", "", container.NewVBox(
 		labelRow("Listen port:", widget.NewLabel(portStr(d.Cfg.ListenPort))),
 		labelRow("DHT:", widget.NewLabel(boolStr(!d.Cfg.DisableDHT))),
 	))
 
-	st.content = container.NewVBox(sharingCard, rateCard, queueCard, cfgInfo)
+	st.content = container.NewVBox(sharingCard, rateCard, queueCard, dirsCard, cfgInfo)
 
 	return st
+}
+
+// savePaths persists the user's edits to data/index directories
+// and tells the user a restart is needed to pick them up.
+// Refusing empty values keeps the next launch from falling back
+// to "" → Validate failure on startup.
+func (st *settingsTab) savePaths(dataDir, indexDir string) {
+	dataDir = strings.TrimSpace(dataDir)
+	indexDir = strings.TrimSpace(indexDir)
+	if dataDir == "" {
+		dialog.ShowError(fmt.Errorf("data directory must not be empty"), st.win())
+		return
+	}
+	if indexDir == "" {
+		dialog.ShowError(fmt.Errorf("index directory must not be empty"), st.win())
+		return
+	}
+	if err := config.SaveUserOverrides(config.DefaultUserConfigPath(), dataDir, indexDir); err != nil {
+		dialog.ShowError(err, st.win())
+		return
+	}
+	dialog.ShowInformation(
+		"Saved",
+		"Data and index directories saved.\n\nRestart SwartzNet to switch over to the new paths. Existing torrents and indexed content stay where they are; the new paths apply to future downloads and indexing only.",
+		st.win(),
+	)
 }
 
 func (st *settingsTab) loadQueueSettings() {

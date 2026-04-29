@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/swartznet/swartznet/internal/daemon"
@@ -26,9 +27,10 @@ type companionTab struct {
 	pubInfoHashLbl *widget.Label
 
 	// Follow list.
-	followList   *widget.List
-	follows      []followRow
-	followsEmpty *widget.Label // hint shown when the follow list is empty
+	followList     *widget.List
+	follows        []followRow
+	followsEmpty   *widget.Label // hint shown when the follow list is empty
+	followSelected int           // -1 = none; tracks the currently right-click target
 }
 
 type followRow struct {
@@ -51,21 +53,45 @@ func newCompanionTab(ctx context.Context, d *daemon.Daemon) *companionTab {
 // pollLoop's fyne.Do refresh racing test-thread widget reads
 // under -race.
 func buildCompanionTab(d *daemon.Daemon) *companionTab {
-	ct := &companionTab{d: d}
+	ct := &companionTab{d: d, followSelected: -1}
 
 	// Publisher status labels.
+	// pubKeyLbl shows the full 64-char ed25519 pubkey hex —
+	// truncating it (the previous behaviour) made it useless for
+	// the user-facing flow of "tell my friend my pubkey so they
+	// can follow me", since the truncated form can't be pasted
+	// back into the Follow form. Selectable=true lets the user
+	// drag-select to copy, and the Copy button next to it does the
+	// same in one click.
 	ct.pubKeyLbl = widget.NewLabel("-")
+	ct.pubKeyLbl.Wrapping = fyne.TextWrapBreak
+	ct.pubKeyLbl.Selectable = true
+	ct.pubKeyLbl.TextStyle = fyne.TextStyle{Monospace: true}
 	ct.pubRefreshLbl = widget.NewLabel("-")
 	ct.pubCountLbl = widget.NewLabel("-")
 	ct.pubInfoHashLbl = widget.NewLabel("-")
 	ct.pubErrorLbl = widget.NewLabel("")
 
+	pubKeyCopyBtn := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
+		v := ct.pubKeyLbl.Text
+		if v == "" || v == "-" {
+			return
+		}
+		fyne.CurrentApp().Clipboard().SetContent(v)
+	})
+	pubKeyCopyBtn.Importance = widget.LowImportance
+
 	refreshBtn := widget.NewButton("Refresh Now", func() {
 		ct.refreshPublisher()
 	})
 
+	pubKeyRow := container.NewBorder(nil, nil,
+		boldLabel("Public Key:"), pubKeyCopyBtn,
+		ct.pubKeyLbl,
+	)
+
 	pubCard := widget.NewCard("Companion Publisher", "", container.NewVBox(
-		labelRow("Public Key:", ct.pubKeyLbl),
+		pubKeyRow,
 		labelRow("Last Refresh:", ct.pubRefreshLbl),
 		labelRow("Published:", ct.pubCountLbl),
 		labelRow("Last InfoHash:", ct.pubInfoHashLbl),
@@ -104,6 +130,9 @@ func buildCompanionTab(d *daemon.Daemon) *companionTab {
 			}
 		},
 	)
+	ct.followList.OnSelected = func(id widget.ListItemID) {
+		ct.followSelected = id
+	}
 
 	// Follow form.
 	pubkeyEntry := widget.NewEntry()
@@ -136,7 +165,8 @@ func buildCompanionTab(d *daemon.Daemon) *companionTab {
 
 	// Stack the empty hint on top of the list; refresh() flips
 	// visibility based on len(ct.follows).
-	followListArea := container.NewStack(ct.followList, ct.followsEmpty)
+	followListWithMenu := newRightClickCapture(ct.followList, ct.buildFollowMenu)
+	followListArea := container.NewStack(followListWithMenu, ct.followsEmpty)
 	followCard := widget.NewCard("Followed Publishers", "", followListArea)
 
 	ct.content = container.NewVBox(
@@ -169,9 +199,6 @@ func (ct *companionTab) refresh() {
 	if ct.d.CompPub != nil {
 		st := ct.d.CompPub.Status()
 		pubKey = st.PubKeyHex
-		if len(pubKey) > 16 {
-			pubKey = pubKey[:16] + "..."
-		}
 		if !st.LastRefresh.IsZero() {
 			lastRefresh = st.LastRefresh.Format(time.RFC3339)
 		}
@@ -257,6 +284,35 @@ func (ct *companionTab) doFollow(pubkeyHex, label string) {
 	copy(pub[:], raw)
 
 	ct.d.CompSub.Follow(pub, label)
+}
+
+// buildFollowMenu returns the right-click context menu for the
+// currently-selected follow row. Returns nil when no row has
+// been clicked yet (rightClickCapture treats nil as "do
+// nothing", so the menu silently no-ops on an empty list).
+func (ct *companionTab) buildFollowMenu() *fyne.Menu {
+	idx := ct.followSelected
+	if idx < 0 || idx >= len(ct.follows) {
+		return nil
+	}
+	row := ct.follows[idx]
+	pkHex := row.pubkey
+	label := row.label
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItem("Copy public key", func() {
+			fyne.CurrentApp().Clipboard().SetContent(pkHex)
+		}),
+	}
+	if label != "" {
+		items = append(items, fyne.NewMenuItem("Copy label", func() {
+			fyne.CurrentApp().Clipboard().SetContent(label)
+		}))
+	}
+	items = append(items,
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Unfollow", func() { ct.unfollowAt(idx) }),
+	)
+	return fyne.NewMenu("Publisher actions", items...)
 }
 
 func (ct *companionTab) unfollowAt(idx int) {

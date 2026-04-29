@@ -7,6 +7,8 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -311,6 +313,81 @@ func defaultCompanionFollowFile() string {
 // path for the publisher trust list.
 func defaultTrustPath() string {
 	return filepath.Join(swartznetShareRoot(), "trust.json")
+}
+
+// DefaultUserConfigPath returns the platform-appropriate path
+// for the user's persisted Config — used by GUI launches that
+// want to honour edits made through the Settings tab. Sits next
+// to the rest of swartznet's persistent state under the share
+// root so it follows whatever XDG override the operator has set.
+func DefaultUserConfigPath() string {
+	return filepath.Join(swartznetShareRoot(), "config.json")
+}
+
+// userConfigOverrides holds the subset of Config fields the GUI
+// is allowed to persist. Keeping it narrow on purpose: changing
+// the BitTorrent listen port or DHT bootstraps via a JSON file
+// surprises operators in ways that don't pay back the support
+// burden, but DataDir/IndexDir are exactly the kind of
+// "I keep my torrents on a separate disk" preference the
+// Settings tab needs to remember across launches.
+type userConfigOverrides struct {
+	DataDir  string `json:"data_dir,omitempty"`
+	IndexDir string `json:"index_dir,omitempty"`
+}
+
+// LoadUserOverrides reads the JSON config file at path and
+// returns the field overrides it contains. A missing file is
+// not an error — callers proceed with the Default() values.
+// Malformed JSON returns an error so the operator can fix it
+// rather than silently running on stale defaults.
+func LoadUserOverrides(path string) (DataDir, IndexDir string, err error) {
+	if path == "" {
+		return "", "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("config: read %q: %w", path, err)
+	}
+	var o userConfigOverrides
+	if err := json.Unmarshal(data, &o); err != nil {
+		return "", "", fmt.Errorf("config: parse %q: %w", path, err)
+	}
+	return o.DataDir, o.IndexDir, nil
+}
+
+// SaveUserOverrides writes the GUI-configurable fields of c to
+// path as pretty-printed JSON. The parent directory is created
+// if missing. Empty fields are omitted so the next launch falls
+// back to Default() for them rather than locking in a blank
+// string.
+func SaveUserOverrides(path string, dataDir, indexDir string) error {
+	if path == "" {
+		return errors.New("config: empty save path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("config: mkdir %q: %w", filepath.Dir(path), err)
+	}
+	o := userConfigOverrides{
+		DataDir:  dataDir,
+		IndexDir: indexDir,
+	}
+	data, err := json.MarshalIndent(o, "", "  ")
+	if err != nil {
+		return fmt.Errorf("config: marshal: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("config: write %q: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("config: rename %q: %w", path, err)
+	}
+	return nil
 }
 
 // swartznetShareRoot returns the per-user root directory SwartzNet uses for

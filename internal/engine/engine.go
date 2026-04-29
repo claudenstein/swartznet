@@ -1282,6 +1282,27 @@ func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
 			e.log.Debug("engine.verify_data_err", "err", err)
 		}
 	}()
+
+	// Persist a copy of the metainfo + a session row so a restart
+	// brings this torrent back. Without this step, anything added
+	// via Create Torrent → AddTorrentMetaInfo (or via the
+	// companion publisher) silently disappeared from the
+	// downloads list on the next launch — the underlying piece
+	// data was still on disk, but RestoreSession had no record
+	// of the infohash to re-add. Marshal locally rather than
+	// relying on upgradeMagnetSession's deferred path because
+	// that goroutine is gated to magnet/infohash entries only,
+	// and re-running it here would race with itself.
+	ihHex := h.T.InfoHash().HexString()
+	if miBytes, merr := bencode.Marshal(*mi); merr == nil {
+		if tname, werr := e.sess.writeTorrentCopy(ihHex, miBytes); werr == nil {
+			e.persistAdd(h, "metainfo", "", tname)
+		} else {
+			e.log.Warn("engine.session_torrent_copy_err", "info_hash", ihHex, "err", werr)
+		}
+	} else {
+		e.log.Warn("engine.session_metainfo_marshal_err", "info_hash", ihHex, "err", merr)
+	}
 	return h, nil
 }
 
@@ -1559,7 +1580,37 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 	if entry.AddedVia != "file" && entry.AddedVia != "metainfo" {
 		go e.upgradeMagnetSession(h)
 	}
+	// Re-verify pieces against existing on-disk data so partially-
+	// downloaded torrents resume at their real progress percentage
+	// instead of bouncing back to 0%. anacrolix lazily reads
+	// storage only on peer requests; without an explicit
+	// VerifyData on restore, BytesCompleted stays at 0 until
+	// peers ask for pieces — which never happens for a torrent
+	// the user just opened on a fresh boot. Same hashing pass
+	// AddTorrentMetaInfo runs on freshly-created torrents.
+	go e.verifyOnRestore(h)
 	return nil
+}
+
+// verifyOnRestore waits for the torrent's metadata to be
+// available, then runs VerifyDataContext so anacrolix populates
+// its piece-completion state from whatever bytes already live in
+// the data directory. Used by RestoreSession on every restored
+// torrent regardless of how it was originally added — the only
+// case where this would be wasted work is a brand-new restore
+// against an empty data dir, which still rehashes nothing
+// (every piece miss costs one stat call).
+func (e *Engine) verifyOnRestore(h *Handle) {
+	select {
+	case <-h.T.GotInfo():
+	case <-e.bgCtx.Done():
+		return
+	case <-time.After(10 * time.Minute):
+		return
+	}
+	if err := h.T.VerifyDataContext(e.bgCtx); err != nil && e.bgCtx.Err() == nil {
+		e.log.Debug("engine.verify_data_err", "info_hash", h.T.InfoHash().HexString(), "err", err)
+	}
 }
 
 // autoDownload waits for a torrent's metadata to arrive and then
