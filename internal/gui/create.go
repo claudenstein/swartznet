@@ -79,6 +79,34 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 		}
 	}
 
+	// outEntry needs to be referenced inside autofillOutput
+	// before the widget is constructed below, so declare it now
+	// and set placeholder later.
+	outEntry := widget.NewEntry()
+	outEntry.SetPlaceHolder("/path/to/output.torrent")
+
+	// autofillOutput pre-populates the Output path with
+	// "<root>.torrent" so users don't have to think about where
+	// the file goes — most torrent clients write the .torrent next
+	// to the source by default. Same edit-survives policy as
+	// autofillName: we only overwrite when the user hasn't typed
+	// anything custom yet.
+	var lastAutofillOut string
+	autofillOutput := func(rootPath string) {
+		root := strings.TrimSpace(rootPath)
+		if root == "" {
+			return
+		}
+		// Strip a trailing slash so /a/b/ → /a/b.torrent rather
+		// than /a/b/.torrent.
+		root = strings.TrimRight(root, string(filepath.Separator))
+		candidate := root + ".torrent"
+		if outEntry.Text == "" || outEntry.Text == lastAutofillOut {
+			outEntry.SetText(candidate)
+			lastAutofillOut = candidate
+		}
+	}
+
 	browseFileBtn := widget.NewButton("Choose File...", func() {
 		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
 			if err != nil || r == nil {
@@ -87,6 +115,7 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 			p := r.URI().Path()
 			rootEntry.SetText(p)
 			autofillName(p)
+			autofillOutput(p)
 			r.Close()
 		}, win)
 		fd.Show()
@@ -99,10 +128,14 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 			p := lu.Path()
 			rootEntry.SetText(p)
 			autofillName(p)
+			autofillOutput(p)
 		}, win)
 		fd.Show()
 	})
-	rootEntry.OnChanged = func(s string) { autofillName(s) }
+	rootEntry.OnChanged = func(s string) {
+		autofillName(s)
+		autofillOutput(s)
+	}
 	rootRow := container.NewBorder(nil, nil, nil,
 		container.NewHBox(browseFileBtn, browseFolderBtn),
 		rootEntry)
@@ -131,8 +164,6 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 	seedCheck := widget.NewCheck("Start seeding immediately after creation", nil)
 	seedCheck.SetChecked(true)
 
-	outEntry := widget.NewEntry()
-	outEntry.SetPlaceHolder("/path/to/output.torrent")
 	browseOutBtn := widget.NewButton("Save As...", func() {
 		fd := dialog.NewFileSave(func(wc fyne.URIWriteCloser, err error) {
 			if err != nil || wc == nil {

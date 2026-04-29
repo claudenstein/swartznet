@@ -52,10 +52,15 @@ func TestCreateTorrentDialogConfirmArms(t *testing.T) {
 	}
 
 	// Empty output (root set) → ShowError "output path required"
-	// (no goroutine).
+	// (no goroutine). The dialog now auto-fills the output entry
+	// from the root path; we explicitly clear it back to empty
+	// after setting the root so the validation arm fires.
 	createTorrentDialog(d, w)
 	if e := findEntry("/path/to/file-or-folder"); e != nil {
 		e.SetText("/tmp/some/path")
+	}
+	if e := findEntry("/path/to/output.torrent"); e != nil {
+		e.SetText("")
 	}
 	if b := findCreateBtn(); b != nil {
 		b.OnTapped()
