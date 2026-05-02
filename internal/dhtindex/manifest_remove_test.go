@@ -61,6 +61,67 @@ func TestRemoveHitUnknownInfohashNoop(t *testing.T) {
 	}
 }
 
+func TestRemoveAllHitsScrubsEveryKeyword(t *testing.T) {
+	t.Parallel()
+	mf, _ := dhtindex.LoadOrCreateManifest("")
+
+	// Two torrents tagged under three keywords. Removing torrent A
+	// must scrub it from every entry it appears in, drop entries
+	// where it was the only hit, and leave torrent B alone.
+	a := dhtindex.KeywordHit{IH: ihBytes(0xAA), N: "a"}
+	b := dhtindex.KeywordHit{IH: ihBytes(0xBB), N: "b"}
+	for _, kw := range []string{"linux", "ubuntu"} {
+		if _, err := mf.AddHit(kw, a); err != nil {
+			t.Fatalf("seed AddHit(%s, A): %v", kw, err)
+		}
+		if _, err := mf.AddHit(kw, b); err != nil {
+			t.Fatalf("seed AddHit(%s, B): %v", kw, err)
+		}
+	}
+	if _, err := mf.AddHit("solo-a", a); err != nil {
+		t.Fatalf("seed AddHit(solo-a, A): %v", err)
+	}
+
+	got := mf.RemoveAllHits(ihBytes(0xAA))
+	if got != 3 {
+		t.Errorf("touched = %d, want 3", got)
+	}
+
+	snap := mf.Snapshot()
+	if _, ok := snap["solo-a"]; ok {
+		t.Errorf("solo-a should have been dropped (now empty)")
+	}
+	for _, kw := range []string{"linux", "ubuntu"} {
+		entry, ok := snap[kw]
+		if !ok {
+			t.Errorf("%s missing; A removed but B should remain", kw)
+			continue
+		}
+		if len(entry.Hits) != 1 {
+			t.Errorf("%s has %d hits, want 1 (only B)", kw, len(entry.Hits))
+			continue
+		}
+		if !bytes.Equal(entry.Hits[0].IH, ihBytes(0xBB)) {
+			t.Errorf("%s remaining hit IH = %x, want B (0xBB...)", kw, entry.Hits[0].IH)
+		}
+	}
+}
+
+func TestRemoveAllHitsEmptyInfohashNoop(t *testing.T) {
+	t.Parallel()
+	mf, _ := dhtindex.LoadOrCreateManifest("")
+	if _, err := mf.AddHit("ubuntu", dhtindex.KeywordHit{IH: ihBytes(1), N: "x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mf.RemoveAllHits(nil); got != 0 {
+		t.Errorf("empty-infohash touched = %d, want 0", got)
+	}
+	if got := len(mf.Snapshot()["ubuntu"].Hits); got != 1 {
+		t.Errorf("entry was mutated by no-op; hits = %d, want 1", got)
+	}
+}
+
 func TestRemoveHitClearsLastHit(t *testing.T) {
 	t.Parallel()
 	mf, _ := dhtindex.LoadOrCreateManifest("")
@@ -70,9 +131,12 @@ func TestRemoveHitClearsLastHit(t *testing.T) {
 
 	mf.RemoveHit("solo", ihBytes(7))
 
-	// The entry stays in the map (RemoveHit only edits Hits), but its
-	// Hits slice must be empty now.
-	if got := len(mf.Snapshot()["solo"].Hits); got != 0 {
-		t.Errorf("hits after removing the only hit = %d, want 0", got)
+	// Removing the last hit must drop the keyword from the manifest
+	// entirely so refreshAll() doesn't keep re-publishing an empty
+	// value forever, and the manifest can't grow unbounded over the
+	// lifetime of a long-running publisher.
+	snap := mf.Snapshot()
+	if _, ok := snap["solo"]; ok {
+		t.Errorf("emptied entry still present in manifest, want it dropped")
 	}
 }

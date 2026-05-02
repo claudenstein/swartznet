@@ -85,6 +85,28 @@ LocalRecord sync was wired up in earlier commits so nodes do
 share records over the responder path; the engine attaches a
 RecordCache as both source and sink in `engine.New`.
 
+### Fixed — Determinism follow-ups from production-architecture audit
+
+  - `internal/dhtindex/manifest.go` — `RemoveHit` now drops a
+    keyword entry from the manifest entirely once its last hit
+    is removed, and a new `RemoveAllHits(infohash)` scrubs an
+    infohash from every keyword entry in one pass. Prevents the
+    manifest from growing unbounded over the lifetime of a
+    long-running publisher.
+  - `internal/dhtindex/publisher.go` — new `Publisher.Retract`
+    method wraps `RemoveAllHits` and persists the manifest.
+  - `internal/engine/engine.go` — `Engine.RemoveTorrent` now
+    calls `publisher.Retract` so a removed torrent's keyword
+    hits stop being re-announced on the next refresh tick.
+    Without this, peers kept discovering torrents the publisher
+    no longer hosted.
+  - `internal/daemon/follows.go` — `LoadFollowFile` now returns
+    `(int, error)` so corrupted or unreadable follow files
+    surface through the structured logger instead of being
+    swallowed when stderr is `io.Discard`. Behaviour stays
+    fail-closed: an unreadable file leaves the subscriber with
+    an empty list (follows can still be added via the HTTP API).
+
 ### Changed — Create Torrent dialog auto-fills the Output path
 
 The native GUI's Create Torrent dialog now pre-populates the

@@ -2204,11 +2204,21 @@ func (e *Engine) RemoveTorrent(infoHashHex string) error {
 	h.fileSub.Close()
 	h.T.Drop()
 
+	ih := h.T.InfoHash()
 	e.mu.Lock()
-	delete(e.handles, h.T.InfoHash())
+	delete(e.handles, ih)
+	pub := e.publisher
 	e.mu.Unlock()
 	if e.sess != nil {
-		_ = e.sess.remove(h.T.InfoHash().HexString())
+		_ = e.sess.remove(ih.HexString())
+	}
+	// Drop this infohash from every keyword in the DHT publisher's
+	// manifest so its hits stop being re-announced on the next
+	// refresh tick. Without this the manifest grows unbounded over
+	// the lifetime of the node and other peers keep discovering a
+	// torrent we no longer host.
+	if pub != nil {
+		pub.Retract(ih[:])
 	}
 	e.log.Info("engine.torrent_removed", "info_hash", infoHashHex)
 	// Removing an active torrent frees a download slot — promote
