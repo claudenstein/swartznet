@@ -6,12 +6,33 @@ package companion
 // any companion file whose version they do not recognise.
 const FormatVersion = 1
 
-// FormatFileName is the canonical filename inside the companion
-// .torrent. Subscribers look for exactly this entry to extract
-// the JSON payload. Keeping it stable across versions lets the
-// subscriber reuse the same code path as new format versions
-// land — only the inner JSON evolves.
+// FormatFileName is the legacy generic filename used inside
+// every companion .torrent before per-publisher naming was
+// introduced. New publishers tag the file with their pubkey
+// prefix via CompanionFileName so each node's companion torrent
+// has a distinguishable name in downloads lists. The constant
+// is retained for the empty-publisher fallback (mostly tests
+// and unit code that constructs a CompanionIndex without a key).
 const FormatFileName = "swartznet-content-index-v1.json.gz"
+
+// CompanionFileName returns the on-wire filename for a
+// CompanionIndex written by the publisher whose pubkey hex is
+// pubkeyHex. When pubkeyHex is empty, the generic FormatFileName
+// is used (preserves the test/zero-config code path). For real
+// publishers the result is "swartznet-content-index-<prefix>-v1.json.gz",
+// where <prefix> is the first 12 hex chars of the pubkey — short
+// enough to keep the filename readable, long enough to make
+// collisions vanishingly unlikely.
+func CompanionFileName(pubkeyHex string) string {
+	if pubkeyHex == "" {
+		return FormatFileName
+	}
+	prefix := pubkeyHex
+	if len(prefix) > 12 {
+		prefix = prefix[:12]
+	}
+	return "swartznet-content-index-" + prefix + "-v1.json.gz"
+}
 
 // FormatMagic is the leading byte sequence of an UNCOMPRESSED
 // companion JSON document. Decode checks for it after gunzip so

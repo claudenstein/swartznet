@@ -135,7 +135,15 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 				fmt.Fprintf(stderr, "warning: companion subscriber worker init failed: %v\n", err)
 			} else {
 				if opts.Cfg.CompanionFollowFile != "" {
-					LoadFollowFile(compSub, opts.Cfg.CompanionFollowFile, stderr)
+					if _, err := LoadFollowFile(compSub, opts.Cfg.CompanionFollowFile, stderr); err != nil && opts.Log != nil {
+						// Non-fatal: an unreadable or corrupt follow file
+						// leaves the subscriber with an empty list (a valid
+						// fail-closed state — follows can still be added via
+						// the HTTP API). Surface it through the structured
+						// logger so it's visible when stderr is io.Discard.
+						opts.Log.Warn("daemon.companion.load_follow_file_err",
+							"err", err, "path", opts.Cfg.CompanionFollowFile)
+					}
 				}
 				compSub.Start()
 				d.CompSub = compSub

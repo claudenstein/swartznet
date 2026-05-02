@@ -21,14 +21,15 @@ import (
 
 // App holds the Fyne application, main window, and daemon reference.
 type App struct {
-	fyne    fyne.App
-	win     fyne.Window
-	daemon  *daemon.Daemon
-	cancel  context.CancelFunc
-	version string
-	dl      *downloadsTab
-	sr      *searchTab
-	tabs    *container.AppTabs
+	fyne      fyne.App
+	win       fyne.Window
+	daemon    *daemon.Daemon
+	cancel    context.CancelFunc
+	version   string
+	buildDate string
+	dl        *downloadsTab
+	sr        *searchTab
+	tabs      *container.AppTabs
 
 	// lastNotified guards against re-sending the same completion
 	// notification on every poll.
@@ -36,8 +37,10 @@ type App struct {
 }
 
 // New creates the Fyne application and main window. Call Run to
-// enter the event loop.
-func New(d *daemon.Daemon, version string) *App {
+// enter the event loop. buildDate is the UTC build timestamp set
+// by the build script (empty for go-run / IDE launches; the About
+// dialog shows "(dev build)" in that case).
+func New(d *daemon.Daemon, version, buildDate string) *App {
 	a := app.NewWithID("net.swartznet.gui")
 	a.Settings().SetTheme(&swartzTheme{})
 	a.SetIcon(AppIcon)
@@ -65,6 +68,7 @@ func New(d *daemon.Daemon, version string) *App {
 		daemon:       d,
 		cancel:       cancel,
 		version:      version,
+		buildDate:    buildDate,
 		lastNotified: make(map[string]bool),
 	}
 
@@ -291,8 +295,14 @@ func (a *App) showAbout() {
 		apiAddr = a.daemon.API.Addr()
 	}
 
+	buildDate := a.buildDate
+	if buildDate == "" {
+		buildDate = "(dev build)"
+	}
+
 	content := widget.NewForm(
 		widget.NewFormItem("Version", widget.NewLabel(a.version)),
+		widget.NewFormItem("Built", widget.NewLabel(buildDate)),
 		widget.NewFormItem("Identity", copyableValue(pubKey)),
 		widget.NewFormItem("BitTorrent port", copyableValue(port)),
 		widget.NewFormItem("HTTP API", copyableValue(apiAddr)),

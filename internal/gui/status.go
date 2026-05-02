@@ -356,9 +356,16 @@ func (st *statusTab) refresh() {
 
 // labelRow creates a horizontal pair of label + value.
 func labelRow(name string, value *widget.Label) fyne.CanvasObject {
+	return container.NewHBox(boldLabel(name), value)
+}
+
+// boldLabel returns a non-italic, bold-styled label. Used by
+// row-builders that already do their own layout and only need
+// the styled name cell.
+func boldLabel(name string) *widget.Label {
 	lbl := widget.NewLabel(name)
 	lbl.TextStyle.Bold = true
-	return container.NewHBox(lbl, value)
+	return lbl
 }
 
 func makeLabelGroup(n int) []*widget.Label {

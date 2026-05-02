@@ -19,6 +19,7 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	pp "github.com/anacrolix/torrent/peer_protocol"
+	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/time/rate"
 
 	"github.com/swartznet/swartznet/internal/companion"
@@ -1248,6 +1249,36 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infoHash [20]byte) (
 // the companion package, which only needs to know "this seeded ok"
 // and would otherwise pull a hard import on internal/engine.
 func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
+	return e.addTorrentMetaInfo(mi, "")
+}
+
+// AddTorrentMetaInfoSeedFrom is the variant of AddTorrentMetaInfo
+// used by the Create Torrent flow: it adds the torrent with a
+// per-torrent storage rooted at dataParent so anacrolix locates
+// the source content where it actually lives instead of looking
+// for it under cfg.DataDir. Without this, a freshly-created
+// torrent whose Root sat outside DataDir would always rehash
+// against an empty directory and show 0% progress, even though
+// the user's bytes were already on disk.
+//
+// dataParent must be the directory ABOVE info.Name on the
+// publisher's filesystem — for a single-file torrent at
+// /foo/bar/baz.txt with info.Name="baz.txt" pass "/foo/bar"; for
+// a multi-file torrent rooted at /foo/bar/album/ with
+// info.Name="album" pass "/foo/bar". Empty dataParent falls back
+// to the default DataDir storage (matches AddTorrentMetaInfo).
+//
+// The dataParent is persisted in the session manifest so a
+// restart re-applies the same per-torrent storage and the
+// restored handle continues to seed from the original location.
+func (e *Engine) AddTorrentMetaInfoSeedFrom(mi *metainfo.MetaInfo, dataParent string) (any, error) {
+	return e.addTorrentMetaInfo(mi, dataParent)
+}
+
+// addTorrentMetaInfo is the shared implementation behind
+// AddTorrentMetaInfo and AddTorrentMetaInfoSeedFrom. dataParent
+// empty means "use the engine's default storage (cfg.DataDir)".
+func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, dataParent string) (any, error) {
 	if mi == nil {
 		return nil, errors.New("engine: nil metainfo")
 	}
@@ -1256,7 +1287,21 @@ func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
 		e.mu.Unlock()
 		return nil, errors.New("engine: closed")
 	}
-	t, err := e.client.AddTorrent(mi)
+	var (
+		t   *torrent.Torrent
+		err error
+	)
+	if dataParent == "" {
+		t, err = e.client.AddTorrent(mi)
+	} else {
+		spec, serr := torrent.TorrentSpecFromMetaInfoErr(mi)
+		if serr != nil {
+			e.mu.Unlock()
+			return nil, fmt.Errorf("engine: build torrent spec: %w", serr)
+		}
+		spec.Storage = storage.NewFile(dataParent)
+		t, _, err = e.client.AddTorrentSpec(spec)
+	}
 	if err != nil {
 		e.mu.Unlock()
 		return nil, fmt.Errorf("engine: add torrent metainfo: %w", err)
@@ -1282,6 +1327,34 @@ func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
 			e.log.Debug("engine.verify_data_err", "err", err)
 		}
 	}()
+
+	// Persist a copy of the metainfo + a session row so a restart
+	// brings this torrent back. Without this step, anything added
+	// via Create Torrent → AddTorrentMetaInfo (or via the
+	// companion publisher) silently disappeared from the
+	// downloads list on the next launch — the underlying piece
+	// data was still on disk, but RestoreSession had no record
+	// of the infohash to re-add. Marshal locally rather than
+	// relying on upgradeMagnetSession's deferred path because
+	// that goroutine is gated to magnet/infohash entries only,
+	// and re-running it here would race with itself.
+	ihHex := h.T.InfoHash().HexString()
+	if miBytes, merr := bencode.Marshal(*mi); merr == nil {
+		if tname, werr := e.sess.writeTorrentCopy(ihHex, miBytes); werr == nil {
+			e.persistAdd(h, "metainfo", "", tname)
+			if dataParent != "" {
+				if uerr := e.sess.update(ihHex, func(entry *sessionEntry) {
+					entry.DataPath = dataParent
+				}); uerr != nil {
+					e.log.Warn("engine.session_update_err", "info_hash", ihHex, "err", uerr)
+				}
+			}
+		} else {
+			e.log.Warn("engine.session_torrent_copy_err", "info_hash", ihHex, "err", werr)
+		}
+	} else {
+		e.log.Warn("engine.session_metainfo_marshal_err", "info_hash", ihHex, "err", merr)
+	}
 	return h, nil
 }
 
@@ -1509,7 +1582,24 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 			err = lerr
 			break
 		}
-		t, err = e.client.AddTorrent(mi)
+		// Re-apply the per-torrent storage override saved at
+		// Create-Torrent time so the restored handle continues
+		// reading from the user's source location instead of the
+		// default DataDir layout. Falling back to AddTorrent (no
+		// override) when DataPath is empty preserves existing
+		// behaviour for every torrent that was added before this
+		// field existed.
+		if entry.DataPath != "" {
+			spec, serr := torrent.TorrentSpecFromMetaInfoErr(mi)
+			if serr != nil {
+				err = serr
+				break
+			}
+			spec.Storage = storage.NewFile(entry.DataPath)
+			t, _, err = e.client.AddTorrentSpec(spec)
+		} else {
+			t, err = e.client.AddTorrent(mi)
+		}
 	case entry.MagnetURI != "":
 		t, err = e.client.AddMagnet(entry.MagnetURI)
 	default:
@@ -1559,7 +1649,37 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 	if entry.AddedVia != "file" && entry.AddedVia != "metainfo" {
 		go e.upgradeMagnetSession(h)
 	}
+	// Re-verify pieces against existing on-disk data so partially-
+	// downloaded torrents resume at their real progress percentage
+	// instead of bouncing back to 0%. anacrolix lazily reads
+	// storage only on peer requests; without an explicit
+	// VerifyData on restore, BytesCompleted stays at 0 until
+	// peers ask for pieces — which never happens for a torrent
+	// the user just opened on a fresh boot. Same hashing pass
+	// AddTorrentMetaInfo runs on freshly-created torrents.
+	go e.verifyOnRestore(h)
 	return nil
+}
+
+// verifyOnRestore waits for the torrent's metadata to be
+// available, then runs VerifyDataContext so anacrolix populates
+// its piece-completion state from whatever bytes already live in
+// the data directory. Used by RestoreSession on every restored
+// torrent regardless of how it was originally added — the only
+// case where this would be wasted work is a brand-new restore
+// against an empty data dir, which still rehashes nothing
+// (every piece miss costs one stat call).
+func (e *Engine) verifyOnRestore(h *Handle) {
+	select {
+	case <-h.T.GotInfo():
+	case <-e.bgCtx.Done():
+		return
+	case <-time.After(10 * time.Minute):
+		return
+	}
+	if err := h.T.VerifyDataContext(e.bgCtx); err != nil && e.bgCtx.Err() == nil {
+		e.log.Debug("engine.verify_data_err", "info_hash", h.T.InfoHash().HexString(), "err", err)
+	}
 }
 
 // autoDownload waits for a torrent's metadata to arrive and then
@@ -2084,11 +2204,21 @@ func (e *Engine) RemoveTorrent(infoHashHex string) error {
 	h.fileSub.Close()
 	h.T.Drop()
 
+	ih := h.T.InfoHash()
 	e.mu.Lock()
-	delete(e.handles, h.T.InfoHash())
+	delete(e.handles, ih)
+	pub := e.publisher
 	e.mu.Unlock()
 	if e.sess != nil {
-		_ = e.sess.remove(h.T.InfoHash().HexString())
+		_ = e.sess.remove(ih.HexString())
+	}
+	// Drop this infohash from every keyword in the DHT publisher's
+	// manifest so its hits stop being re-announced on the next
+	// refresh tick. Without this the manifest grows unbounded over
+	// the lifetime of the node and other peers keep discovering a
+	// torrent we no longer host.
+	if pub != nil {
+		pub.Retract(ih[:])
 	}
 	e.log.Info("engine.torrent_removed", "info_hash", infoHashHex)
 	// Removing an active torrent frees a download slot — promote

@@ -170,6 +170,7 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 				return
 			}
 			outEntry.SetText(wc.URI().Path())
+			lastAutofillOut = wc.URI().Path()
 			// We don't actually want to write via the Fyne writer;
 			// close it without writing so the real CreateTorrentFile
 			// path handles the atomic rename itself.
@@ -178,7 +179,15 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 			// may have picked a brand-new path).
 			_ = storage.Delete(wc.URI())
 		}, win)
-		fd.SetFileName("new.torrent")
+		// Pre-fill the Save As dialog with the basename already in
+		// outEntry (set via autofillOutput when the user picked a
+		// root). Falls back to "new.torrent" only when outEntry is
+		// empty.
+		defaultName := "new.torrent"
+		if base := filepath.Base(strings.TrimSpace(outEntry.Text)); base != "" && base != "." && base != "/" {
+			defaultName = base
+		}
+		fd.SetFileName(defaultName)
 		fd.Show()
 	})
 	outRow := container.NewBorder(nil, nil, nil, browseOutBtn, outEntry)
@@ -221,16 +230,25 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 			if !ok {
 				return
 			}
-			if strings.TrimSpace(rootEntry.Text) == "" {
+			rootPath := strings.TrimSpace(rootEntry.Text)
+			if rootPath == "" {
 				dialog.ShowError(fmt.Errorf("root path required"), win)
 				return
 			}
-			if strings.TrimSpace(outEntry.Text) == "" {
-				dialog.ShowError(fmt.Errorf("output path required"), win)
-				return
+			outPath := strings.TrimSpace(outEntry.Text)
+			if outPath == "" {
+				// Defensive autofill on submit. Normally autofillOutput
+				// fires on root edits, but several real flows can leave
+				// outEntry empty (manual deletion, focus quirks, paste
+				// without a triggering OnChanged on some platforms),
+				// and the user just sees a confusing "Output path
+				// required" dialog. Filling here makes the common case
+				// (just pick a root and click Create) always work.
+				outPath = strings.TrimRight(rootPath, string(filepath.Separator)) + ".torrent"
+				outEntry.SetText(outPath)
 			}
 			opts := engine.CreateTorrentOptions{
-				Root:        strings.TrimSpace(rootEntry.Text),
+				Root:        rootPath,
 				Name:        strings.TrimSpace(nameEntry.Text),
 				PieceLength: pieceLengthFromLabel(pieceSelect.Selected),
 				Trackers:    splitLines(trackersEntry.Text),
@@ -243,7 +261,7 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 					opts.SignWith = id.PrivateKey
 				}
 			}
-			runCreateTorrent(d, win, opts, strings.TrimSpace(outEntry.Text), seedCheck.Checked)
+			runCreateTorrent(d, win, opts, outPath, seedCheck.Checked)
 		},
 		win,
 	)
@@ -276,7 +294,18 @@ func runCreateTorrent(d *daemon.Daemon, win fyne.Window, opts engine.CreateTorre
 
 			msg := fmt.Sprintf("Created:\n  %s\n\nInfoHash:\n  %s", outPath, ih)
 			if andSeed && mi != nil {
-				if _, err := d.Eng.AddTorrentMetaInfo(mi); err != nil {
+				// Seed from the user's source location rather than
+				// re-locating the bytes under cfg.DataDir. anacrolix's
+				// default storage roots every torrent at DataDir, so
+				// without the per-torrent override the just-hashed
+				// content is effectively invisible — VerifyData runs
+				// against an empty directory and the row sits at 0%.
+				// filepath.Dir(opts.Root) is the layout anacrolix
+				// expects: parent dir + info.Name resolves to the
+				// real file (single-file) or the real folder
+				// (multi-file).
+				dataParent := filepath.Dir(strings.TrimRight(opts.Root, string(filepath.Separator)))
+				if _, err := d.Eng.AddTorrentMetaInfoSeedFrom(mi, dataParent); err != nil {
 					msg += "\n\nSeed start failed: " + err.Error()
 				} else {
 					msg += "\n\nSeeding started."

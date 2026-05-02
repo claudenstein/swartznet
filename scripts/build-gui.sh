@@ -47,9 +47,12 @@ fi
 OUT="$DIST/swartznet-gui-$VERSION-$SUFFIX"
 echo ">>> building $OUT (CGO_ENABLED=1)"
 
+# Stamp the UTC build date so the GUI's About dialog can show it.
+BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 CGO_ENABLED=1 \
     go build -trimpath \
-    -ldflags "-s -w -X main.Version=$VERSION" \
+    -ldflags "-s -w -X main.Version=$VERSION -X main.BuildDate=$BUILD_DATE" \
     -o "$OUT" "$PKG"
 
 echo

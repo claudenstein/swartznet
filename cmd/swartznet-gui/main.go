@@ -19,7 +19,21 @@ import (
 	"github.com/swartznet/swartznet/internal/gui"
 )
 
-var Version = "0.0.1-dev"
+var (
+	// Version is the human-readable release tag, set via -ldflags
+	// at build time. The default tracks the latest released tag so
+	// go-run / IDE launches show a meaningful version instead of
+	// drifting forever on "0.0.1-dev"; bump this in the same
+	// commit that cuts a release.
+	Version = "v0.8.0"
+
+	// BuildDate is the UTC build timestamp set by build-gui.sh /
+	// build-release.sh via -ldflags. Empty for go-run launches,
+	// in which case the GUI's About dialog falls back to "(dev
+	// build)" so the user can tell at a glance that the binary
+	// did not come out of the official build pipeline.
+	BuildDate = ""
+)
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -51,6 +65,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	cfg := config.Default()
+
+	// Layer GUI-saved overrides on top of Default() so edits the
+	// user makes through the Settings tab survive restarts. CLI
+	// flags still win against the saved file — operators can
+	// always force a path via --data-dir / --index-dir if they
+	// suspect the persisted config is wrong.
+	savedData, savedIndex, err := config.LoadUserOverrides(config.DefaultUserConfigPath())
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: load saved config: %v\n", err)
+	} else {
+		if savedData != "" {
+			cfg.DataDir = savedData
+		}
+		if savedIndex != "" {
+			cfg.IndexDir = savedIndex
+		}
+	}
+
 	if dataDir != "" {
 		cfg.DataDir = dataDir
 	}
@@ -96,7 +128,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	app := gui.New(d, Version)
+	app := gui.New(d, Version, BuildDate)
 	if startTab != "" {
 		app.SelectTab(startTab)
 	}

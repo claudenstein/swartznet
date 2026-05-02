@@ -16,8 +16,15 @@ import (
 // confirm + flag buttons) and invokes each button's OnTapped
 // closure so the callback bodies execute. Used by the make*HitCard
 // tests to exercise the per-card Confirm/Flag callback closures.
+//
+// The make*HitCard helpers wrap each card in a rightClickCapture
+// so the right-click context-menu wiring works; unwrap that here
+// so the test reaches the underlying card.
 func tapCardButtons(t *testing.T, card fyne.CanvasObject) {
 	t.Helper()
+	if rc, ok := card.(*rightClickCapture); ok {
+		card = rc.child
+	}
 	c, ok := card.(*widget.Card)
 	if !ok {
 		t.Fatalf("expected *widget.Card, got %T", card)

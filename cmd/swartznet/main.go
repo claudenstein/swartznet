@@ -23,7 +23,7 @@ import (
 // time with -ldflags "-X main.Version=..." in release builds. The default is
 // a human-readable placeholder so unlabelled dev builds still print something
 // meaningful.
-var Version = "0.0.1-dev"
+var Version = "v0.8.0"
 
 // exitCode values are documented here so shell scripts can rely on them.
 const (

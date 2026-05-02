@@ -134,6 +134,25 @@ func (p *Publisher) Stop() {
 	}
 }
 
+// Retract scrubs every manifest entry that mentions the given
+// infohash and persists the result. Call this when a torrent is
+// removed from the engine so the publisher stops re-announcing
+// stale hits on every refresh tick. Safe to call from any
+// goroutine; no-op if the publisher has no manifest (e.g. tests
+// that constructed it without one) or the infohash isn't present.
+func (p *Publisher) Retract(infohash []byte) {
+	if p == nil || p.manifest == nil {
+		return
+	}
+	if touched := p.manifest.RemoveAllHits(infohash); touched > 0 {
+		if err := p.manifest.Save(); err != nil {
+			p.log.Warn("dhtindex.publisher.save_after_retract_err", "err", err)
+		}
+		p.log.Debug("dhtindex.publisher.retracted",
+			"infohash", infohash, "keywords", touched)
+	}
+}
+
 // Submit enqueues one torrent for publication. Non-blocking; if the
 // queue is full the task is dropped and a warning is logged. The
 // dropped torrent will be picked up on the next refresh tick.

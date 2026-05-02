@@ -42,13 +42,24 @@ type session struct {
 // sessionEntry is one row in the on-disk manifest. JSON-stable.
 type sessionEntry struct {
 	InfoHash    string `json:"infohash"`
-	AddedVia    string `json:"added_via"` // "magnet" | "file" | "infohash"
+	AddedVia    string `json:"added_via"` // "magnet" | "file" | "infohash" | "metainfo"
 	MagnetURI   string `json:"magnet_uri,omitempty"`
 	TorrentFile string `json:"torrent_file,omitempty"` // basename under <DataDir>/torrents/
 	Paused      bool   `json:"paused,omitempty"`
 	Indexing    bool   `json:"indexing"`
 	QueueOrder  int64  `json:"queue_order,omitempty"`
 	SignedBy    string `json:"signed_by,omitempty"`
+
+	// DataPath is the per-torrent storage parent directory, set
+	// when the torrent was added with content already living
+	// outside of cfg.DataDir — typically a Create-Torrent flow
+	// where the user picked a Root somewhere on their disk and
+	// then started seeding it. anacrolix's default storage roots
+	// every torrent at cfg.DataDir, so without this override the
+	// post-add VerifyData finds zero bytes and the torrent shows
+	// 0% even though the source content is sitting on disk
+	// already. Empty means "use the engine's default storage".
+	DataPath string `json:"data_path,omitempty"`
 }
 
 type sessionFile struct {

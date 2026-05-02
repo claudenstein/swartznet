@@ -279,7 +279,7 @@ func (st *searchTab) makeLocalHitCard(h indexer.SearchHit) fyne.CanvasObject {
 	actions := container.NewHBox(confirmBtn, flagBtn)
 
 	card := widget.NewCard(title, subtitle, actions)
-	return card
+	return st.wrapHitMenu(card, h.InfoHash, h.Name, h.SignedBy)
 }
 
 func (st *searchTab) makeSwarmHitCard(h swarmsearch.MergedHit) fyne.CanvasObject {
@@ -301,7 +301,7 @@ func (st *searchTab) makeSwarmHitCard(h swarmsearch.MergedHit) fyne.CanvasObject
 	})
 
 	card := widget.NewCard(title, subtitle, container.NewHBox(confirmBtn, flagBtn))
-	return card
+	return st.wrapHitMenu(card, h.InfoHash, h.Name, "")
 }
 
 func (st *searchTab) makeDHTHitCard(h dhtindex.LookupHit) fyne.CanvasObject {
@@ -326,7 +326,56 @@ func (st *searchTab) makeDHTHitCard(h dhtindex.LookupHit) fyne.CanvasObject {
 	})
 
 	card := widget.NewCard(title, subtitle, container.NewHBox(confirmBtn, flagBtn))
-	return card
+	return st.wrapHitMenu(card, h.InfoHash, h.Name, "")
+}
+
+// wrapHitMenu wraps a search hit card so a right-click pops up
+// the same actions a power user would otherwise have to chase
+// across two buttons + the Downloads tab. The resulting menu
+// covers the canonical "I see something interesting in the
+// results — now what?" actions: add this torrent to the engine,
+// copy the magnet/infohash for sharing, confirm or flag the
+// reputation signal, and copy the publisher pubkey when one is
+// attached.
+func (st *searchTab) wrapHitMenu(card fyne.CanvasObject, infoHash, name, signedBy string) fyne.CanvasObject {
+	build := func() *fyne.Menu {
+		magnet := "magnet:?xt=urn:btih:" + infoHash
+		if name != "" {
+			magnet += "&dn=" + name
+		}
+		items := []*fyne.MenuItem{
+			fyne.NewMenuItem("Add to downloads", func() {
+				go func() {
+					if _, err := st.d.Eng.AddMagnetURI(magnet); err != nil {
+						fyne.Do(func() {
+							dialog.ShowError(err, st.win())
+						})
+					}
+				}()
+			}),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Copy magnet link", func() {
+				fyne.CurrentApp().Clipboard().SetContent(magnet)
+			}),
+			fyne.NewMenuItem("Copy infohash", func() {
+				fyne.CurrentApp().Clipboard().SetContent(infoHash)
+			}),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Confirm (mark known-good)", func() { st.confirmHit(infoHash) }),
+			fyne.NewMenuItem("Flag as spam", func() { st.flagHit(infoHash) }),
+		}
+		if signedBy != "" {
+			signer := signedBy
+			items = append(items,
+				fyne.NewMenuItemSeparator(),
+				fyne.NewMenuItem("Copy publisher pubkey", func() {
+					fyne.CurrentApp().Clipboard().SetContent(signer)
+				}),
+			)
+		}
+		return fyne.NewMenu("Search hit", items...)
+	}
+	return newRightClickCapture(card, build)
 }
 
 func (st *searchTab) confirmHit(infoHashHex string) {

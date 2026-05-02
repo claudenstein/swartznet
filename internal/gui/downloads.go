@@ -26,7 +26,16 @@ type downloadsTab struct {
 	snaps []engine.TorrentSnapshot
 
 	table    *widget.Table
-	selected int // -1 = none
+	selected int // -1 = none — last-clicked row, drives the right-click menu
+
+	// selectedSet is the multi-selection set keyed by infohash.
+	// Bulk actions (pause/resume/remove/toggle-index) iterate
+	// it; with one entry the behaviour is identical to the old
+	// single-selection model. Keying by infohash (rather than
+	// row index) keeps selection stable across re-sorts and the
+	// 2 s polling refresh, which can otherwise renumber rows
+	// underneath the user.
+	selectedSet map[string]struct{}
 
 	// Empty-state overlay. Shown when there are no torrents;
 	// Hidden otherwise. Updated in pollLoop.
@@ -38,6 +47,11 @@ type downloadsTab struct {
 	// ascending and descending.
 	sortCol  int
 	sortDesc bool
+
+	// selectionLbl shows "(N selected)" in the toolbar so the
+	// user can see at a glance how many rows the bulk buttons
+	// will hit.
+	selectionLbl *widget.Label
 }
 
 // Column definitions for the torrent table.
@@ -67,9 +81,10 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 // goroutine racing test-thread widget operations under -race.
 func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 	dl := &downloadsTab{
-		d:        d,
-		selected: -1,
-		sortCol:  -1, // no active sort — engine insertion order
+		d:           d,
+		selected:    -1,
+		sortCol:     -1, // no active sort — engine insertion order
+		selectedSet: make(map[string]struct{}),
 	}
 
 	dl.table = widget.NewTableWithHeaders(
@@ -81,7 +96,15 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 		},
 		// CreateCell
 		func() fyne.CanvasObject {
-			return widget.NewLabel("placeholder text here")
+			// Ellipsis-truncate so a long Name doesn't render past
+			// its column width and overprint the next column. The
+			// table widget clips at column edges visually but the
+			// label itself measures and paints at full text width
+			// in some Fyne versions, producing the overlap seen in
+			// scree.png.
+			lbl := widget.NewLabel("placeholder text here")
+			lbl.Truncation = fyne.TextTruncateEllipsis
+			return lbl
 		},
 		// UpdateCell
 		func(id widget.TableCellID, cell fyne.CanvasObject) {
@@ -98,6 +121,9 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 				name := s.Name
 				if name == "" {
 					name = s.InfoHash[:16] + "..."
+				}
+				if _, ok := dl.selectedSet[s.InfoHash]; ok {
+					name = "✓ " + name
 				}
 				label.SetText(name)
 			case 1: // Status
@@ -175,7 +201,25 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 		}
 		dl.mu.Lock()
 		dl.selected = id.Row
+		// Toggle multi-selection on each row tap. Standard
+		// table widgets gate this behind Ctrl/Shift, but Fyne
+		// does not surface modifier state through OnSelected;
+		// rather than ship a half-working modifier hack, treat
+		// every row click as a toggle and pair it with explicit
+		// "Select All" / "Clear Selection" toolbar actions.
+		// This makes the multi-select model discoverable and
+		// keeps the door open to a true Ctrl-aware variant later.
+		if id.Row >= 0 && id.Row < len(dl.snaps) {
+			ih := dl.snaps[id.Row].InfoHash
+			if _, ok := dl.selectedSet[ih]; ok {
+				delete(dl.selectedSet, ih)
+			} else {
+				dl.selectedSet[ih] = struct{}{}
+			}
+		}
 		dl.mu.Unlock()
+		dl.refreshSelectionLabel()
+		dl.table.Refresh()
 	}
 
 	// Action buttons.
@@ -203,6 +247,15 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 	filesBtn := widget.NewButtonWithIcon("Files...", theme.StorageIcon(), func() {
 		dl.showFilesForSelected()
 	})
+	selectAllBtn := widget.NewButtonWithIcon("Select All", theme.ContentCopyIcon(), func() {
+		dl.selectAll()
+	})
+	clearSelBtn := widget.NewButtonWithIcon("Clear", theme.ContentClearIcon(), func() {
+		dl.clearSelection()
+	})
+
+	dl.selectionLbl = widget.NewLabel("")
+	dl.selectionLbl.TextStyle.Italic = true
 
 	toolbar := container.NewHBox(
 		addMagnetBtn,
@@ -215,6 +268,10 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 		widget.NewSeparator(),
 		filesBtn,
 		toggleIndexBtn,
+		widget.NewSeparator(),
+		selectAllBtn,
+		clearSelBtn,
+		dl.selectionLbl,
 	)
 
 	// Wrap the table in a right-click capture so secondary taps
@@ -244,7 +301,10 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 }
 
 // buildContextMenu builds the right-click menu for the currently-
-// selected torrent. Returns nil when no row is selected.
+// selected torrent. Returns nil when no row is selected. When the
+// multi-selection set has 2+ entries every action label is
+// pluralised so the user can confirm the bulk operation visually
+// before committing.
 func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 	ih := dl.selectedInfoHash()
 	if ih == "" {
@@ -259,18 +319,24 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 			break
 		}
 	}
+	bulkN := len(dl.selectedSet)
 	dl.mu.RUnlock()
 
-	pauseLabel := "Pause"
+	bulkSuffix := ""
+	if bulkN >= 2 {
+		bulkSuffix = fmt.Sprintf(" (%d selected)", bulkN)
+	}
+
+	pauseLabel := "Pause" + bulkSuffix
 	pauseAction := func() { dl.pauseSelected() }
 	if snap.Paused {
-		pauseLabel = "Resume"
+		pauseLabel = "Resume" + bulkSuffix
 		pauseAction = func() { dl.resumeSelected() }
 	}
 
-	indexLabel := "Stop indexing"
+	indexLabel := "Stop indexing" + bulkSuffix
 	if !snap.Indexing {
-		indexLabel = "Start indexing"
+		indexLabel = "Start indexing" + bulkSuffix
 	}
 
 	copyMagnet := fyne.NewMenuItem("Copy magnet link", func() {
@@ -320,7 +386,7 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 		fyne.NewMenuItem("Files...", func() { dl.showFilesForSelected() }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem(pauseLabel, pauseAction),
-		fyne.NewMenuItem("Remove", func() { dl.removeSelected() }),
+		fyne.NewMenuItem("Remove"+bulkSuffix, func() { dl.removeSelected() }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem(indexLabel, func() { dl.toggleIndexSelected() }),
 	}
@@ -665,42 +731,57 @@ func (dl *downloadsTab) showFilesForSelected() {
 }
 
 func (dl *downloadsTab) toggleIndexSelected() {
-	ih := dl.selectedInfoHash()
-	if ih == "" {
+	targets := dl.actionTargets()
+	if len(targets) == 0 {
 		return
 	}
-	// Read current flag from snapshot under lock, then flip it.
+	// Build a (infohash → currently-indexing?) map under lock so
+	// the bulk operation flips each torrent independently.
 	dl.mu.RLock()
-	var current bool
-	for _, s := range dl.snaps {
-		if s.InfoHash == ih {
-			current = s.Indexing
-			break
+	state := make(map[string]bool, len(targets))
+	for _, ih := range targets {
+		for _, s := range dl.snaps {
+			if s.InfoHash == ih {
+				state[ih] = s.Indexing
+				break
+			}
 		}
 	}
 	dl.mu.RUnlock()
-	go dl.d.Eng.SetTorrentIndexing(ih, !current)
+	go func() {
+		for _, ih := range targets {
+			_ = dl.d.Eng.SetTorrentIndexing(ih, !state[ih])
+		}
+	}()
 }
 
 func (dl *downloadsTab) pauseSelected() {
-	ih := dl.selectedInfoHash()
-	if ih == "" {
+	targets := dl.actionTargets()
+	if len(targets) == 0 {
 		return
 	}
-	go dl.d.Eng.PauseTorrent(ih)
+	go func() {
+		for _, ih := range targets {
+			_ = dl.d.Eng.PauseTorrent(ih)
+		}
+	}()
 }
 
 func (dl *downloadsTab) resumeSelected() {
-	ih := dl.selectedInfoHash()
-	if ih == "" {
+	targets := dl.actionTargets()
+	if len(targets) == 0 {
 		return
 	}
-	go dl.d.Eng.ResumeTorrent(ih)
+	go func() {
+		for _, ih := range targets {
+			_ = dl.d.Eng.ResumeTorrent(ih)
+		}
+	}()
 }
 
 func (dl *downloadsTab) removeSelected() {
-	ih := dl.selectedInfoHash()
-	if ih == "" {
+	targets := dl.actionTargets()
+	if len(targets) == 0 {
 		return
 	}
 
@@ -712,38 +793,116 @@ func (dl *downloadsTab) removeSelected() {
 	// confirm dialog exists mainly so the Delete key doesn't
 	// silently vanish a row when the user meant to press a
 	// different key.
-	var name string
-	dl.mu.RLock()
-	for _, s := range dl.snaps {
-		if s.InfoHash == ih {
-			name = s.Name
-			break
+	var promptBody string
+	if len(targets) == 1 {
+		ih := targets[0]
+		var name string
+		dl.mu.RLock()
+		for _, s := range dl.snaps {
+			if s.InfoHash == ih {
+				name = s.Name
+				break
+			}
 		}
-	}
-	dl.mu.RUnlock()
-	label := name
-	if label == "" {
-		label = ih[:16] + "..."
+		dl.mu.RUnlock()
+		label := name
+		if label == "" {
+			label = ih[:16] + "..."
+		}
+		promptBody = fmt.Sprintf("Remove \"%s\" from the download list and stop seeding/leeching?\n\nDownloaded files on disk are kept; the torrent entry in your list is removed.", label)
+	} else {
+		promptBody = fmt.Sprintf("Remove %d torrents from the download list and stop seeding/leeching?\n\nDownloaded files on disk are kept; the torrent entries in your list are removed.", len(targets))
 	}
 
 	dialog.ShowConfirm(
 		"Remove torrent?",
-		fmt.Sprintf("Remove \"%s\" from the download list and stop seeding/leeching?\n\nDownloaded files on disk are kept; the torrent entry in your list is removed.", label),
+		promptBody,
 		func(ok bool) {
 			if !ok {
 				return
 			}
 			go func() {
-				_ = dl.d.Eng.RemoveTorrent(ih)
+				for _, ih := range targets {
+					_ = dl.d.Eng.RemoveTorrent(ih)
+				}
 				fyne.Do(func() {
 					dl.mu.Lock()
 					dl.selected = -1
+					for _, ih := range targets {
+						delete(dl.selectedSet, ih)
+					}
 					dl.mu.Unlock()
+					dl.refreshSelectionLabel()
 				})
 			}()
 		},
 		dl.win(),
 	)
+}
+
+// actionTargets returns the list of infohashes a bulk action
+// should hit: the multi-selection set when non-empty, otherwise
+// the single primary selection (last clicked row). This keeps
+// the existing toolbar / context-menu callers working on a
+// fresh row without the user having to pre-select it.
+func (dl *downloadsTab) actionTargets() []string {
+	dl.mu.RLock()
+	defer dl.mu.RUnlock()
+	if len(dl.selectedSet) > 0 {
+		// Walk snaps so the result is in display order — bulk
+		// pause/resume looks tidier when row 1 fires before
+		// row 2.
+		out := make([]string, 0, len(dl.selectedSet))
+		for _, s := range dl.snaps {
+			if _, ok := dl.selectedSet[s.InfoHash]; ok {
+				out = append(out, s.InfoHash)
+			}
+		}
+		return out
+	}
+	if dl.selected < 0 || dl.selected >= len(dl.snaps) {
+		return nil
+	}
+	return []string{dl.snaps[dl.selected].InfoHash}
+}
+
+// selectAll adds every currently-displayed torrent to the
+// multi-selection set.
+func (dl *downloadsTab) selectAll() {
+	dl.mu.Lock()
+	for _, s := range dl.snaps {
+		dl.selectedSet[s.InfoHash] = struct{}{}
+	}
+	dl.mu.Unlock()
+	dl.refreshSelectionLabel()
+	dl.table.Refresh()
+}
+
+// clearSelection drops every entry from the multi-selection set.
+func (dl *downloadsTab) clearSelection() {
+	dl.mu.Lock()
+	dl.selectedSet = make(map[string]struct{})
+	dl.mu.Unlock()
+	dl.refreshSelectionLabel()
+	dl.table.Refresh()
+}
+
+// refreshSelectionLabel updates the toolbar count label.
+// Called from any code that mutates dl.selectedSet so the user
+// always sees an accurate selection count next to the bulk
+// action buttons.
+func (dl *downloadsTab) refreshSelectionLabel() {
+	dl.mu.RLock()
+	n := len(dl.selectedSet)
+	dl.mu.RUnlock()
+	if dl.selectionLbl == nil {
+		return
+	}
+	if n == 0 {
+		dl.selectionLbl.SetText("")
+	} else {
+		dl.selectionLbl.SetText(fmt.Sprintf("(%d selected)", n))
+	}
 }
 
 func (dl *downloadsTab) selectedInfoHash() string {

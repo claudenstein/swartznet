@@ -7,6 +7,46 @@ import (
 	"testing"
 )
 
+func TestUserOverridesRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "config.json")
+
+	// Missing file: not an error, returns empty values.
+	d, i, err := LoadUserOverrides(path)
+	if err != nil || d != "" || i != "" {
+		t.Fatalf("missing file should return empty,empty,nil; got %q,%q,%v", d, i, err)
+	}
+
+	// Save and re-load.
+	if err := SaveUserOverrides(path, "/tmp/data", "/tmp/index"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	d, i, err = LoadUserOverrides(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if d != "/tmp/data" || i != "/tmp/index" {
+		t.Errorf("round-trip mismatch: got %q,%q", d, i)
+	}
+
+	// Empty save path is rejected so callers don't accidentally
+	// stomp on an unrelated file in the working directory.
+	if err := SaveUserOverrides("", "x", "y"); err == nil {
+		t.Error("empty save path should error")
+	}
+
+	// Malformed JSON surfaces as an error rather than silent
+	// fallback to defaults, so the operator can fix it.
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadUserOverrides(bad); err == nil {
+		t.Error("malformed JSON should error")
+	}
+}
+
 func TestDefaultNonEmpty(t *testing.T) {
 	t.Parallel()
 	c := Default()

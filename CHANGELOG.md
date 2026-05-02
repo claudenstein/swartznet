@@ -85,6 +85,28 @@ LocalRecord sync was wired up in earlier commits so nodes do
 share records over the responder path; the engine attaches a
 RecordCache as both source and sink in `engine.New`.
 
+### Fixed — Determinism follow-ups from production-architecture audit
+
+  - `internal/dhtindex/manifest.go` — `RemoveHit` now drops a
+    keyword entry from the manifest entirely once its last hit
+    is removed, and a new `RemoveAllHits(infohash)` scrubs an
+    infohash from every keyword entry in one pass. Prevents the
+    manifest from growing unbounded over the lifetime of a
+    long-running publisher.
+  - `internal/dhtindex/publisher.go` — new `Publisher.Retract`
+    method wraps `RemoveAllHits` and persists the manifest.
+  - `internal/engine/engine.go` — `Engine.RemoveTorrent` now
+    calls `publisher.Retract` so a removed torrent's keyword
+    hits stop being re-announced on the next refresh tick.
+    Without this, peers kept discovering torrents the publisher
+    no longer hosted.
+  - `internal/daemon/follows.go` — `LoadFollowFile` now returns
+    `(int, error)` so corrupted or unreadable follow files
+    surface through the structured logger instead of being
+    swallowed when stderr is `io.Discard`. Behaviour stays
+    fail-closed: an unreadable file leaves the subscriber with
+    an empty list (follows can still be added via the HTTP API).
+
 ### Changed — Create Torrent dialog auto-fills the Output path
 
 The native GUI's Create Torrent dialog now pre-populates the
@@ -94,7 +116,124 @@ Same edit-survives policy as the existing Name auto-fill: the
 output is only overwritten while the user has not typed anything
 custom into it. Eliminates the `Output path required` error users
 hit when clicking Create after picking a root but before picking
-an output.
+an output. The submit handler also defensively re-derives the
+output path from the root if the entry is empty at click time, so
+any flow where OnChanged didn't fire (paste-without-edit, focus
+oddities) still produces a working .torrent without surfacing the
+modal error.
+
+### Added — Downloads multi-select + bulk control
+
+Each click on a torrent row toggles its membership in a
+multi-selection set; the toolbar shows `(N selected)` and
+the right-click menu pluralises every action label so the
+user can confirm the bulk operation visually. Pause / Resume /
+Remove / Toggle Index now operate on every selected torrent in
+display order, falling back to the single primary selection when
+the set is empty. Two new toolbar buttons — `Select All` and
+`Clear` — give explicit set-management without keyboard
+modifiers (Fyne's table widget does not surface modifier state
+through `OnSelected`, so a Ctrl-click toggle would have shipped
+half-broken). Selection is keyed by infohash so it survives the
+2-second poll refresh and any sort change.
+
+### Added — Right-click menus on Search and Companion
+
+Each Search-results card (Local, Swarm, DHT) now wraps in a
+right-click capture exposing **Add to downloads**, **Copy
+magnet link**, **Copy infohash**, **Confirm**, **Flag**, and
+(when the hit is signed) **Copy publisher pubkey**. The
+Companion tab's followed-publishers list gains a right-click
+menu with **Copy public key**, **Copy label**, and **Unfollow**
+for the focused row.
+
+### Added — Companion tab shows the full publisher pubkey
+
+`Companion → Companion Publisher → Public Key` was previously
+truncated to 16 chars + "...", which made it useless for the
+"share my pubkey so my peers can follow me" flow. The label is
+now selectable, monospace, wraps within its row, and gains an
+inline `Copy` button next to the pubkey value so users get the
+full 64-char hex into their clipboard in one click.
+
+### Changed — Companion-index torrent uses publisher-tagged file name
+
+`WriteCompanionFiles` now writes the gzipped JSON payload to
+`<dir>/swartznet-content-index-<pubkey-prefix-12>-v1.json.gz`,
+and the wrapping single-file torrent's `info.name` follows. The
+previous generic name made every node's companion torrent look
+identical in the Downloads list, which was confusing for users
+running multiple SwartzNet instances or following several
+publishers. Subscribers locate the payload by the path returned
+from `engine.FetchCompanionTorrent` and never key on the
+filename, so the rename is end-to-end transparent.
+
+### Added — Settings: editable Data / Index directories
+
+The Settings tab gains a `Storage Paths` card with text
+entries + Browse buttons for `DataDir` and `IndexDir`, a Save
+button, and a "Reset to defaults" shortcut. Edits persist to
+`<share-root>/config.json` (loaded by `swartznet-gui` on next
+launch) and a dialog explains the change applies on restart —
+hot-swapping these paths under a running engine + indexer is
+not safe, so we deliberately avoid pretending it is. CLI flags
+still win against the saved file for operators who need to
+override.
+
+### Fixed — Downloads table column overflow
+
+Torrent rows with very long names previously rendered the trailing
+characters past the Name column boundary into the Status / Progress
+cells. Cell labels now use `TextTruncateEllipsis` so long names
+show "Project Hail Mary 2026 1080p WEB Lin..." and stop cleanly at
+the column edge.
+
+### Fixed — Create Torrent seeds from the source path
+
+`Engine.AddTorrentMetaInfo` was relying on anacrolix's default
+storage backend, which roots every torrent at `cfg.DataDir`.
+The Create Torrent flow hashes whatever path the user picked
+(typically `~/Documents/...`), so the freshly-seeded torrent's
+`info.Name` resolved to a non-existent file under DataDir and
+the post-add VerifyData found zero bytes — the row sat at 0%
+even though the source content was already on disk. New
+`Engine.AddTorrentMetaInfoSeedFrom(mi, dataParent)` adds the
+torrent with a per-torrent `storage.NewFile(dataParent)` so
+anacrolix locates the real bytes at `dataParent + info.Name`.
+The GUI's `runCreateTorrent` calls the new method with
+`filepath.Dir(opts.Root)`, and the value is persisted as
+`sessionEntry.DataPath` so RestoreSession reapplies the same
+override on the next launch instead of bouncing the row back
+to 0%. Regression tests:
+`TestAddTorrentMetaInfoSeedFromExternalPath` and
+`TestAddTorrentMetaInfoSeedFromSurvivesRestart`.
+
+### Fixed — Restored torrents resume at their real progress
+
+Two engine bugs combined to make every restart appear to wipe
+download progress: `AddTorrentMetaInfo` was the only `Add*` path
+that did not call `persistAdd`, so torrents created via the GUI's
+`Create Torrent` button (or seeded by the companion publisher) were
+not recorded in the session manifest at all and silently vanished
+on the next launch; and `RestoreSession` did not run `VerifyData`
+on the re-added handles, so anacrolix had no opportunity to discover
+the on-disk pieces — `BytesCompleted` stayed at 0 until a peer
+asked for a piece, which never happens for a freshly-restarted
+client with no peers yet. `AddTorrentMetaInfo` now marshals the
+metainfo, writes it to `<DataDir>/torrents/<infohash>.torrent`, and
+calls `persistAdd` with `addedVia="metainfo"`; `RestoreSession`
+spawns `verifyOnRestore` for every entry which waits for `GotInfo`
+(no-op for file/metainfo entries) and then calls
+`VerifyDataContext`. Regression test:
+`TestRestoreSessionRehashesOnDiskData`.
+
+### Added — About dialog shows build date
+
+`Help → About` gains a `Built` row alongside `Version`, populated
+from a new `main.BuildDate` ldflag injected by `scripts/build-gui.sh`
+as the UTC build timestamp. `go run` / IDE launches that don't go
+through the build script render the row as `(dev build)` so the
+user can tell at a glance whether they're on an official binary.
 
 ### Added — `swartznet crawl-probe` ops command
 

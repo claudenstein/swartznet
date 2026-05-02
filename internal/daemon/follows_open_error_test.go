@@ -32,7 +32,10 @@ func TestLoadFollowFileOpenErrorOtherThanNotExist(t *testing.T) {
 
 	w := newTestSubscriberWorker(t)
 	var stderr bytes.Buffer
-	n := daemon.LoadFollowFile(w, weird, &stderr)
+	n, err := daemon.LoadFollowFile(w, weird, &stderr)
+	if err == nil {
+		t.Errorf("ENOTDIR open should return an error, got nil")
+	}
 	if n != 0 {
 		t.Errorf("n = %d, want 0", n)
 	}

@@ -22,8 +22,17 @@ const CompanionPieceLength int64 = 256 * 1024
 // produces the matching v1 .torrent metainfo. The two files are
 // written to dir as:
 //
-//	<dir>/<FormatFileName>     # the gzipped JSON payload
-//	<dir>/companion.torrent    # the metainfo wrapping it
+//	<dir>/<companion file basename>  # the gzipped JSON payload
+//	<dir>/companion.torrent           # the metainfo wrapping it
+//
+// The companion-file basename derives from idx.Publisher so the
+// torrent's display name carries the publisher's identity rather
+// than the generic "swartznet-content-index-v1.json.gz" — that
+// generic name was indistinguishable across publishers in a
+// downloads list, defeating the user's ability to recognise
+// which node's index they're seeing. Subscribers locate the
+// payload by its on-disk path (returned by the engine fetcher)
+// so the renamed file remains decodable end-to-end.
 //
 // The returned MetaInfo is also constructed in memory so the
 // caller can hand it directly to torrent.Client.AddTorrent
@@ -46,7 +55,7 @@ func WriteCompanionFiles(dir string, idx CompanionIndex) (string, *metainfo.Meta
 		return "", nil, err
 	}
 
-	jsonPath := filepath.Join(dir, FormatFileName)
+	jsonPath := filepath.Join(dir, CompanionFileName(idx.Publisher))
 	if err := atomicWrite(jsonPath, payload); err != nil {
 		return "", nil, fmt.Errorf("companion: write payload: %w", err)
 	}

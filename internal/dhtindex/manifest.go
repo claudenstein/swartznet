@@ -160,7 +160,11 @@ func (m *Manifest) AddHit(keyword string, hit KeywordHit) (totalHits int, err er
 }
 
 // RemoveHit drops a hit by infohash. No-op if the keyword or hit is
-// absent.
+// absent. If the removal empties the entry's Hits slice, the keyword
+// is dropped from the manifest entirely so refreshAll() doesn't keep
+// re-publishing an empty value forever — and so the manifest doesn't
+// grow without bound for a long-running publisher that adds and
+// removes torrents over time.
 func (m *Manifest) RemoveHit(keyword string, infohash []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -175,6 +179,46 @@ func (m *Manifest) RemoveHit(keyword string, infohash []byte) {
 		}
 	}
 	entry.Hits = out
+	if len(entry.Hits) == 0 {
+		delete(m.Entries, keyword)
+	}
+}
+
+// RemoveAllHits scrubs the given infohash from every keyword entry in
+// the manifest. Empty entries left behind are dropped. Returns the
+// number of keyword entries touched (i.e. that contained the infohash
+// and had it removed). Used by the engine when a torrent is removed
+// so its hits stop being republished on the next refresh tick.
+func (m *Manifest) RemoveAllHits(infohash []byte) int {
+	if len(infohash) == 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	touched := 0
+	for keyword, entry := range m.Entries {
+		if entry == nil {
+			delete(m.Entries, keyword)
+			continue
+		}
+		hadIt := false
+		out := entry.Hits[:0]
+		for _, h := range entry.Hits {
+			if string(h.IH) == string(infohash) {
+				hadIt = true
+				continue
+			}
+			out = append(out, h)
+		}
+		entry.Hits = out
+		if hadIt {
+			touched++
+		}
+		if len(entry.Hits) == 0 {
+			delete(m.Entries, keyword)
+		}
+	}
+	return touched
 }
 
 // Snapshot returns a deep copy of every entry. Used by the

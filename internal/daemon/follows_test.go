@@ -55,8 +55,11 @@ func TestLoadFollowFileMissingIsNotError(t *testing.T) {
 	w := newTestSubscriberWorker(t)
 	var stderr bytes.Buffer
 
-	n := daemon.LoadFollowFile(w, filepath.Join(t.TempDir(), "does-not-exist.json"), &stderr)
+	n, err := daemon.LoadFollowFile(w, filepath.Join(t.TempDir(), "does-not-exist.json"), &stderr)
 
+	if err != nil {
+		t.Errorf("missing file should not produce an error, got %v", err)
+	}
 	if n != 0 {
 		t.Errorf("n = %d, want 0", n)
 	}
@@ -77,8 +80,11 @@ func TestLoadFollowFileMalformedJSON(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	n := daemon.LoadFollowFile(w, path, &stderr)
+	n, err := daemon.LoadFollowFile(w, path, &stderr)
 
+	if err == nil {
+		t.Errorf("malformed JSON should return an error, got nil")
+	}
 	if n != 0 {
 		t.Errorf("n = %d, want 0", n)
 	}
@@ -107,8 +113,11 @@ func TestLoadFollowFileMixedEntries(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	n := daemon.LoadFollowFile(w, path, &stderr)
+	n, err := daemon.LoadFollowFile(w, path, &stderr)
 
+	if err != nil {
+		t.Errorf("partial-success load should not error, got %v", err)
+	}
 	if n != 2 {
 		t.Errorf("n = %d, want 2 (two valid entries)", n)
 	}
@@ -137,8 +146,11 @@ func TestLoadFollowFileEmptyArray(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	n := daemon.LoadFollowFile(w, path, &stderr)
+	n, err := daemon.LoadFollowFile(w, path, &stderr)
 
+	if err != nil {
+		t.Errorf("empty array should not error, got %v", err)
+	}
 	if n != 0 {
 		t.Errorf("n = %d, want 0", n)
 	}
