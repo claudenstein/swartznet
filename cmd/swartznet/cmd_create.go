@@ -95,6 +95,15 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	// current API requires an *Engine receiver. Spin up a minimal
 	// one (no DHT, no index, no upload) — it's about 500 ms of
 	// overhead on my laptop, well worth the code simplicity.
+	//
+	// This deliberately bypasses daemon.New (the documented
+	// "single source of truth for startup") because Create is a
+	// one-shot tool with no need for indexer / publisher /
+	// companion / API subsystems. Going through the daemon would
+	// open a Bleve index and start publisher workers we never
+	// touch. If the engine API ever exposes a stand-alone
+	// CreateTorrent path (no Engine receiver), this can collapse
+	// back into the daemon flow.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Default()
 	if dataDir != "" {

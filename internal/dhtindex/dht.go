@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -14,6 +15,23 @@ import (
 	"github.com/anacrolix/dht/v2/exts/getput"
 	"github.com/anacrolix/torrent/bencode"
 )
+
+// nextSeq returns seq+1, clamped at math.MaxInt64. BEP-44
+// requires monotonically increasing sequence numbers; once we
+// hit MaxInt64 there is no legal next value and the put will
+// be a no-op (peers reject seq <= stored). The clamp keeps the
+// arithmetic well-defined for the closure signature
+// (seqToPut returns bep44.Put, no error path) and turns an
+// otherwise-undefined int64 wrap into a graceful-degrade. In
+// practice unreachable: a publisher would have to push 2^63
+// updates (≈146 trillion years at one put/second) to get
+// here. Defensive against memory corruption / future bugs.
+func nextSeq(seq int64) int64 {
+	if seq >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return seq + 1
+}
 
 // Putter writes a KeywordValue to the DHT under the publisher's
 // (pubkey, keyword) target. Implementations must sign the value with
@@ -107,7 +125,7 @@ func (a *AnacrolixPutter) PutInfohashPointer(ctx context.Context, salt []byte, i
 			V:    decoded,
 			K:    &pubArr,
 			Salt: salt,
-			Seq:  seq + 1,
+			Seq:  nextSeq(seq),
 		}
 		put.Sign(a.private)
 		return put
@@ -176,7 +194,7 @@ func (a *AnacrolixPutter) Put(ctx context.Context, salt []byte, value KeywordVal
 			V:    v,
 			K:    &pubArr,
 			Salt: salt,
-			Seq:  seq + 1,
+			Seq:  nextSeq(seq),
 		}
 		put.Sign(a.private)
 		return put
