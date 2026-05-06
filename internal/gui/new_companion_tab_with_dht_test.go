@@ -22,7 +22,8 @@ func TestNewCompanionTabWithDHT(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.CompSub == nil {
-		t.Skip("daemon did not wire up CompSub")
+		skipMissing(t, d, "CompSub")
+		return
 	}
 
 	// Pre-seed a follow so the follow-list UpdateCell callback has

@@ -23,7 +23,8 @@ func TestSettingsLoadCurrentShareLevelArms(t *testing.T) {
 	d := newTestDaemon(t)
 	sw := d.Eng.SwarmSearch()
 	if sw == nil {
-		t.Skip("daemon did not wire up SwarmSearch")
+		skipMissing(t, d, "Eng.SwarmSearch")
+		return
 	}
 
 	for _, lvl := range []int{0, 1, 2} {
@@ -47,7 +48,8 @@ func TestSettingsSaveShareLevelArms(t *testing.T) {
 
 	d := newTestDaemon(t)
 	if d.Eng.SwarmSearch() == nil {
-		t.Skip("daemon did not wire up SwarmSearch")
+		skipMissing(t, d, "Eng.SwarmSearch")
+		return
 	}
 
 	st := newSettingsTab(d)

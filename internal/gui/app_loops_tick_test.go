@@ -16,6 +16,14 @@ import (
 // title, 3s for notification). We let them tick once then
 // cancel. Combined into one test to keep total wall time below
 // ~3.5s.
+//
+// Asserts that both loops *exit* within a deterministic budget
+// after ctx is cancelled. A regression that dropped the
+// `case <-ctx.Done(): return` arm would leave the goroutines
+// running until the next 2s/3s tick (or, worse, forever) — the
+// 500ms budget below catches that. Also asserts that
+// lastNotified survives the loop without panicking on a real
+// daemon, replacing the previous "no-panic only" check.
 func TestTitleLoopTickAndNotificationLoopTick(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()
@@ -38,13 +46,29 @@ func TestTitleLoopTickAndNotificationLoopTick(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go a.titleLoop(ctx)
-	go a.notificationLoop(ctx)
+	titleDone := make(chan struct{})
+	notifyDone := make(chan struct{})
+	go func() { a.titleLoop(ctx); close(titleDone) }()
+	go func() { a.notificationLoop(ctx); close(notifyDone) }()
 
-	// Wait long enough for titleLoop (2s) and notificationLoop
-	// (3s) to fire at least once each.
+	// Let both loops tick at least once (titleLoop 2s,
+	// notificationLoop 3s) so the tick.C arm body executes.
 	time.Sleep(3200 * time.Millisecond)
 	cancel()
-	// Brief drain so goroutines exit before the test returns.
-	time.Sleep(50 * time.Millisecond)
+
+	// Both must honour ctx.Done() promptly — well before the
+	// next tick fires. 500ms is a generous bound on Fyne's
+	// scheduler.
+	for _, c := range []struct {
+		name string
+		done <-chan struct{}
+	}{
+		{"titleLoop", titleDone}, {"notificationLoop", notifyDone},
+	} {
+		select {
+		case <-c.done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("%s did not exit within 500ms of cancel — ctx.Done() arm broken", c.name)
+		}
+	}
 }

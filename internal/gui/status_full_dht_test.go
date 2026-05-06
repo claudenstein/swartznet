@@ -51,7 +51,8 @@ func TestStatusRefreshFullDHTPublisher(t *testing.T) {
 	}
 	defer d.Close()
 	if d.Eng.Publisher() == nil {
-		t.Skip("publisher did not start in this environment")
+		skipMissing(t, d, "Eng.Publisher")
+		return
 	}
 
 	st := buildStatusTab(d)

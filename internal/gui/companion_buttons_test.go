@@ -49,7 +49,8 @@ func TestCompanionRefreshAndFollowButtons(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.CompSub == nil {
-		t.Skip("daemon did not wire up CompSub")
+		skipMissing(t, d, "CompSub")
+		return
 	}
 
 	ct := buildCompanionTab(d)

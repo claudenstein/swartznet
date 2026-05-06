@@ -22,7 +22,8 @@ func TestRunSearchDHTLayerOn(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.Eng.Lookup() == nil {
-		t.Skip("daemon has no DHT lookup")
+		skipMissing(t, d, "Eng.Lookup")
+		return
 	}
 
 	st := newSearchTab(nil, d)

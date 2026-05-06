@@ -22,7 +22,8 @@ func TestStatusRefreshDHTWithTorrent(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.Eng.Lookup() == nil {
-		t.Skip("daemon did not wire up Lookup")
+		skipMissing(t, d, "Eng.Lookup")
+		return
 	}
 	addTestTorrent(t, d.Eng)
 

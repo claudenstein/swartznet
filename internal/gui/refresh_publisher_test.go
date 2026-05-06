@@ -23,7 +23,8 @@ func TestRefreshPublisherWithCompPub(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.CompPub == nil {
-		t.Skip("daemon did not wire up CompPub")
+		skipMissing(t, d, "CompPub")
+		return
 	}
 
 	ct := &companionTab{
@@ -52,7 +53,8 @@ func TestRefreshPublisherThrottledShowsError(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.CompPub == nil {
-		t.Skip("daemon did not wire up CompPub")
+		skipMissing(t, d, "CompPub")
+		return
 	}
 
 	// Wait for the publisher's startup refreshOnce to set

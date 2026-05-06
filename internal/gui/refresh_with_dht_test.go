@@ -21,7 +21,8 @@ func TestStatusRefreshWithDHT(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.Eng.Lookup() == nil {
-		t.Skip("daemon did not wire up Lookup (DHT may not be available)")
+		skipMissing(t, d, "Eng.Lookup")
+		return
 	}
 
 	st := buildStatusTab(d)
@@ -42,7 +43,8 @@ func TestCompanionRefreshWithDHT(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.CompPub == nil || d.CompSub == nil {
-		t.Skip("daemon did not wire up CompPub/CompSub")
+		skipMissing(t, d, "CompPub/CompSub")
+		return
 	}
 
 	ct := buildCompanionTab(d)

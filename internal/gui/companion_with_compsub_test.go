@@ -64,7 +64,8 @@ func TestCompanionDoFollowAndUnfollow(t *testing.T) {
 
 	d := newDHTTestDaemon(t)
 	if d.CompSub == nil {
-		t.Skip("daemon did not wire up CompSub (DHT may not be available in this environment)")
+		skipMissing(t, d, "CompSub")
+		return
 	}
 
 	ct := &companionTab{

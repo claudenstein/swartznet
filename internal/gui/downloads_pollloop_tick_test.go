@@ -72,10 +72,28 @@ func TestDownloadsPollLoopTick(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go dl.pollLoop(ctx)
+	done := make(chan struct{})
+	go func() { dl.pollLoop(ctx); close(done) }()
 	// Wait for one tick to fire (2s cadence) plus margin for the
 	// fyne.Do callback to drain on the test thread.
 	time.Sleep(2400 * time.Millisecond)
+
+	// After at least one tick, dl.snaps must reflect the
+	// torrent we added; the tick body assigns
+	// dl.snaps = TorrentSnapshots() under fyne.Do. Reading
+	// under the same RWMutex the loop uses keeps this race-free.
+	dl.mu.RLock()
+	got := len(dl.snaps)
+	dl.mu.RUnlock()
+	if got == 0 {
+		t.Fatal("after first tick: dl.snaps is empty — tick.C arm did not run or did not capture the engine's snapshot")
+	}
+
 	cancel()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+		// Loop honoured ctx.Done() promptly.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("pollLoop did not exit within 500ms of cancel — ctx.Done() arm broken")
+	}
 }

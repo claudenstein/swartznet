@@ -49,7 +49,8 @@ func TestShowAboutWithAPI(t *testing.T) {
 	}
 	defer d.Close()
 	if d.API == nil {
-		t.Skip("HTTP API did not start in this environment")
+		skipMissing(t, d, "API")
+		return
 	}
 
 	a := &App{daemon: d, win: w, version: "test"}
