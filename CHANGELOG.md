@@ -85,6 +85,38 @@ LocalRecord sync was wired up in earlier commits so nodes do
 share records over the responder path; the engine attaches a
 RecordCache as both source and sink in `engine.New`.
 
+### Fixed — `--no-index` cascades to disable Layer-D publishing
+
+`--no-index` was documented to "prevent Bleve from opening at
+all (and cascade to disable Layer D publishing)" but only the
+first half held: the daemon skipped `indexer.Open` while
+`engine.startPublisher` still launched the BEP-44 keyword
+publisher under the user's identity. A user running
+`swartznet add --no-index` was still announcing keyword
+pointers to the DHT — a privacy regression that contradicted
+the documented global opt-out.
+
+  - `internal/config/config.go` — new `Config.NoIndex` field
+    mirrors the daemon-level flag down to the engine.
+  - `internal/daemon/daemon.go` — `daemon.New` copies
+    `Options.NoIndex` into `Cfg.NoIndex` before calling
+    `engine.New` so the engine's publisher gating sees a
+    consistent view.
+  - `internal/engine/engine.go` — `startPublisher` now skips
+    the keyword Publisher worker on either `cfg.NoIndex` or
+    `cfg.DisableDHTPublish`, and keeps the `sn_search`
+    Publisher capability bit at 0 in both cases (a node that
+    isn't pushing entries shouldn't gossip itself as an
+    indexer).
+  - `internal/daemon/daemon_test.go` —
+    `TestDaemonNoIndexCascadesToPublisher` regression-locks
+    that `Engine.Publisher()` is nil when `NoIndex` is true.
+
+The lookup / pointer-getter path stays intact, so a
+`--no-index` node still subscribes to other publishers and
+fetches companion indexes — it just contributes nothing to
+the search-side network.
+
 ### Fixed — Determinism follow-ups from production-architecture audit
 
   - `internal/dhtindex/manifest.go` — `RemoveHit` now drops a

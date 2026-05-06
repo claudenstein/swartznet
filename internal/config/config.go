@@ -63,6 +63,17 @@ type Config struct {
 	// Layer-D contribution to the network. Default: false.
 	DisableDHTPublish bool
 
+	// NoIndex, when true, disables every form of indexing on this
+	// node: the Bleve full-text index is never opened, and the
+	// Layer-D BEP-44 keyword publisher worker is suppressed (we
+	// can't republish keyword pointers we never built). The node
+	// can still download torrents, run Layer-S peer-wire queries,
+	// and read other publishers' Layer-D entries — it just
+	// contributes nothing to the search-side network. Mirrors
+	// daemon.Options.NoIndex (the daemon copies the flag down so
+	// the engine sees a consistent view). Default: false.
+	NoIndex bool
+
 	// DHTBootstrapAddrs, when non-empty, pre-seeds the anacrolix
 	// DHT server's StartingNodes list with these host:port
 	// addresses instead of the mainline defaults

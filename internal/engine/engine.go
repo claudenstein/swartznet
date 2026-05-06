@@ -914,7 +914,16 @@ func (e *Engine) startPublisher() error {
 	// DisableDHTPublish actually suppresses.
 	e.pointerPutter = put
 
-	if e.cfg.DisableDHTPublish {
+	switch {
+	case e.cfg.NoIndex:
+		// --no-index: we never built a local Bleve index and so
+		// have nothing to publish. Skip the keyword Publisher
+		// worker but keep the lookup / pointer-getter path intact
+		// so the node still works as a Layer-D consumer.
+		e.log.Info("engine.publisher_disabled_by_config",
+			"reason", "cfg.NoIndex",
+		)
+	case e.cfg.DisableDHTPublish:
 		// M13d: skip the keyword Publisher worker but keep the
 		// lookup path below intact so the node can still subscribe
 		// to other publishers and fetch companion indexes. This is
@@ -922,7 +931,7 @@ func (e *Engine) startPublisher() error {
 		e.log.Info("engine.publisher_disabled_by_config",
 			"reason", "cfg.DisableDHTPublish",
 		)
-	} else {
+	default:
 		mf, err := dhtindex.LoadOrCreateManifest(e.cfg.PublisherManifest)
 		if err != nil {
 			return fmt.Errorf("engine: load publisher manifest: %w", err)
@@ -987,13 +996,13 @@ func (e *Engine) startPublisher() error {
 	// s12 scenario, where leech-1's /search --dht found
 	// indexers_asked=0 because nothing gossiped.
 	//
-	// If DisableDHTPublish is set we're running in "leech-only
-	// DHT" mode: the Publisher worker is suppressed above but
-	// the node still has an identity and still lookups via the
-	// DHT. Keeping Publisher=0 in that mode is intentional —
-	// we don't want passive nodes gossiping themselves as
-	// indexers when they aren't actually pushing entries.
-	if !e.cfg.DisableDHTPublish {
+	// If DisableDHTPublish or NoIndex is set we're running with
+	// the keyword Publisher worker suppressed above but the node
+	// still has an identity and still lookups via the DHT.
+	// Keeping Publisher=0 in those modes is intentional — we
+	// don't want passive nodes gossiping themselves as indexers
+	// when they aren't actually pushing entries.
+	if !e.cfg.DisableDHTPublish && !e.cfg.NoIndex {
 		currentCaps := e.swarm.Capabilities()
 		currentCaps.Publisher = 1
 		e.swarm.SetCapabilities(currentCaps)

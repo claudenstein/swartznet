@@ -79,6 +79,16 @@ func (o *Options) stderr() io.Writer {
 // The returned Daemon is ready to use; call Close to tear it down.
 // The ctx governs the lifetime of the underlying torrent client.
 func New(ctx context.Context, opts Options) (*Daemon, error) {
+	// Mirror NoIndex into Cfg so the engine's publisher gating
+	// sees the same flag the daemon uses to skip Bleve. Without
+	// this, --no-index would suppress local indexing while the
+	// Layer-D keyword publisher kept announcing under the user's
+	// identity — a privacy regression that contradicts the
+	// documented "global opt-out" semantics.
+	if opts.NoIndex {
+		opts.Cfg.NoIndex = true
+	}
+
 	d := &Daemon{
 		Cfg: opts.Cfg,
 		Log: opts.Log,
