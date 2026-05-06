@@ -185,7 +185,7 @@ func (p *Pipeline) handle(in FileInput) {
 		defer c.Close()
 	}
 
-	chunks, err := safeExtract(ex, r, p.maxFileBytes)
+	chunks, err := safeExtract(p.log, ex, r, p.maxFileBytes)
 	if err != nil {
 		p.log.Debug("pipeline.extract_skip",
 			"path", in.Path, "extractor", ex.Name(), "err", err)
@@ -268,17 +268,48 @@ func (p *Pipeline) Stats(infohash string) PipelineStats {
 	}
 }
 
-// safeExtract runs ex.Extract with a panic recovery net. Extractors
-// handle adversarial input (torrent payloads from the network); a
-// single malformed file must not terminate the whole daemon. A
-// recovered panic is converted into an error, so the caller sees it
-// as an ordinary extract failure and the worker keeps running.
-func safeExtract(ex extractors.Extractor, r io.Reader, maxBytes int64) (chunks []extractors.Chunk, err error) {
+// extractWatchdog is the soft per-extract budget. If an
+// extractor takes longer than this we log a warning so ops can
+// notice an extractor that hangs on adversarial input. Soft
+// because Go has no clean way to terminate a goroutine
+// externally — the watchdog observes and reports, the worker
+// keeps going. Real protection comes from input size caps
+// (Pipeline.maxFileBytes plus the per-extractor io.LimitReader
+// inside each extractor) plus the panic recovery in safeExtract;
+// the watchdog is a third line of defence that surfaces hangs
+// before the pipeline channel backs up. 60 seconds is generous
+// for any well-formed file an extractor we ship handles; an
+// extract that runs longer is almost certainly stuck on
+// pathological input.
+const extractWatchdog = 60 * time.Second
+
+// safeExtract runs ex.Extract with a panic recovery net and a
+// soft watchdog. Extractors handle adversarial input (torrent
+// payloads from the network); a single malformed file must not
+// terminate the whole daemon. A recovered panic is converted
+// into an error, so the caller sees it as an ordinary extract
+// failure and the worker keeps running. A slow extract gets a
+// pipeline.extract_slow warning at the watchdog deadline so it
+// shows up in logs.
+func safeExtract(log *slog.Logger, ex extractors.Extractor, r io.Reader, maxBytes int64) (chunks []extractors.Chunk, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			chunks = nil
 			err = fmt.Errorf("pipeline: extractor %q panicked: %v", ex.Name(), rec)
 		}
 	}()
+
+	if log == nil {
+		log = slog.Default()
+	}
+	timer := time.AfterFunc(extractWatchdog, func() {
+		log.Warn("pipeline.extract_slow",
+			"extractor", ex.Name(),
+			"watchdog", extractWatchdog.String(),
+			"max_bytes", maxBytes,
+		)
+	})
+	defer timer.Stop()
+
 	return ex.Extract(r, maxBytes)
 }

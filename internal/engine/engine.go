@@ -276,7 +276,16 @@ func (e *Engine) SetIndex(idx *indexer.Index) {
 	}
 	e.idx = idx
 	if idx != nil {
-		e.pipeline = indexer.NewPipeline(idx, e.log, 0)
+		// 100 MiB global per-file extract cap. Was previously 0
+		// (= "let each extractor pick its own default"), which
+		// meant the archive extractor's 64 MiB limit applied to
+		// ZIPs but PDF / EPUB / DOCX silently buffered whatever
+		// the file claimed. A torrent of pathological PDFs could
+		// blow up resident memory before the per-extractor caps
+		// kicked in. 100 MiB is comfortably larger than any
+		// real-world textual document while still bounding the
+		// worst case.
+		e.pipeline = indexer.NewPipeline(idx, e.log, 100*1024*1024)
 		e.pipeline.Start()
 		e.swarm.SetSearcher(&indexerSearcher{idx: idx})
 	} else {

@@ -85,6 +85,38 @@ LocalRecord sync was wired up in earlier commits so nodes do
 share records over the responder path; the engine attaches a
 RecordCache as both source and sink in `engine.New`.
 
+### Changed — Indexer pipeline hardening (global cap + watchdog)
+
+Two extractor-pipeline robustness improvements following the
+whole-codebase review:
+
+  - `internal/engine/engine.go` — pipeline construction now
+    passes a 100 MiB global per-file extract cap instead of 0
+    ("each extractor's own default"). The archive extractor
+    enforced 64 MiB but PDF / EPUB / DOCX / FB2 silently
+    buffered whatever the file claimed; a torrent of
+    pathological PDFs could blow up resident memory before
+    any per-extractor limit kicked in. 100 MiB is comfortably
+    larger than any real-world textual document while still
+    bounding the worst case.
+  - `internal/indexer/pipeline.go` — `safeExtract` now arms a
+    soft 60-second watchdog that emits a
+    `pipeline.extract_slow` warning when an extract exceeds
+    its budget. Soft because Go can't terminate goroutines
+    externally — the watchdog observes and reports, the
+    worker keeps going. Real protection still comes from
+    `Pipeline.maxFileBytes` plus per-extractor
+    `io.LimitReader` plus the panic recovery; the watchdog
+    surfaces hangs in logs before the pipeline channel backs
+    up.
+
+The Extractor interface itself still doesn't take a
+context.Context — plumbing one through every extractor is a
+larger refactor that's not justified by current threat
+modelling. The watchdog + size cap combination addresses the
+practical concern (memory blowups, silent hangs) without the
+churn.
+
 ### Added — BEP-46 pointer carries publisher timestamp
 
 Companion-index pointers now include a `ts` field (publisher
