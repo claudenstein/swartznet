@@ -87,12 +87,22 @@ func NewAnacrolixPutter(server *dht.Server, priv ed25519.PrivateKey) (*Anacrolix
 func (a *AnacrolixPutter) PublicKey() [32]byte { return a.public }
 
 // PutInfohashPointer publishes a BEP-46-style mutable item whose
-// value is `{"ih": <20-byte infohash>}` under the given salt.
-// This is the M11c publisher primitive used to advertise a
-// companion content-index torrent at a deterministic
-// (publisher_pubkey, salt) target. Subscribers fetch the
-// pointer, read the infohash, and download the underlying
-// torrent through normal BitTorrent.
+// value is `{"ih": <20-byte infohash>, "ts": <unix-seconds>}`
+// under the given salt. This is the M11c publisher primitive
+// used to advertise a companion content-index torrent at a
+// deterministic (publisher_pubkey, salt) target. Subscribers
+// fetch the pointer, read the infohash, and download the
+// underlying torrent through normal BitTorrent.
+//
+// The "ts" field carries the publisher-asserted wall-clock
+// timestamp at the moment of publication, so subscribers can
+// detect very stale pointers (publisher offline, ignoring the
+// pointer entirely instead of just refreshing). The field is
+// optional on the wire — older publishers that pre-date the
+// addition emit values without it, and decoders treat absence
+// as "unknown freshness, accept". BEP-44's own seq number is
+// monotonic-per-publisher but doesn't compare across publishers
+// or against wall-clock; ts complements it without replacing it.
 //
 // The salt is typically the well-known constant
 // "_sn_content_index" (from the companion package) but the
@@ -106,9 +116,9 @@ func (a *AnacrolixPutter) PutInfohashPointer(ctx context.Context, salt []byte, i
 		return fmt.Errorf("dhtindex: salt %d bytes exceeds BEP-44 cap of 64", len(salt))
 	}
 	// Encode the value the same way subscribers will expect.
-	// Using a typed struct with a single "ih" field gives us
+	// Using a typed struct with stable field order gives us
 	// stable bencode output regardless of map iteration order.
-	v := bep46Pointer{IH: infohash[:]}
+	v := bep46Pointer{IH: infohash[:], TS: time.Now().Unix()}
 	encoded, err := bencode.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("dhtindex: marshal pointer: %w", err)
@@ -139,16 +149,39 @@ func (a *AnacrolixPutter) PutInfohashPointer(ctx context.Context, salt []byte, i
 // bep46Pointer is the typed shape of a BEP-46 mutable item value.
 // We use a struct so the bencoded output is deterministic and
 // matches whatever the M11d subscriber side will decode.
+//
+// The TS field is the publisher's wall-clock timestamp (Unix
+// seconds) at put time. Marked omitempty so values written by
+// pre-ts publishers round-trip cleanly through Marshal as
+// `{"ih": ...}` without a `ts: 0` entry that downgrades fresh
+// values back to "unknown freshness". Decoders that don't know
+// about ts simply ignore the extra dict entry — bencode is
+// extension-friendly that way.
 type bep46Pointer struct {
 	IH []byte `bencode:"ih"`
+	TS int64  `bencode:"ts,omitempty"`
 }
 
-// GetInfohashPointer is the matching read-side helper. Returns
-// the 20-byte infohash from a BEP-46 mutable item under
-// (pubkey, salt). Used by the M11d subscriber to discover
-// companion content indexes published by other nodes.
-func (a *AnacrolixGetter) GetInfohashPointer(ctx context.Context, pubkey [32]byte, salt []byte) ([20]byte, error) {
-	var zero [20]byte
+// PointerInfo is the decoded shape returned by
+// GetInfohashPointerInfo. TS is the publisher-asserted Unix-
+// seconds timestamp at publish time; zero means the publisher
+// did not include one (older publishers pre-dating the field).
+// Callers that only need the infohash should keep using
+// GetInfohashPointer; callers that want to detect stale
+// pointers reach for the *Info form.
+type PointerInfo struct {
+	InfoHash [20]byte
+	TS       int64
+}
+
+// GetInfohashPointerInfo is the freshness-aware read-side
+// helper. Returns the 20-byte infohash plus the publisher's
+// asserted timestamp from a BEP-46 mutable item under
+// (pubkey, salt). Used by the M11d subscriber and any
+// downstream policy that wants to detect a publisher that has
+// gone silent.
+func (a *AnacrolixGetter) GetInfohashPointerInfo(ctx context.Context, pubkey [32]byte, salt []byte) (PointerInfo, error) {
+	var zero PointerInfo
 	if len(salt) == 0 {
 		return zero, errors.New("dhtindex: empty salt")
 	}
@@ -164,9 +197,23 @@ func (a *AnacrolixGetter) GetInfohashPointer(ctx context.Context, pubkey [32]byt
 	if len(v.IH) != 20 {
 		return zero, fmt.Errorf("dhtindex: pointer ih has %d bytes, want 20", len(v.IH))
 	}
-	var out [20]byte
-	copy(out[:], v.IH)
+	out := PointerInfo{TS: v.TS}
+	copy(out.InfoHash[:], v.IH)
 	return out, nil
+}
+
+// GetInfohashPointer is the legacy read-side helper that returns
+// just the infohash. Kept as a thin wrapper around
+// GetInfohashPointerInfo so existing callers (companion
+// subscriber, fakes in test files) don't have to change. New
+// code that wants to surface staleness should use the *Info
+// form directly.
+func (a *AnacrolixGetter) GetInfohashPointer(ctx context.Context, pubkey [32]byte, salt []byte) ([20]byte, error) {
+	info, err := a.GetInfohashPointerInfo(ctx, pubkey, salt)
+	if err != nil {
+		return [20]byte{}, err
+	}
+	return info.InfoHash, nil
 }
 
 // Put implements Putter. It encodes the value, computes the BEP-44

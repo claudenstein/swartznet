@@ -85,6 +85,35 @@ LocalRecord sync was wired up in earlier commits so nodes do
 share records over the responder path; the engine attaches a
 RecordCache as both source and sink in `engine.New`.
 
+### Added — BEP-46 pointer carries publisher timestamp
+
+Companion-index pointers now include a `ts` field (publisher
+wall-clock Unix-seconds) alongside the existing `ih`
+infohash. Subscribers can use the timestamp to detect
+publishers that have gone silent (pointer hasn't been
+re-published in days/weeks) and apply policy — log a warning,
+deprioritize, drop the follow — instead of silently chasing a
+stale infohash.
+
+  - `internal/dhtindex/dht.go` — `bep46Pointer.TS int64`
+    field with `bencode:"ts,omitempty"`. PutInfohashPointer
+    sets it from `time.Now().Unix()`. New
+    `AnacrolixGetter.GetInfohashPointerInfo` returns
+    `PointerInfo{InfoHash, TS}`; the legacy
+    `GetInfohashPointer` is now a thin wrapper around it so
+    every existing caller (companion subscriber, all the
+    fakes in the test suite) keeps working without churn.
+  - `internal/dhtindex/pointer_ts_test.go` — round-trip,
+    omitempty-on-zero, legacy-decode tolerance, and
+    forward-compat (unknown-extra-key) tests lock in the wire
+    contract.
+
+Wire-compat is preserved by bencode's extension model:
+publishers without ts emit `{ih: ...}` (decoders treat TS=0
+as "unknown freshness, accept"); subscribers without ts
+support ignore the extra dict entry. No coordinated upgrade
+required; no BEP-44/46 spec violation.
+
 ### Fixed — `--no-index` cascades to disable Layer-D publishing
 
 `--no-index` was documented to "prevent Bleve from opening at
