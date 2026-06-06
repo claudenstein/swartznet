@@ -46,7 +46,7 @@ func cmdFiles(args []string, stdout, stderr io.Writer) int {
 
 func filesList(apiAddr, ihRaw string, asJSON bool, stdout, stderr io.Writer) int {
 	ih := strings.ToLower(strings.TrimSpace(ihRaw))
-	if len(ih) != 40 {
+	if !validInfoHash(ih) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}
@@ -99,7 +99,7 @@ func filesList(apiAddr, ihRaw string, asJSON bool, stdout, stderr io.Writer) int
 
 func filesSetPriority(apiAddr, ihRaw, idxRaw, priority string, stdout, stderr io.Writer) int {
 	ih := strings.ToLower(strings.TrimSpace(ihRaw))
-	if len(ih) != 40 {
+	if !validInfoHash(ih) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}

@@ -68,6 +68,19 @@ const DefaultRecordCacheMaxAge = 30 * 24 * time.Hour
 // cache current enough.
 const DefaultRecordCachePruneInterval = 1 * time.Hour
 
+// maxInboundSnSearchWorkers bounds the number of concurrent
+// goroutines the inbound sn_search LTEP callback may spawn to
+// service peer frames. Each accepted frame copies its payload and
+// runs swarmsearch.HandleMessage off the client read loop; without
+// a ceiling, a peer flooding sn_search frames would force one
+// goroutine + one payload allocation per frame before the
+// per-peer protocol-layer limiter is ever consulted. When the
+// semaphore is full, the frame is dropped (and logged at debug)
+// rather than queued, so remote input cannot translate into
+// unbounded transient goroutine/alloc churn. 256 is generous for
+// legitimate query concurrency across all peers on a desktop node.
+const maxInboundSnSearchWorkers = 256
+
 type Engine struct {
 	cfg      config.Config
 	client   *torrent.Client
@@ -94,6 +107,16 @@ type Engine struct {
 
 	maxActiveDownloads int   // 0 = unlimited (default). See queue.go.
 	nextQueueOrder     int64 // monotonic counter assigned to each new Handle
+
+	// promoteMu serializes the count-active-then-activate decision in
+	// queueOrActivate / promoteQueuedLocked. e.mu guards the handles
+	// map but is released between counting active downloads and
+	// flipping a handle's priorities, so without this lock N
+	// concurrent autoDownload goroutines (e.g. a batch RestoreSession)
+	// can each observe active < cap and all activate, transiently
+	// exceeding maxActiveDownloads. promoteMu is the single
+	// serialization point for that decision.
+	promoteMu sync.Mutex
 
 	// sess persists the list of open torrents and their state
 	// (paused / indexing / queue order) to <DataDir>/session.json
@@ -357,6 +380,25 @@ type Handle struct {
 	lastBytesWritten int64
 	lastDownloadRate int64
 	lastUploadRate   int64
+
+	// removed is closed by Engine.RemoveTorrent so per-handle
+	// background goroutines (e.g. autoConfirmOnComplete) can bail
+	// out promptly when the torrent is dropped, rather than
+	// lingering until completion or their long timeout fires.
+	// closeRemovedOnce guards the close so RemoveTorrent stays
+	// idempotent.
+	removed          chan struct{}
+	closeRemovedOnce sync.Once
+}
+
+// markRemoved closes the handle's removed channel exactly once.
+// No-op for handles constructed without a removed channel (e.g.
+// some unit-test fixtures), so it is always safe to call.
+func (h *Handle) markRemoved() {
+	if h.removed == nil {
+		return
+	}
+	h.closeRemovedOnce.Do(func() { close(h.removed) })
 }
 
 // SignedBy returns the ed25519 public key (64-char hex) that
@@ -681,6 +723,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// The payload slice is copied because anacrolix reuses the
 	// decoder's buffer across messages.
 	swarmLog := log
+	// Bounded admission control for inbound sn_search frames: a
+	// buffered semaphore caps concurrent handler goroutines so a
+	// peer flooding frames cannot spawn unbounded goroutines /
+	// payload copies before the per-peer protocol limiter inside
+	// HandleMessage runs. A full semaphore drops the frame.
+	snSearchSem := make(chan struct{}, maxInboundSnSearchWorkers)
 	tc.Callbacks.PeerConnReadExtensionMessage = append(
 		tc.Callbacks.PeerConnReadExtensionMessage,
 		func(ev torrent.PeerConnReadExtensionMessageEvent) {
@@ -690,11 +738,23 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 			}
 			peerAddr := ev.PeerConn.RemoteAddr.String()
 			pc := ev.PeerConn
+			// Admission control BEFORE copying the payload or
+			// spawning a goroutine: if every worker slot is taken,
+			// drop the frame instead of letting remote input drive
+			// unbounded goroutine/alloc growth.
+			select {
+			case snSearchSem <- struct{}{}:
+			default:
+				swarmLog.Debug("engine.swarm.inbound_dropped_overloaded",
+					"peer", peerAddr)
+				return
+			}
 			// Copy the payload: anacrolix's decoder buffer can be
 			// overwritten by the next message once we return from
 			// this callback.
 			payload := append([]byte(nil), ev.Payload...)
 			go func() {
+				defer func() { <-snSearchSem }()
 				reply := func(body []byte) error {
 					// Spawn ANOTHER goroutine for the write so
 					// the HandleMessage code path never blocks
@@ -1171,15 +1231,31 @@ func (e *Engine) AddTorrentFile(path string) (*Handle, error) {
 // inspecting the file list.
 //
 // Used by the M11d companion subscriber to fetch a content-index
-// torrent given only the infohash from a BEP-46 pointer.
-func (e *Engine) AddInfoHash(infoHash [20]byte) (*Handle, error) {
+// torrent given only the infohash from a BEP-46 pointer. Because
+// that infohash comes from an untrusted, unauthenticated BEP-46
+// pointer, a zero infohash is rejected up front (anacrolix's
+// AddTorrentInfoHashWithStorage runs a defensive panicif.Zero
+// check that would otherwise crash the daemon), and the client
+// call is wrapped in a recover() mirroring AddMagnetURI so no
+// pathological infohash can tear down the companion subscriber
+// goroutine.
+func (e *Engine) AddInfoHash(infoHash [20]byte) (h *Handle, err error) {
+	if infoHash == ([20]byte{}) {
+		return nil, errors.New("engine: zero infohash")
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			h = nil
+			err = fmt.Errorf("engine: AddInfoHash panic: %v", rec)
+		}
+	}()
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return nil, errors.New("engine: closed")
 	}
 	t, _ := e.client.AddTorrentInfoHash(metainfo.Hash(infoHash))
-	h := e.registerLocked(t)
+	h = e.registerLocked(t)
 	e.mu.Unlock()
 	e.persistAdd(h, "infohash", "", "")
 	go e.upgradeMagnetSession(h)
@@ -1381,6 +1457,15 @@ func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, dataParent string) (a
 // background goroutine that waits for torrent metadata and then indexes the
 // torrent-level document into the attached *indexer.Index, if any.
 func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
+	return e.registerLockedPaused(t, false)
+}
+
+// registerLockedPaused is registerLocked with an explicit initial
+// paused flag. The flag is applied to the new Handle BEFORE any
+// background goroutine is spawned, so autoDownload/queueOrActivate
+// observe the paused state and never flip a restored-paused
+// torrent's files to Normal priority. Callers must hold e.mu.
+func (e *Engine) registerLockedPaused(t *torrent.Torrent, paused bool) *Handle {
 	ih := t.InfoHash()
 	if h, ok := e.handles[ih]; ok {
 		// Duplicate add; return the existing handle. anacrolix/torrent itself
@@ -1395,6 +1480,8 @@ func (e *Engine) registerLocked(t *torrent.Torrent) *Handle {
 		fileSub:    startFileTracker(t, e.log),
 		indexing:   true,
 		queueOrder: e.nextQueueOrder,
+		paused:     paused,
+		removed:    make(chan struct{}),
 	}
 	e.handles[ih] = h
 	go e.autoDownload(h)
@@ -1636,27 +1723,29 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 		e.mu.Unlock()
 		return errors.New("engine: nil torrent after add")
 	}
-	h := e.registerLocked(t)
+	// Apply the paused flag at registration time, before any
+	// background goroutine spawns, so autoDownload never flips a
+	// restored-paused torrent's files to Normal priority (and
+	// there is no race window where anacrolix could begin
+	// requesting pieces before Disallow lands).
+	h := e.registerLockedPaused(t, entry.Paused)
 	if entry.SignedBy != "" {
 		h.signedBy = entry.SignedBy
 	}
 	if entry.QueueOrder > e.nextQueueOrder {
 		e.nextQueueOrder = entry.QueueOrder
 	}
-	e.mu.Unlock()
-
-	// Apply paused / indexing state without re-persisting (the
-	// session entry is already on disk in the desired shape).
-	h.indexMu.Lock()
-	h.indexing = entry.Indexing
-	h.indexMu.Unlock()
 	if entry.Paused {
-		h.pausedMu.Lock()
-		h.paused = true
-		h.pausedMu.Unlock()
 		h.T.DisallowDataDownload()
 		h.T.DisallowDataUpload()
 	}
+	e.mu.Unlock()
+
+	// Apply indexing state without re-persisting (the session
+	// entry is already on disk in the desired shape).
+	h.indexMu.Lock()
+	h.indexing = entry.Indexing
+	h.indexMu.Unlock()
 	h.queueMu.Lock()
 	h.queueOrder = entry.QueueOrder
 	h.queueMu.Unlock()
@@ -1748,6 +1837,16 @@ func (e *Engine) autoConfirmOnComplete(h *Handle) {
 	complete := h.T.Complete().On()
 	select {
 	case <-complete:
+	case <-h.removed:
+		// Torrent dropped via RemoveTorrent before completion:
+		// reclaim the goroutine instead of waiting on a torrent
+		// that no longer exists.
+		return
+	case <-e.bgCtx.Done():
+		// Engine shutdown: reclaim the goroutine promptly instead
+		// of lingering up to 24h. Mirrors the bgCtx-aware pattern
+		// used by verifyOnRestore and prune.
+		return
 	case <-time.After(24 * time.Hour):
 		// Long timeout: better to leak the goroutine than to hang
 		// forever waiting on a torrent that never completes.
@@ -2176,6 +2275,13 @@ func (e *Engine) ResumeTorrent(infoHashHex string) error {
 	h.T.AllowDataUpload()
 	e.log.Info("engine.torrent_resumed", "info_hash", infoHashHex)
 	e.persistState(h)
+	// Re-run activation now that the torrent is unpaused: while
+	// paused, autoDownload/activateDownload deliberately skipped the
+	// priority flip, so a torrent paused before metadata arrived (or
+	// restored paused) still has its files at None priority. This
+	// promotes it under the active-downloads cap and flips its files
+	// back to Normal.
+	go e.queueOrActivate(h)
 	return nil
 }
 
@@ -2217,7 +2323,10 @@ func (e *Engine) RemoveTorrent(infoHashHex string) error {
 		return err
 	}
 	// Tear down our subscriptions before dropping the underlying
-	// torrent so the goroutines exit cleanly.
+	// torrent so the goroutines exit cleanly. Closing h.removed
+	// also releases any per-handle background goroutine (e.g.
+	// autoConfirmOnComplete) waiting on completion.
+	h.markRemoved()
 	h.pieceSub.Close()
 	h.fileSub.Close()
 	h.T.Drop()

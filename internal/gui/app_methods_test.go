@@ -35,6 +35,13 @@ func TestAppSelectTabDispatchesByName(t *testing.T) {
 		{"status", 2}, {"Status", 2},
 		{"companion", 3}, {"Companion", 3},
 		{"settings", 4}, {"Settings", 4},
+		// Genuinely case-insensitive + whitespace-trimmed now: these
+		// previously fell through the two-spelling switch as no-ops.
+		{"DOWNLOADS", 0},
+		{"  search  ", 1},
+		{"\tStatus\n", 2},
+		{"CoMpAnIoN", 3},
+		{" SETTINGS ", 4},
 	}
 	for _, c := range cases {
 		a.SelectTab(c.name)

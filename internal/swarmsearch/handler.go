@@ -199,6 +199,27 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 	}
 }
 
+// Bounds on responder-side sync sessions. Without these a peer that
+// advertises BitSetReconciliation can open thousands of sessions
+// (each snapshots the local record set into a RIBLT encoder/decoder)
+// and never send sync_end, growing memory without bound and leaving
+// sessions in ambiguous limbo. The cap fails closed (excess
+// sync_begin frames are rejected and charged) and the reaper gives
+// every session a terminal path even when the initiator vanishes.
+const (
+	// MaxSyncSessionsPerPeer bounds concurrent responder sessions
+	// for a single peer. Legitimate clients run one session at a
+	// time; the small headroom tolerates a quick re-begin before
+	// the old session's sync_end is processed.
+	MaxSyncSessionsPerPeer = 4
+
+	// SyncSessionStaleAfter is how long a session may live without
+	// reaching sync_end before the reaper aborts it. Generous
+	// relative to a real reconciliation (sub-second on the default
+	// budget) so only abandoned sessions are collected.
+	SyncSessionStaleAfter = 2 * time.Minute
+)
+
 // handleSyncFrame is the dispatch hub for Aggregate sync-session
 // messages (msg_types 4..8 per SPEC §2). Every frame first clears
 // the capability gate — a peer that hasn't advertised
@@ -219,6 +240,15 @@ func (p *Protocol) handleSyncFrame(peerAddr string, hdr messageHeader, payload [
 		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "sync_without_cap")
 		return
 	}
+
+	// Lazy reaper: every inbound sync frame is a chance to collect
+	// this peer's abandoned sessions. This needs no background
+	// goroutine — a peer that stops talking simply stops touching
+	// its sessions, and they age out the next time *any* peer sends
+	// a frame on the same connection. We emit sync_end aborted for
+	// each reaped session so the (still-connected) initiator sees a
+	// terminal state rather than silence.
+	p.reapStaleSyncSessions(peerAddr, reply)
 
 	switch hdr.MsgType {
 	case MsgTypeSyncBegin:
@@ -265,6 +295,21 @@ func (p *Protocol) handleSyncFrame(peerAddr string, hdr messageHeader, payload [
 // converged (zero-record session — still correct wire behavior per
 // SPEC §2).
 func (p *Protocol) onSyncBegin(peerAddr string, m SyncBegin, reply ReplyFunc) {
+	// Fail closed on a flood of concurrent sessions. A
+	// well-behaved initiator runs one session at a time and tears
+	// it down with sync_end; a peer that blows past the cap is
+	// either buggy or hostile, so reject the new session and charge
+	// misbehavior rather than letting RIBLT state accumulate. Note:
+	// a re-begin on an existing txid replaces the old session and
+	// does not count against the cap.
+	if p.syncSessionCount(peerAddr, m.TxID) >= MaxSyncSessionsPerPeer {
+		p.log.Debug("swarmsearch.sync_begin.session_cap",
+			"peer", peerAddr, "txid", m.TxID, "cap", MaxSyncSessionsPerPeer)
+		p.sendReject(reply, peerAddr, m.TxID, RejectTooExpensive, "too_many_sessions")
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "sync_session_cap")
+		return
+	}
+
 	// Query the record source for records matching the peer's
 	// filter. A nil source or a nil-returning LocalRecords call
 	// is treated as "no records to share" — not an error.
@@ -501,6 +546,53 @@ func (p *Protocol) lookupSyncSession(peerAddr string, txid uint32) *SyncSession 
 	return nil
 }
 
+// syncSessionCount returns how many active sessions the peer has,
+// excluding `exclude` (the txid of a re-begin, which replaces rather
+// than adds to the live set). Used by onSyncBegin to enforce the
+// per-peer cap.
+func (p *Protocol) syncSessionCount(peerAddr string, exclude uint32) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	m, ok := p.syncSessions[peerAddr]
+	if !ok {
+		return 0
+	}
+	n := len(m)
+	if _, has := m[exclude]; has {
+		n--
+	}
+	return n
+}
+
+// reapStaleSyncSessions aborts and releases every session for the
+// given peer whose age exceeds SyncSessionStaleAfter. For each reaped
+// session a sync_end aborted frame is emitted on the supplied reply
+// closure so a still-connected initiator sees a terminal state. The
+// scan is cheap (MaxSyncSessionsPerPeer entries at most) and runs on
+// the read-loop goroutine alongside the rest of frame handling.
+func (p *Protocol) reapStaleSyncSessions(peerAddr string, reply ReplyFunc) {
+	now := time.Now()
+	var stale []*SyncSession
+	p.mu.Lock()
+	if m, ok := p.syncSessions[peerAddr]; ok {
+		for txid, sess := range m {
+			if now.Sub(sess.CreatedAt()) >= SyncSessionStaleAfter {
+				stale = append(stale, sess)
+				delete(m, txid)
+			}
+		}
+		if len(m) == 0 {
+			delete(p.syncSessions, peerAddr)
+		}
+	}
+	p.mu.Unlock()
+	for _, sess := range stale {
+		p.log.Debug("swarmsearch.sync_session.reaped",
+			"peer", peerAddr, "txid", sess.TxID())
+		p.sendSyncEnd(reply, sess.Finish(SyncStatusAborted))
+	}
+}
+
 // releaseSyncSession drops the session entry. No-op if absent.
 func (p *Protocol) releaseSyncSession(peerAddr string, txid uint32) {
 	p.mu.Lock()
@@ -559,7 +651,16 @@ func (p *Protocol) handleQuery(peerAddr string, payload []byte, reply ReplyFunc)
 	p.mu.RUnlock()
 
 	// Respect ShareLocal = 0: not serving queries.
-	if searcher == nil || caps.ShareLocal == 0 {
+	//
+	// ShareLocal = 1 is documented as "answer only for torrents in
+	// the current swarm", but the LocalSearcher abstraction has no
+	// swarm-membership filter — SearchLocal runs over the entire
+	// Bleve index. Serving it under ShareLocal = 1 would silently
+	// expose the whole index, the exact opposite of the operator's
+	// intent, so we fail closed and reject until a swarm-aware
+	// searcher exists. ShareLocal = 2 (the default) serves the full
+	// index as documented.
+	if searcher == nil || caps.ShareLocal == 0 || caps.ShareLocal == 1 {
 		p.sendReject(reply, peerAddr, q.TxID, RejectShuttingDown, "searcher_disabled")
 		return
 	}

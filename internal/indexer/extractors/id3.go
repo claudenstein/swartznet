@@ -69,6 +69,18 @@ func (e *ID3Extractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err
 		return nil, fmt.Errorf("id3: unsupported version 2.%d", majorVer)
 	}
 	tagSize := syncSafeInt(header[6:10])
+	// syncSafeInt yields up to a 28-bit value (~256 MiB). Pre-allocating
+	// make([]byte, 10+tagSize) from that unvalidated header field wastes
+	// memory on small files and is an amplification vector. Clamp to the
+	// read budget so we never allocate more than we could legitimately
+	// read. The 10-byte header was peeked (not consumed) and still counts
+	// against the LimitReader, so the readable remainder is maxBytes-10.
+	if tagSize < 0 {
+		return nil, fmt.Errorf("id3: negative tag size")
+	}
+	if remaining := maxBytes - 10; remaining > 0 && int64(tagSize) > remaining {
+		tagSize = int(remaining)
+	}
 	totalTagSize := 10 + tagSize
 	raw := make([]byte, totalTagSize)
 	if _, err := io.ReadFull(br, raw); err != nil {

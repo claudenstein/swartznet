@@ -88,14 +88,12 @@ func TestCompanionDoFollowAndUnfollow(t *testing.T) {
 	// contains non-hex characters.
 	ct.doFollow("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", "label")
 
-	// unfollowAt happy path: follow row 0 has a valid 64-char hex
-	// pubkey, hex.DecodeString succeeds, CompSub.Unfollow runs.
-	ct.unfollowAt(0)
+	// unfollowByKey happy path: a valid 64-char hex pubkey decodes,
+	// CompSub.Unfollow runs.
+	ct.unfollowByKey("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
 
-	// unfollowAt hex.DecodeString-err arm: CompSub non-nil but
-	// follow row has a non-hex pubkey, so DecodeString fails and
-	// the function returns silently before calling Unfollow.
-	ct.follows = append(ct.follows, followRow{pubkey: "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"})
-	ct.unfollowAt(len(ct.follows) - 1)
+	// unfollowByKey hex.DecodeString-err arm: CompSub non-nil but
+	// the key is non-hex, so DecodeString fails and the function
+	// returns silently before calling Unfollow.
+	ct.unfollowByKey("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ")
 }
-

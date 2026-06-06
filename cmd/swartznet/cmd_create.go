@@ -78,12 +78,17 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	// BEFORE spinning up the engine so a bad key path fails fast
 	// without starting piece hashing.
 	if sign {
-		cfg := config.Default()
-		path := identityPath
-		if path == "" {
-			path = cfg.IdentityPath
+		// An explicit --identity is load-only: a missing file is an
+		// error, never a trigger to mint a new (untrusted) key that
+		// would orphan the signed .torrent. Only the default path may
+		// auto-create.
+		var id *identity.Identity
+		var err error
+		if identityPath == "" {
+			id, err = identity.LoadOrCreate(config.Default().IdentityPath)
+		} else {
+			id, err = loadIdentityNoCreate(identityPath)
 		}
-		id, err := identity.LoadOrCreate(path)
 		if err != nil {
 			return reportRunErr(fmt.Errorf("load identity: %w", err), stderr)
 		}
@@ -136,6 +141,10 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 		ctx, cancel := signalContext(context.Background())
 		defer cancel()
 		<-ctx.Done()
+		// Map signal cancellation to exit 130, consistent with cmdAdd,
+		// so scripts can distinguish an interrupted seed from a clean
+		// exit by exit code.
+		return reportRunErr(ctx.Err(), stderr)
 	}
 	return exitOK
 }

@@ -15,6 +15,87 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Fixed — Whole-codebase review hardening pass (55 findings)
+
+A multi-package review swept every subsystem and produced 55
+confirmed, adversarially-verified findings; all are fixed here,
+each with a regression test (except pure-comment nits). No
+on-wire bytes changed and Layer L/S/D isolation is preserved,
+so the mainline-compat matrix stays green.
+
+Untrusted-input availability (remote DoS, were unauthenticated):
+
+  - `engine`: reject a zero infohash decoded from an untrusted
+    BEP-46 pointer before it reaches `AddTorrentInfoHash`
+    (`panicif.Zero` crash); the add path now recovers like
+    `AddMagnetURI`.
+  - `indexer/extractors`: the subtitle extractor now honours
+    `maxBytes` (was ignored → multi-GB `.srt` OOM); MKV element
+    sizes are bounded before allocation (untrusted EBML VINT →
+    multi-GB `make`); `readFull` enforces a 64 MiB ceiling.
+  - `indexer/extractors`: ZIP/XML/PDF extractors (docx, odt,
+    odp, pptx, epub, pdf, htmltext) now cap *decompressed*
+    output, not just compressed input, closing zip-bomb
+    amplification; ID3 `tagSize` is clamped to the read budget.
+  - `companion`: the B-tree reader requires strictly-downward,
+    increasing, in-range child indices plus a depth budget,
+    visited-set and leaf cap — a self/back-pointing or
+    DAG-shaped page no longer recurses into stack overflow.
+  - `swarmsearch`: responder sync sessions are bounded per peer
+    with a staleness reaper that emits `sync_end` aborted, so an
+    abandoned session reaches a terminal state instead of
+    lingering forever (unbounded-memory DoS).
+  - `dhtindex` / `indexer`: DHT value decode and infohash→query
+    paths are size-bounded / structured (no `QueryString`
+    interpolation), matching the encode-side caps.
+
+Fail-open on state-changing steps (deterministic-layer rules):
+
+  - `dhtindex`: a publish that reached zero DHT nodes no longer
+    counts as success (the rate-limiter then suppressed retry
+    for ~55m); `MarkPublished`/`LastPublished` require ≥1
+    confirmed node. Manifest size estimates reserve the
+    timestamp width so a near-cap entry can actually publish.
+  - `cli`: explicit `--key`/`--identity` paths are load-only and
+    error on a missing file instead of silently minting a new
+    identity; `defaultIdentityPath` honours `XDG_DATA_HOME`;
+    `--dht-insecure`/`--regtest` are gated; `config.Validate`
+    fails closed on those flags outside tests.
+  - `daemon`: the companion publisher writes to `CompanionDir`
+    (was `DataDir`, silently ignoring the setting); the
+    anchor-fetch goroutine is cancel-tracked and joined on
+    `Close`; HTTPS bootstrap rejects non-`https` URLs.
+  - `engine`: a restored *paused* torrent no longer flips its
+    files to Normal priority on activation.
+
+Concurrency, correctness & identity:
+
+  - `indexer`: the extract watchdog now runs `Extract` against a
+    hard deadline so a wedged extractor fails the file instead
+    of pinning a worker forever; `deleteByQueryLocked` is
+    bounded; `Stats.CorpusTextBytes` no longer truncates past
+    64k content docs; `AllTorrentDocs` preserves `SignedBy`.
+  - `swarmsearch`: RIBLT symbol `Index` is validated (a dropped
+    frame aborts instead of silently desyncing); `ShareLocal==1`
+    fails closed; `StartFeeler` is idempotent; misbehavior
+    scores are charged; `mergeResponses` dedups per peer.
+  - `security`: seed-list pubkeys are normalised (uppercase hex
+    seeds now get the bonus); a corrupt Bloom header with
+    `m==0` is rejected instead of panicking; Bloom double-hash
+    forces an odd stride (Kirsch-Mitzenmacher); a loaded key's
+    public half is re-derived from its seed and verified.
+  - `gui`: follow rows are sorted deterministically and the
+    context menu keys off pubkey, not row index, so Unfollow no
+    longer targets the wrong publisher; the file-priority
+    `Select` no longer re-fires `OnChanged` on recycle; startup
+    no longer fires false "Download complete" toasts for
+    already-seeding torrents.
+  - `httpapi`: mutating endpoints reject cross-origin / non-loopback
+    `Origin`/`Referer` and validate `Host` (CSRF / DNS-rebinding
+    defense); non-loopback binds are refused without an explicit
+    opt-in; client-supplied search timeouts are clamped;
+    `handleStatus` populates the publisher pubkey.
+
 ### Added — "Aggregate" distributed-layer redesign
 
 A multi-commit series inverts Layer-D from per-keyword BEP-44

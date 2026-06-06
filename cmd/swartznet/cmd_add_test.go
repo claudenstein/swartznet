@@ -44,6 +44,39 @@ func TestCmdAddDaemonNewErr(t *testing.T) {
 	}
 }
 
+// TestCmdAddUnsafeFlagsGated covers the SWARTZNET_UNSAFE gate on the
+// testing-only --regtest / --dht-insecure flags. Without the opt-in
+// env var, cmdAdd must refuse (exitUsage) so a copy-pasted testbed
+// command can't silently weaken a mainnet node's Sybil resistance.
+func TestCmdAddUnsafeFlagsGated(t *testing.T) {
+	cases := []struct {
+		name string
+		flag string
+		want string
+	}{
+		{"regtest", "--regtest", "--regtest is a testing-only flag"},
+		{"dht-insecure", "--dht-insecure", "--dht-insecure disables BEP-42"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SWARTZNET_UNSAFE", "")
+			var stdout, stderr bytes.Buffer
+			code := cmdAdd([]string{
+				tc.flag,
+				"--no-dht",
+				"--api-addr", "",
+				"magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
+			}, &stdout, &stderr)
+			if code != exitUsage {
+				t.Errorf("%s without opt-in exit = %d, want exitUsage", tc.flag, code)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("stderr = %q, want it to mention %q", stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
 // TestCmdAddBadFlag covers cmdAdd's `fs.Parse` err arm.
 func TestCmdAddBadFlag(t *testing.T) {
 	t.Parallel()

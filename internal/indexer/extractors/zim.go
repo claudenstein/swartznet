@@ -2,6 +2,7 @@ package extractors
 
 import (
 	"bytes"
+	"container/list"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -91,14 +92,14 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 		articleCount = zimDefaultMaxArticles
 	}
 
-	// Keyed cache of decompressed clusters so multiple articles
-	// sharing one cluster only pay decompression once. Bounded by
-	// count, evicting half the entries when full — random eviction,
-	// not LRU, since the URL pointer list is roughly cluster-sorted
-	// in practice and adjacent articles tend to live in the same
-	// cluster.
-	clusterCache := make(map[uint32][]byte)
+	// LRU cache of decompressed clusters so multiple articles sharing
+	// one cluster only pay decompression once. True LRU (container/list
+	// + map) rather than random eviction: the URL pointer list is only
+	// *roughly* cluster-sorted, so evicting the genuinely least-recently
+	// used cluster avoids the thrash a random "drop half" policy can
+	// cause when the working set straddles the cache boundary.
 	const cacheCap = 32
+	clusterCache := newClusterLRU(cacheCap)
 
 	var (
 		chunks  []Chunk
@@ -123,23 +124,13 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 			continue
 		}
 
-		cluster, ok := clusterCache[entry.ClusterNum]
+		cluster, ok := clusterCache.get(entry.ClusterNum)
 		if !ok {
 			cluster, err = readZimCluster(ra, hdr, entry.ClusterNum)
 			if err != nil {
 				continue
 			}
-			if len(clusterCache) >= cacheCap {
-				dropped := 0
-				for k := range clusterCache {
-					delete(clusterCache, k)
-					dropped++
-					if dropped >= cacheCap/2 {
-						break
-					}
-				}
-			}
-			clusterCache[entry.ClusterNum] = cluster
+			clusterCache.put(entry.ClusterNum, cluster)
 		}
 
 		blob, err := getZimBlob(cluster, entry.BlobNum)
@@ -154,6 +145,60 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 		emitted += int64(len(text))
 	}
 	return chunks, nil
+}
+
+// clusterLRU is a tiny least-recently-used cache of decompressed ZIM
+// clusters keyed by cluster number. It is single-goroutine only (one
+// per Extract call) so it needs no locking. Capacity is fixed at
+// construction; the least-recently-accessed entry is evicted when full.
+type clusterLRU struct {
+	cap   int
+	ll    *list.List // front = most recently used
+	items map[uint32]*list.Element
+}
+
+// clusterLRUEntry is the value stored in each list element.
+type clusterLRUEntry struct {
+	key  uint32
+	data []byte
+}
+
+func newClusterLRU(capacity int) *clusterLRU {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &clusterLRU{
+		cap:   capacity,
+		ll:    list.New(),
+		items: make(map[uint32]*list.Element, capacity),
+	}
+}
+
+// get returns the cached cluster and marks it most-recently-used.
+func (c *clusterLRU) get(key uint32) ([]byte, bool) {
+	el, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	c.ll.MoveToFront(el)
+	return el.Value.(*clusterLRUEntry).data, true
+}
+
+// put inserts a cluster, evicting the least-recently-used entry if the
+// cache is at capacity. A repeat key refreshes the existing entry.
+func (c *clusterLRU) put(key uint32, data []byte) {
+	if el, ok := c.items[key]; ok {
+		el.Value.(*clusterLRUEntry).data = data
+		c.ll.MoveToFront(el)
+		return
+	}
+	if c.ll.Len() >= c.cap {
+		if oldest := c.ll.Back(); oldest != nil {
+			c.ll.Remove(oldest)
+			delete(c.items, oldest.Value.(*clusterLRUEntry).key)
+		}
+	}
+	c.items[key] = c.ll.PushFront(&clusterLRUEntry{key: key, data: data})
 }
 
 // zimHeader is the parsed 80-byte file header.
@@ -442,7 +487,7 @@ func zimIsExtractableMime(m string) bool {
 // returned as-is (trimmed).
 func zimDecodeArticle(blob []byte, mime string) string {
 	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "application/xhtml") {
-		text, err := extractHTMLText(bytes.NewReader(blob))
+		text, err := extractHTMLText(bytes.NewReader(blob), zimMaxClusterBytes)
 		if err != nil {
 			return ""
 		}

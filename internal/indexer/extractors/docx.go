@@ -75,7 +75,7 @@ func (e *DOCXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 	}
 	defer rc.Close()
 
-	text, err := extractDocumentText(rc)
+	text, err := extractDocumentText(rc, maxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +104,10 @@ func findDocumentXML(zr *zip.Reader) *zip.File {
 // Implementation note: we use a token-based decoder rather than
 // xml.Unmarshal so a malformed run inside a giant document does
 // not cause us to allocate a full DOM tree.
-func extractDocumentText(r io.Reader) (string, error) {
+func extractDocumentText(r io.Reader, maxOut int64) (string, error) {
+	if maxOut <= 0 {
+		maxOut = defaultTextOutputCap
+	}
 	dec := xml.NewDecoder(r)
 	dec.Strict = false
 	// Permit unknown character entities; some Word docs include
@@ -118,6 +121,12 @@ func extractDocumentText(r io.Reader) (string, error) {
 	)
 
 	for {
+		// Output guard: a zip-bomb DOCX can amplify a tiny compressed
+		// input into gigabytes of <w:t> text. Stop accumulating once
+		// we cross the budget and return the partial result.
+		if int64(out.Len()) > maxOut {
+			break
+		}
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break

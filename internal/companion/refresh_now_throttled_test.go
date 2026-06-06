@@ -52,9 +52,9 @@ func TestRefreshNowThrottlesAfterRecentRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Forge lastRefresh to "just now" to trip the throttle.
+	// Forge lastAttempt to "just now" to trip the throttle.
 	p.mu.Lock()
-	p.lastRefresh = time.Now()
+	p.lastAttempt = time.Now()
 	p.mu.Unlock()
 
 	if err := p.RefreshNow(); err != ErrTooSoon {

@@ -61,13 +61,14 @@ const (
 	// records; counted as Severe.
 	ScoreBadRecordSig = 20
 
-	// ScoreInsufficientPoW is charged for a record whose hashcash
-	// nonce doesn't meet the publisher's declared MinPoWBits.
-	// Indicates the peer is either running an older build that
-	// doesn't mint PoW or is deliberately shipping unbound
-	// records. Medium severity — one mistake isn't ban-worthy,
-	// persistent drip is.
-	ScoreInsufficientPoW = 10
+	// NOTE: PoW enforcement is not a swarmsearch-layer concern.
+	// sync_records carries each record's hashcash nonce, but the
+	// declared MinPoWBits threshold and the hashcash check live in
+	// the record sink (companion/dhtindex), per the RecordSink
+	// contract in protocol.go. There is therefore no
+	// ScoreInsufficientPoW charge in this package — the sink drops
+	// under-PoW records on its own. Adding the constant here would
+	// imply an enforcement point that does not exist at this layer.
 
 	// BanThreshold is the score at which a peer is banned.
 	// Matches Bitcoin Core's DISCOURAGEMENT_THRESHOLD of 100.

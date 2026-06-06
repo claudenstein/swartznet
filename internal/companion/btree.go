@@ -267,14 +267,19 @@ func EncodeInterior(kind PageKind, level uint8, children []InteriorChild, pageSi
 	payload.Write(numBuf[:])
 
 	for i, c := range children {
-		if i == 0 && len(c.Separator) != 0 {
-			// The first child's separator is implicitly empty
-			// (records less than the second child's separator
-			// belong here). Writers MAY still emit it for clarity.
+		sep := c.Separator
+		if i == 0 {
+			// The first child's separator is implicitly empty / -∞
+			// (records below the second child's separator belong
+			// here), and the reader treats it as such. Force it empty
+			// so a caller that passes a non-empty first separator can
+			// never produce a page whose first child carries a real
+			// lower bound.
+			sep = nil
 		}
-		n := binary.PutUvarint(lenBuf[:], uint64(len(c.Separator)))
+		n := binary.PutUvarint(lenBuf[:], uint64(len(sep)))
 		payload.Write(lenBuf[:n])
-		payload.Write(c.Separator)
+		payload.Write(sep)
 		var idx [4]byte
 		binary.LittleEndian.PutUint32(idx[:], c.ChildIndex)
 		payload.Write(idx[:])

@@ -6,6 +6,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -17,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/swartznet/swartznet/internal/daemon"
+	"github.com/swartznet/swartznet/internal/engine"
 )
 
 // App holds the Fyne application, main window, and daemon reference.
@@ -377,42 +379,75 @@ func (a *App) titleLoop(ctx context.Context) {
 func (a *App) notificationLoop(ctx context.Context) {
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
+	// primed tracks whether we've completed the first poll. On that
+	// first poll we record every already-seeding torrent into
+	// lastNotified WITHOUT notifying — those torrents finished in a
+	// previous session (restored from saved state), so emitting a
+	// "Download complete" toast for each on startup would be a false
+	// positive. Only torrents observed transitioning into "seeding"
+	// during a later poll fire a notification.
+	primed := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 			snaps := a.daemon.Eng.TorrentSnapshots()
-			for _, s := range snaps {
-				if s.Status == "seeding" && !a.lastNotified[s.InfoHash] {
-					a.lastNotified[s.InfoHash] = true
-					a.fyne.SendNotification(&fyne.Notification{
-						Title:   "Download complete",
-						Content: s.Name,
-					})
-				}
+			for _, n := range a.pollNotifications(snaps, primed) {
+				a.fyne.SendNotification(n)
 			}
+			primed = true
 		}
 	}
 }
 
-// SelectTab switches the AppTabs to the named tab. Case-insensitive.
-// Unknown names are silently ignored. Useful for --tab startup
-// flag and for screenshots.
+// pollNotifications inspects one poll's worth of torrent snapshots
+// and returns the notifications that should be emitted this tick. It
+// mutates a.lastNotified to record every newly-seeding torrent so it
+// is not notified twice. When primed is false (the first poll) it
+// records already-seeding torrents WITHOUT returning notifications —
+// those were restored from a previous session and never "completed"
+// this run. Extracted from notificationLoop so the prime-on-first-
+// poll behaviour is deterministically testable without a live
+// seeding torrent.
+func (a *App) pollNotifications(snaps []engine.TorrentSnapshot, primed bool) []*fyne.Notification {
+	var out []*fyne.Notification
+	for _, s := range snaps {
+		if s.Status != "seeding" || a.lastNotified[s.InfoHash] {
+			continue
+		}
+		a.lastNotified[s.InfoHash] = true
+		if !primed {
+			// First-poll prime: seed the map silently.
+			continue
+		}
+		out = append(out, &fyne.Notification{
+			Title:   "Download complete",
+			Content: s.Name,
+		})
+	}
+	return out
+}
+
+// SelectTab switches the AppTabs to the named tab. The name is
+// matched case-insensitively after trimming surrounding whitespace,
+// so "Downloads", "downloads", "  DOWNLOADS " all resolve to the
+// same tab. Unknown names are silently ignored. Useful for the
+// --tab startup flag and for screenshots.
 func (a *App) SelectTab(name string) {
 	if a.tabs == nil {
 		return
 	}
-	switch name {
-	case "downloads", "Downloads":
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "downloads":
 		a.tabs.SelectIndex(0)
-	case "search", "Search":
+	case "search":
 		a.tabs.SelectIndex(1)
-	case "status", "Status":
+	case "status":
 		a.tabs.SelectIndex(2)
-	case "companion", "Companion":
+	case "companion":
 		a.tabs.SelectIndex(3)
-	case "settings", "Settings":
+	case "settings":
 		a.tabs.SelectIndex(4)
 	}
 }

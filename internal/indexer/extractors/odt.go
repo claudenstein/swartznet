@@ -65,7 +65,7 @@ func (e *ODTExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err
 	}
 	defer rc.Close()
 
-	text, err := extractODTText(rc)
+	text, err := extractODTText(rc, maxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,10 @@ func findODTContentXML(zr *zip.Reader) *zip.File {
 //
 // Style/font/automatic-style elements are skipped because they
 // can contain noise like font names embedded as character data.
-func extractODTText(r io.Reader) (string, error) {
+func extractODTText(r io.Reader, maxOut int64) (string, error) {
+	if maxOut <= 0 {
+		maxOut = defaultTextOutputCap
+	}
 	dec := xml.NewDecoder(r)
 	dec.Strict = false
 	dec.Entity = xml.HTMLEntity
@@ -110,6 +113,11 @@ func extractODTText(r io.Reader) (string, error) {
 	)
 
 	for {
+		// Output guard against zip-bomb amplification: stop once the
+		// accumulated body text crosses the budget.
+		if int64(out.Len()) > maxOut {
+			break
+		}
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break

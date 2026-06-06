@@ -46,7 +46,7 @@ func cmdFlagOrConfirm(name, endpoint string, args []string, stdout, stderr io.Wr
 		return exitUsage
 	}
 	infoHash := strings.ToLower(strings.TrimSpace(fs.Arg(0)))
-	if len(infoHash) != 40 {
+	if !validInfoHash(infoHash) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}

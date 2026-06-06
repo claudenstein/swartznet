@@ -485,10 +485,17 @@ func (w *SubscriberWorker) runOnce(ctx context.Context) {
 		}
 		res := w.sub.Sync(ctx, pub)
 		w.mu.Lock()
+		// Re-check membership under the lock: an Unfollow(pub) that
+		// raced this (slow) Sync already deleted lastSync[pub], so
+		// re-inserting here would resurrect a result for a publisher
+		// we no longer follow. Drop the result in that case.
+		//
 		// If the publisher's snapshot timestamp matches the
 		// last imported one, we still record the run but don't
 		// double-count it as new content.
-		w.lastSync[pub] = res
+		if _, ok := w.follows[pub]; ok {
+			w.lastSync[pub] = res
+		}
 		w.mu.Unlock()
 	}
 	w.mu.Lock()

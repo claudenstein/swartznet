@@ -65,6 +65,11 @@ func (e *PPTXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 
 	var out strings.Builder
 	for i, slide := range slides {
+		// Output guard against zip-bomb amplification: stop opening
+		// further slides once the accumulated text crosses the budget.
+		if int64(out.Len()) > maxBytes {
+			break
+		}
 		if i > 0 {
 			out.WriteString("\n\n")
 		}
@@ -72,7 +77,7 @@ func (e *PPTXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 		if err != nil {
 			return nil, fmt.Errorf("pptx: open %s: %w", slide.Name, err)
 		}
-		text, err := extractDrawingMLText(rc)
+		text, err := extractDrawingMLText(rc, maxBytes)
 		rc.Close()
 		if err != nil {
 			return nil, err
@@ -125,7 +130,10 @@ func slideOrderKey(name string) string {
 // returns the text content of every <a:t> element. Text runs
 // inside different shapes are separated by newlines so bullet
 // lists and slide titles don't collapse into run-on sentences.
-func extractDrawingMLText(r io.Reader) (string, error) {
+func extractDrawingMLText(r io.Reader, maxOut int64) (string, error) {
+	if maxOut <= 0 {
+		maxOut = defaultTextOutputCap
+	}
 	dec := xml.NewDecoder(r)
 	dec.Strict = false
 	dec.Entity = xml.HTMLEntity
@@ -138,6 +146,10 @@ func extractDrawingMLText(r io.Reader) (string, error) {
 	)
 
 	for {
+		// Output guard against zip-bomb amplification.
+		if int64(out.Len()) > maxOut {
+			break
+		}
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break

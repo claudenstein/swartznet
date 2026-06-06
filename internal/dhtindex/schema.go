@@ -16,8 +16,10 @@ const MaxSaltBytes = 64
 
 // MaxValueBytes is the BEP-44 hard cap on the bencoded `v` field
 // of a mutable item. The publisher rejects any KeywordValue whose
-// encoded form exceeds this size; the manifest splits across shards
-// to keep individual values under the cap.
+// encoded form exceeds this size. To stay under the cap the manifest
+// evicts the oldest hit from an entry (Manifest.AddHit); multi-shard
+// spill is reserved scaffolding (see KeywordValue.More) and is not
+// yet wired into the publish/lookup paths.
 const MaxValueBytes = 1000
 
 // KeywordValue is the bencoded payload stored at the DHT target
@@ -37,9 +39,17 @@ type KeywordValue struct {
 	// the keyword.
 	Hits []KeywordHit `bencode:"hits"`
 
-	// More is 1 if there are additional shards beyond this one,
-	// stored at salts of the form "<keyword>#1", "<keyword>#2", …
-	// Searchers fetch shard 0 first, then fan out to the rest.
+	// More is reserved for a future multi-shard scheme: when set to
+	// 1 it would signal additional shards stored at salts of the form
+	// "<keyword>#1", "<keyword>#2", … (see SaltForShard), with
+	// searchers fetching shard 0 first then fanning out.
+	//
+	// As of v1 this is NOT implemented: the publisher never sets More
+	// and never writes shard 1+, and Lookup never follows it. Oversize
+	// entries are bounded by evicting the oldest hit (Manifest.AddHit),
+	// not by spilling into a new shard. The field ships on the wire
+	// (omitted while zero) and SaltForShard stays exported so the
+	// spill/redundancy scheme can be added without a format bump.
 	More int `bencode:"more,omitempty"`
 
 	// NextPubKey is an optional 32-byte ed25519 public key, signed
@@ -93,9 +103,19 @@ func EncodeValue(v KeywordValue) ([]byte, error) {
 }
 
 // DecodeValue parses a bencoded KeywordValue retrieved from the DHT.
+// This is one of the only places the package ingests untrusted remote
+// bytes, so it mirrors the encode-side cap: a BEP-44-conforming node
+// stores at most MaxValueBytes, but a non-conforming or malicious node
+// can return up to the UDP datagram limit (~64 KiB). Reject anything
+// over the cap before unmarshalling so a hostile value cannot drive an
+// oversized Hits allocation.
 func DecodeValue(payload []byte) (KeywordValue, error) {
 	if len(payload) == 0 {
 		return KeywordValue{}, errors.New("dhtindex: empty value")
+	}
+	if len(payload) > MaxValueBytes {
+		return KeywordValue{}, fmt.Errorf("dhtindex: value %d bytes exceeds BEP-44 cap %d",
+			len(payload), MaxValueBytes)
 	}
 	var v KeywordValue
 	if err := bencode.Unmarshal(payload, &v); err != nil {
@@ -105,9 +125,20 @@ func DecodeValue(payload []byte) (KeywordValue, error) {
 }
 
 // EstimateValueSize returns how many bytes the bencoded form of v
-// will take. Used by the manifest to decide when to spill into a
-// new shard before hitting the MaxValueBytes ceiling.
+// will take at publish time. Used by the manifest's eviction loop to
+// keep an entry under the MaxValueBytes ceiling.
+//
+// EncodeValue overwrites a zero Ts with time.Now().Unix() (a 10-digit
+// value, "tsi1700000000e", ~16 bytes) right before the put. If the
+// estimate marshalled with Ts==0 ("tsi0e", 7 bytes) the manifest could
+// believe a near-cap entry fits while the live encode pushes it over
+// MaxValueBytes, making EncodeValue fail and the keyword unpublishable.
+// So we account for the live timestamp width here by stamping a
+// representative non-zero Ts before marshalling.
 func EstimateValueSize(v KeywordValue) int {
+	if v.Ts == 0 {
+		v.Ts = time.Now().Unix()
+	}
 	out, err := bencode.Marshal(v)
 	if err != nil {
 		// On the rare encoding failure (which would be a programmer
@@ -135,6 +166,9 @@ func SaltForKeyword(keyword string) ([]byte, error) {
 // SaltForShard returns the salt for shard N of a keyword. Shard 0
 // uses the bare keyword (so existing readers find it), shards 1+
 // append "#<n>".
+//
+// Reserved for the future multi-shard scheme described on
+// KeywordValue.More; the v1 publish/lookup paths only use shard 0.
 func SaltForShard(keyword string, shard int) ([]byte, error) {
 	if shard == 0 {
 		return SaltForKeyword(keyword)

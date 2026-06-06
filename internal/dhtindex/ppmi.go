@@ -124,6 +124,13 @@ func DecodePPMI(payload []byte) (PPMIValue, error) {
 	if len(payload) == 0 {
 		return PPMIValue{}, errors.New("dhtindex: empty PPMI value")
 	}
+	// Mirror the encode-side cap before unmarshalling: a malicious or
+	// non-conforming node can return up to the UDP datagram limit
+	// (~64 KiB), well past the BEP-44 storage cap this package writes.
+	if len(payload) > MaxPPMIValueBytes {
+		return PPMIValue{}, fmt.Errorf("dhtindex: PPMI value %d bytes exceeds BEP-44 cap %d",
+			len(payload), MaxPPMIValueBytes)
+	}
 	var v PPMIValue
 	if err := bencode.Unmarshal(payload, &v); err != nil {
 		return v, fmt.Errorf("dhtindex: decode PPMI: %w", err)

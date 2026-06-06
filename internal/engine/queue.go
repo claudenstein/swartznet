@@ -94,6 +94,17 @@ func (e *Engine) countActiveDownloads() int {
 // Callers who just finished creating a Handle can invoke this
 // instead of calling autoDownload's SetPriority path directly.
 func (e *Engine) queueOrActivate(h *Handle) {
+	if h.IsPaused() {
+		// A paused torrent occupies no download slot and must not
+		// have its priorities flipped. Resume re-runs activation.
+		return
+	}
+	// Serialize the count-then-activate decision so concurrent
+	// callers (e.g. a batch RestoreSession's per-handle autoDownload
+	// goroutines) cannot all observe active < cap and over-subscribe.
+	e.promoteMu.Lock()
+	defer e.promoteMu.Unlock()
+
 	e.mu.Lock()
 	cap := e.maxActiveDownloads
 	e.mu.Unlock()
@@ -120,7 +131,18 @@ func (e *Engine) queueOrActivate(h *Handle) {
 // activateDownload flips every file in a handle's torrent to
 // Normal priority, matching autoDownload's default. Called from
 // queueOrActivate and from promoteQueued.
+//
+// A paused handle is never activated: a torrent the user explicitly
+// paused (including one restored paused from a previous session)
+// must keep its files at None priority and must not start
+// requesting pieces. ResumeTorrent re-runs activation to flip
+// priorities back on.
 func activateDownload(h *Handle) {
+	if h.IsPaused() {
+		// Leave queued state untouched so a later Resume can
+		// promote it; do not flip priorities on a paused torrent.
+		return
+	}
 	h.setQueued(false)
 	if h.T.Info() == nil {
 		// Metadata not here yet; autoDownload goroutine will
@@ -137,6 +159,11 @@ func activateDownload(h *Handle) {
 // whenever a slot might have opened up (pause, complete, remove,
 // cap raised).
 func (e *Engine) promoteQueuedLocked() {
+	// Share the single serialization point with queueOrActivate so
+	// the count-then-activate decision is globally atomic.
+	e.promoteMu.Lock()
+	defer e.promoteMu.Unlock()
+
 	e.mu.Lock()
 	cap := e.maxActiveDownloads
 	handles := make([]*Handle, 0, len(e.handles))

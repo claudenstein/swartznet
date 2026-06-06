@@ -170,8 +170,11 @@ func (c *Cluster) spawnDHTNode(t *testing.T, idx int, bootstraps []string) *Node
 		t.Fatalf("testlab: spawn DHT node %d: %v", idx, err)
 	}
 
-	bleveDir := filepath.Join(root, "bleve-idx")
-	index, err := indexer.Open(bleveDir)
+	// Open the index at cfg.IndexDir so Node.IndexDir reports the
+	// directory the Bleve index actually lives in. See spawnNode
+	// for the rationale (engine.New never opens cfg.IndexDir; the
+	// shared path just keeps the reported location honest).
+	index, err := indexer.Open(cfg.IndexDir)
 	if err != nil {
 		eng.Close()
 		t.Fatalf("testlab: open index DHT node %d: %v", idx, err)

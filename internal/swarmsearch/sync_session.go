@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // SyncRole identifies which side of a session this is.
@@ -72,12 +73,13 @@ type LocalRecord struct {
 // the RIBLTDecoder's internal map races against the caller's
 // NeedIDs/Added reads.
 type SyncSession struct {
-	mu      sync.Mutex
-	txid    uint32
-	role    SyncRole
-	phase   SyncSessionPhase
-	filter  SyncFilter
-	records map[[32]byte]LocalRecord // indexed by RIBLT element ID
+	mu        sync.Mutex
+	txid      uint32
+	role      SyncRole
+	phase     SyncSessionPhase
+	filter    SyncFilter
+	createdAt time.Time                // set at construction; drives the staleness reaper
+	records   map[[32]byte]LocalRecord // indexed by RIBLT element ID
 
 	enc *RIBLTEncoder
 	dec *RIBLTDecoder
@@ -116,6 +118,7 @@ func NewSyncSession(txid uint32, role SyncRole, records []LocalRecord) *SyncSess
 		txid:       txid,
 		role:       role,
 		phase:      PhaseIdle,
+		createdAt:  time.Now(),
 		records:    idx,
 		enc:        enc,
 		dec:        dec,
@@ -123,6 +126,11 @@ func NewSyncSession(txid uint32, role SyncRole, records []LocalRecord) *SyncSess
 		maxBytes:   DefaultSyncMaxBytes,
 	}
 }
+
+// CreatedAt reports when the session was constructed. Immutable
+// after construction; no lock required. The handler's staleness
+// reaper compares this against SyncSessionStaleAfter.
+func (s *SyncSession) CreatedAt() time.Time { return s.createdAt }
 
 // TxID returns the session's transaction id. Immutable after
 // construction; no lock required.
@@ -255,6 +263,17 @@ func (s *SyncSession) ApplySymbols(m SyncSymbols) error {
 	}
 	if m.TxID != s.txid {
 		return fmt.Errorf("swarmsearch: sync_symbols txid %d, want %d", m.TxID, s.txid)
+	}
+	// SPEC §2.5: the on-wire index is the position of the frame's
+	// first symbol. The decoder derives a symbol's position from
+	// its own running count (s.symbolsIn), so the two MUST agree —
+	// if a frame was dropped or reordered, the encoder/decoder
+	// positions desync permanently and reconciliation silently
+	// produces wrong differences. Treat a mismatch as a hard abort
+	// rather than blindly appending at the wrong offset.
+	if uint32(s.symbolsIn) != m.Index {
+		return fmt.Errorf("swarmsearch: sync_symbols index %d, want %d (desync)",
+			m.Index, s.symbolsIn)
 	}
 	if s.symbolsIn+len(m.Symbols) > s.maxSymbols {
 		return ErrSymbolBudgetExceeded

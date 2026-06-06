@@ -66,7 +66,7 @@ func (e *ODPExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err
 	}
 	defer rc.Close()
 
-	text, err := extractODTText(rc)
+	text, err := extractODTText(rc, maxBytes)
 	if err != nil {
 		return nil, err
 	}

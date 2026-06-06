@@ -56,17 +56,6 @@ type BootstrapOptions struct {
 	// bootstrap will admit to the Lookup set. Default 100.
 	MaxTrackedPublishers int
 
-	// AnchorReputation is the starting score assigned to every
-	// anchor pubkey on first admission. Default 0.8 — high
-	// enough to rank their hits above un-vouched publishers
-	// without pinning reputation forever.
-	AnchorReputation float64
-
-	// CandidateReputation is the starting score for pubkeys
-	// admitted via channel B/C. Default 0.1 — low; they'll
-	// earn or lose reputation through observed behavior.
-	CandidateReputation float64
-
 	// EndorsementThreshold is the number of distinct endorsing
 	// peers (with non-trivial reputation) required to bypass the
 	// Bloom-filter admission gate. Default 3.
@@ -78,8 +67,6 @@ func DefaultBootstrapOptions() BootstrapOptions {
 	return BootstrapOptions{
 		AnchorHexes:          append([]string(nil), DefaultAnchorPubkeys...),
 		MaxTrackedPublishers: 100,
-		AnchorReputation:     0.8,
-		CandidateReputation:  0.1,
 		EndorsementThreshold: 3,
 	}
 }
@@ -130,12 +117,6 @@ func NewBootstrap(lookup *dhtindex.Lookup, ppmi dhtindex.PPMIGetter, bloom *repu
 	if opts.MaxTrackedPublishers <= 0 {
 		opts.MaxTrackedPublishers = 100
 	}
-	if opts.AnchorReputation == 0 {
-		opts.AnchorReputation = 0.8
-	}
-	if opts.CandidateReputation == 0 {
-		opts.CandidateReputation = 0.1
-	}
 	if opts.EndorsementThreshold <= 0 {
 		opts.EndorsementThreshold = 3
 	}
@@ -182,9 +163,11 @@ func (b *Bootstrap) AnchorKeys() [][32]byte {
 }
 
 // RunAnchors executes channel A: for each anchor pubkey, fetch
-// its PPMI and, if successful, admit it to the Lookup with the
-// AnchorReputation seed. Returns the count of successfully
-// fetched anchors and a slice of per-anchor errors.
+// its PPMI and, if successful, admit it to the Lookup. Admitted
+// anchors are marked seeded on the reputation tracker, which gives
+// them the tracker's fixed seeded bonus (decaying over ~6 months).
+// Returns the count of successfully fetched anchors and a slice of
+// per-anchor errors.
 func (b *Bootstrap) RunAnchors(ctx context.Context) (int, []error) {
 	if b.ppmi == nil {
 		return 0, []error{errors.New("daemon: bootstrap has no PPMIGetter")}
@@ -386,12 +369,11 @@ func (b *Bootstrap) admit(pub [32]byte, label, source string) bool {
 	if b.tracker != nil && source == "anchor" {
 		// Mark anchor pubkeys as seeded on the tracker. This
 		// gives them a high starting score via the seeded-bonus
-		// branch of scoreOf, which decays organically over ~6
-		// months — the natural interpretation of opts.AnchorReputation.
-		// Candidate sources (bep51, endorsement) start at the
-		// defaultUnknownScore (0.5) and have to earn or lose
-		// reputation through observed Returned/Confirmed/Flagged
-		// events.
+		// branch of scoreOf — the tracker's fixed bonus, which
+		// decays organically over ~6 months. Candidate sources
+		// (bep51, endorsement) start at the defaultUnknownScore
+		// (0.5) and have to earn or lose reputation through observed
+		// Returned/Confirmed/Flagged events.
 		b.tracker.MarkSeeded(reputation.PubKey(pub), label)
 	}
 	return true

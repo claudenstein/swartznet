@@ -175,7 +175,22 @@ func vorbisLabel(name string) string {
 	return ""
 }
 
+// readFullMaxAlloc is the hard ceiling on a single readFull
+// allocation. Every caller (flac/mkv/ogg) reads metadata blocks whose
+// legitimate size is well under this; the cap exists so an untrusted
+// length field (e.g. an EBML VINT or a FLAC 24-bit block length) cannot
+// drive a multi-GB make([]byte, n) and OOM the daemon before the read
+// itself fails. 64 MiB matches the per-cluster ceiling used elsewhere
+// and comfortably exceeds any real metadata block.
+const readFullMaxAlloc = 64 * 1024 * 1024
+
 func readFull(br *bufio.Reader, n int) ([]byte, error) {
+	if n < 0 {
+		return nil, fmt.Errorf("readFull: negative length %d", n)
+	}
+	if n > readFullMaxAlloc {
+		return nil, fmt.Errorf("readFull: length %d exceeds %d-byte cap", n, readFullMaxAlloc)
+	}
 	out := make([]byte, n)
 	if _, err := io.ReadFull(br, out); err != nil {
 		return nil, err

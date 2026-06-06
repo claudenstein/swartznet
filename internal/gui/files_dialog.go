@@ -92,19 +92,7 @@ func (fd *filesDialog) build(torrentName string) {
 			nameLbl.SetText(f.DisplayPath)
 			sizeLbl.SetText(humanBytes(f.Length))
 			progress.SetValue(f.Progress)
-			prioSelect.SetSelected(f.Priority)
-
-			idx := f.Index
-			prioSelect.OnChanged = func(selected string) {
-				go func() {
-					err := fd.d.Eng.SetFilePriority(fd.infoHashHex, idx, engine.FilePriority(selected))
-					if err != nil {
-						fyne.Do(func() {
-							dialog.ShowError(err, fd.win)
-						})
-					}
-				}()
-			}
+			fd.bindPrioSelect(prioSelect, f)
 		},
 	)
 
@@ -154,6 +142,37 @@ func (fd *filesDialog) build(torrentName string) {
 	fd.dlg.Resize(fyne.NewSize(760, 580))
 	fd.dlg.SetOnClosed(func() { cancel() })
 	fd.dlg.Show()
+}
+
+// bindPrioSelect (re)binds a recycled priority Select widget to the
+// file snapshot f. It detaches the previous row's OnChanged BEFORE
+// calling SetSelected, because Fyne's Select.SetSelected
+// unconditionally invokes OnChanged — and the handler still attached
+// is the PREVIOUS row's closure (capturing the previous row's file
+// index). Leaving it attached would make every refresh / scroll /
+// re-sort fire SetFilePriority for the wrong file with this row's new
+// priority value, writing bogus state and spamming redundant engine
+// writes. The freshly-bound handler also skips a no-op write when the
+// chosen value already equals the rendered priority.
+func (fd *filesDialog) bindPrioSelect(prioSelect *widget.Select, f engine.FileSnapshot) {
+	prioSelect.OnChanged = nil
+	prioSelect.SetSelected(f.Priority)
+
+	idx := f.Index
+	current := f.Priority
+	prioSelect.OnChanged = func(selected string) {
+		if selected == current {
+			return
+		}
+		go func() {
+			err := fd.d.Eng.SetFilePriority(fd.infoHashHex, idx, engine.FilePriority(selected))
+			if err != nil {
+				fyne.Do(func() {
+					dialog.ShowError(err, fd.win)
+				})
+			}
+		}()
+	}
 }
 
 func (fd *filesDialog) pollLoop(ctx context.Context) {

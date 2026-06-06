@@ -333,12 +333,23 @@ func (i *Index) Stats() (Stats, error) {
 	q := bleve.NewQueryStringQuery("+" + fieldType + ":" + typeContent)
 	const batch = 1000
 	var (
-		from     = 0
-		textSum  int64
-		guardTTL = 64 // bound the loop defensively
+		from    = 0
+		textSum int64
 	)
-	for guardTTL > 0 {
-		guardTTL--
+	// Loop until a short page proves we have reached the end — `from`
+	// advances by batch every iteration so progress (and termination)
+	// is guaranteed even on a corpus far larger than the old hardcoded
+	// 64-page guard allowed (which silently undercounted above ~64,000
+	// docs). A defensive ceiling scaled off the known content count
+	// still bounds a pathological index that never returns a short page;
+	// hitting it is logged so the truncation is observable.
+	maxPages := int(out.ContentCount/batch) + 2
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			i.log.Warn("indexer.stats_text_scan_truncated",
+				"pages", page, "scanned", from, "content_count", out.ContentCount)
+			break
+		}
 		sr := bleve.NewSearchRequestOptions(q, batch, from, false)
 		sr.Fields = []string{fieldText}
 		res, err := i.bleve.Search(sr)
@@ -425,7 +436,7 @@ func (i *Index) AllTorrentDocs() ([]TorrentDoc, error) {
 		sr := bleve.NewSearchRequestOptions(q, batch, from, false)
 		sr.Fields = []string{
 			fieldInfoHash, fieldName, fieldFilePaths, fieldTrackers,
-			fieldSizeBytes, fieldFileCount, fieldAddedAt,
+			fieldSizeBytes, fieldFileCount, fieldAddedAt, fieldSignedBy,
 		}
 		res, err := i.bleve.Search(sr)
 		if err != nil {
@@ -455,9 +466,7 @@ func (i *Index) ContentDocsForInfoHash(infoHash string) ([]ContentDoc, error) {
 	if i.bleve == nil {
 		return nil, errors.New("indexer: closed")
 	}
-	infoHash = strings.ToLower(infoHash)
-	q := bleve.NewQueryStringQuery("+" + fieldType + ":" + typeContent +
-		" +" + fieldInfoHash + ":" + infoHash)
+	q := contentForInfoHashQuery(infoHash)
 	const batch = 1000
 	var (
 		out  []ContentDoc
@@ -523,6 +532,9 @@ func torrentDocFromFields(fields map[string]any) TorrentDoc {
 		if t, err := time.Parse(time.RFC3339, v); err == nil {
 			doc.AddedAt = t
 		}
+	}
+	if v, ok := fields[fieldSignedBy].(string); ok {
+		doc.SignedBy = v
 	}
 	return doc
 }
@@ -762,24 +774,57 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 	return out, nil
 }
 
-// deleteByQueryLocked deletes every document matching the given query
-// string. Caller must hold i.mu. Returns the number of documents deleted.
+// contentForInfoHashQuery builds the exact-match conjunction selecting
+// every content doc for one infohash. Using term queries (not a
+// QueryString) means the infohash is never re-parsed by Bleve's query
+// grammar, so a hostile or malformed infohash cannot inject query
+// syntax. Mirrors the SignedBy filter path in Search().
+func contentForInfoHashQuery(infoHash string) query.Query {
+	typeQ := bleve.NewTermQuery(typeContent)
+	typeQ.SetField(fieldType)
+	ihQ := bleve.NewTermQuery(strings.ToLower(infoHash))
+	ihQ.SetField(fieldInfoHash)
+	return bleve.NewConjunctionQuery(typeQ, ihQ)
+}
+
+// deleteByQueryLocked deletes every document matching the given query.
+// Caller must hold i.mu. Returns the number of documents deleted.
 //
 // Bleve 2.x does not ship a public DeleteByQuery, so we fetch IDs in
 // batches and delete them one by one. For the sizes we care about
 // (~thousands of content docs per removed torrent) this is acceptable.
-func (i *Index) deleteByQueryLocked(queryString string) (int, error) {
+//
+// The loop is bounded by the matching-set size reported on the first
+// search: a correctly-functioning delete shrinks that set each batch,
+// so the number of iterations cannot exceed (initialTotal/batchSize)+1.
+// We allow a generous slack factor over that and fail closed with an
+// error if the bound is exceeded — which would mean deletes are
+// silently ineffective — rather than spinning forever holding i.mu.
+func (i *Index) deleteByQueryLocked(q query.Query) (int, error) {
 	const batchSize = 1000
-	q := bleve.NewQueryStringQuery(queryString)
 	sr := bleve.NewSearchRequestOptions(q, batchSize, 0, false)
 	// We only need IDs for deletion; no field projection.
 	sr.Fields = nil
 
-	var deleted int
-	for {
+	var (
+		deleted  int
+		maxIters int // computed from the first search's Total
+	)
+	for iter := 0; ; iter++ {
 		res, err := i.bleve.Search(sr)
 		if err != nil {
 			return deleted, fmt.Errorf("indexer: deleteByQuery search: %w", err)
+		}
+		if iter == 0 {
+			// (Total/batchSize)+1 batches suffice when each delete
+			// takes effect; 2x slack + a floor absorbs index churn
+			// without ever becoming unbounded.
+			maxIters = int(res.Total/batchSize)*2 + 4
+		}
+		if iter >= maxIters {
+			return deleted, fmt.Errorf(
+				"indexer: deleteByQuery made no progress (%d deleted, %d iterations) — deletes ineffective",
+				deleted, iter)
 		}
 		if len(res.Hits) == 0 {
 			return deleted, nil

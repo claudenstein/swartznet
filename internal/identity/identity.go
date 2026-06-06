@@ -86,6 +86,14 @@ func loadFromDisk(path string) (*Identity, error) {
 	if !ok {
 		return nil, fmt.Errorf("identity: %q does not contain a valid ed25519 key", path)
 	}
+	// priv.Public() just returns bytes [32:64] verbatim. Re-derive the
+	// public half from the 32-byte seed and compare so independent
+	// corruption of the trailing bytes fails loud at load time rather
+	// than as confusing "signature does not verify" errors later.
+	derived := ed25519.NewKeyFromSeed(raw[:ed25519.SeedSize]).Public().(ed25519.PublicKey)
+	if !derived.Equal(pub) {
+		return nil, fmt.Errorf("identity: %q public half does not match seed (corrupt key file)", path)
+	}
 	return &Identity{PrivateKey: priv, PublicKey: pub, Path: path}, nil
 }
 

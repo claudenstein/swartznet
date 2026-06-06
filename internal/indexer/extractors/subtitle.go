@@ -44,13 +44,28 @@ var htmlTag = regexp.MustCompile(`<[^>]+>`)
 // that sometimes leak into SRT exports.
 var assTag = regexp.MustCompile(`\{[^}]*\}`)
 
-// Extract implements Extractor. It ignores its maxBytes parameter
-// because subtitle files are always small (usually <1 MiB) and we want
-// the entire dialog track.
+// subtitleMaxInputBytes is the default read cap for subtitle files
+// when the caller passes maxBytes <= 0. A legitimate subtitle file
+// never approaches this; the cap exists purely to fail closed on a
+// hostile multi-GB ".srt".
+const subtitleMaxInputBytes = 16 * 1024 * 1024
+
+// subtitleMaxFileBytes is the dispatch-time size ceiling. No real
+// subtitle track exceeds a few MiB of text; anything larger is either
+// not a subtitle file or an attempted resource-exhaustion payload.
+const subtitleMaxFileBytes = 16 * 1024 * 1024
+
+// Extract implements Extractor. Subtitle files are always small
+// (usually <1 MiB) and we want the entire dialog track, but we still
+// bound the read via io.LimitReader so a hostile multi-GB ".srt"
+// cannot exhaust memory.
 func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
+	if maxBytes <= 0 {
+		maxBytes = subtitleMaxInputBytes
+	}
 	var (
 		out     strings.Builder
-		scanner = bufio.NewScanner(r)
+		scanner = bufio.NewScanner(io.LimitReader(r, maxBytes))
 	)
 	// Subtitle lines can be very long when styling tags are present;
 	// give the scanner a generous buffer.
@@ -104,6 +119,13 @@ func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error
 		}
 		out.WriteString(clean)
 		out.WriteByte('\n')
+
+		// Output guard: stop accumulating once the dialog text exceeds
+		// the byte budget. Mirrors rtf.go — return the partial text
+		// rather than letting a zip-bomb-style input balloon memory.
+		if int64(out.Len()) > maxBytes {
+			break
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -119,6 +141,12 @@ func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error
 
 func init() {
 	Register(NewSubtitleExtractor(), func(mime string, c Candidate) bool {
+		// A subtitle file never legitimately exceeds a few MiB; refuse
+		// anything larger so a hostile multi-GB ".srt" is not even
+		// opened.
+		if c.Size > subtitleMaxFileBytes {
+			return false
+		}
 		switch mime {
 		case "application/x-subrip", "text/vtt", "text/x-ssa":
 			return true

@@ -268,48 +268,72 @@ func (p *Pipeline) Stats(infohash string) PipelineStats {
 	}
 }
 
-// extractWatchdog is the soft per-extract budget. If an
-// extractor takes longer than this we log a warning so ops can
-// notice an extractor that hangs on adversarial input. Soft
-// because Go has no clean way to terminate a goroutine
-// externally — the watchdog observes and reports, the worker
-// keeps going. Real protection comes from input size caps
-// (Pipeline.maxFileBytes plus the per-extractor io.LimitReader
-// inside each extractor) plus the panic recovery in safeExtract;
-// the watchdog is a third line of defence that surfaces hangs
-// before the pipeline channel backs up. 60 seconds is generous
-// for any well-formed file an extractor we ship handles; an
-// extract that runs longer is almost certainly stuck on
-// pathological input.
-const extractWatchdog = 60 * time.Second
+// extractWatchdog is the HARD per-extract deadline. An extract that
+// runs longer than this is almost certainly wedged on pathological
+// input (a decompression loop, a quadratic parser, etc.). When the
+// deadline fires, safeExtract abandons the extract: the worker marks
+// the file failed and moves on. The extractor goroutine is left
+// running (Go has no safe way to kill a goroutine), so a truly stuck
+// extractor leaks one goroutine — an accepted, bounded cost that is
+// far better than pinning the single pipeline worker forever
+// (ambiguous-limbo / fail-open). Real first-line protection is still
+// the input size caps (Pipeline.maxFileBytes plus the per-extractor
+// io.LimitReader and output caps) plus the panic recovery below; the
+// deadline is the backstop that guarantees the worker always makes
+// progress. 60 seconds is generous for any well-formed file an
+// extractor we ship handles.
+//
+// A var (not const) so tests can shrink it; production never mutates it.
+var extractWatchdog = 60 * time.Second
 
-// safeExtract runs ex.Extract with a panic recovery net and a
-// soft watchdog. Extractors handle adversarial input (torrent
-// payloads from the network); a single malformed file must not
-// terminate the whole daemon. A recovered panic is converted
-// into an error, so the caller sees it as an ordinary extract
-// failure and the worker keeps running. A slow extract gets a
-// pipeline.extract_slow warning at the watchdog deadline so it
-// shows up in logs.
+// errExtractTimeout is returned when an extract exceeds extractWatchdog.
+// The worker treats it like any other extract failure.
+var errExtractTimeout = fmt.Errorf("pipeline: extract exceeded %s hard deadline", extractWatchdog)
+
+// safeExtract runs ex.Extract with a panic recovery net and a hard
+// deadline. Extractors handle adversarial input (torrent payloads from
+// the network); a single malformed file must neither crash nor wedge
+// the daemon. The extract runs in a child goroutine; safeExtract
+// selects its result against a timer. If the timer wins, safeExtract
+// returns errExtractTimeout and the caller fails the file and moves on,
+// leaving the wedged goroutine to (eventually) finish or leak. A
+// recovered panic inside the child is converted into an error so the
+// caller sees an ordinary extract failure.
 func safeExtract(log *slog.Logger, ex extractors.Extractor, r io.Reader, maxBytes int64) (chunks []extractors.Chunk, err error) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			chunks = nil
-			err = fmt.Errorf("pipeline: extractor %q panicked: %v", ex.Name(), rec)
-		}
-	}()
-
 	if log == nil {
 		log = slog.Default()
 	}
-	timer := time.AfterFunc(extractWatchdog, func() {
-		log.Warn("pipeline.extract_slow",
-			"extractor", ex.Name(),
-			"watchdog", extractWatchdog.String(),
-			"max_bytes", maxBytes,
-		)
-	})
+
+	type result struct {
+		chunks []extractors.Chunk
+		err    error
+	}
+	// Buffered so the child goroutine never blocks on send even after
+	// safeExtract has already returned on the timeout path.
+	done := make(chan result, 1)
+
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				done <- result{nil, fmt.Errorf("pipeline: extractor %q panicked: %v", ex.Name(), rec)}
+			}
+		}()
+		c, e := ex.Extract(r, maxBytes)
+		done <- result{c, e}
+	}()
+
+	timer := time.NewTimer(extractWatchdog)
 	defer timer.Stop()
 
-	return ex.Extract(r, maxBytes)
+	select {
+	case res := <-done:
+		return res.chunks, res.err
+	case <-timer.C:
+		log.Warn("pipeline.extract_timeout",
+			"extractor", ex.Name(),
+			"deadline", extractWatchdog.String(),
+			"max_bytes", maxBytes,
+		)
+		return nil, errExtractTimeout
+	}
 }

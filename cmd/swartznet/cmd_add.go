@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -54,6 +55,22 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	target := fs.Arg(0)
+
+	// --regtest and --dht-insecure are testbed-only knobs: regtest
+	// accelerates publisher/companion timings and --dht-insecure
+	// disables BEP-42 node-ID security, which lowers Sybil resistance
+	// on the public DHT. Refuse them unless the operator opts in with
+	// SWARTZNET_UNSAFE=1 so a copy-pasted testbed command can't
+	// silently weaken a mainnet node.
+	if (regtest || dhtInsecure) && os.Getenv("SWARTZNET_UNSAFE") != "1" {
+		if regtest {
+			fmt.Fprintln(stderr, "swartznet: --regtest is a testing-only flag (set SWARTZNET_UNSAFE=1 to enable)")
+		}
+		if dhtInsecure {
+			fmt.Fprintln(stderr, "swartznet: --dht-insecure disables BEP-42 node-ID security and is testing-only (set SWARTZNET_UNSAFE=1 to enable)")
+		}
+		return exitUsage
+	}
 
 	cfg := config.Default()
 	if dataDir != "" {

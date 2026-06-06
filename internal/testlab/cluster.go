@@ -167,8 +167,14 @@ func (c *Cluster) spawnNode(t *testing.T, idx int) *Node {
 	// Always-on local index for the node. Tests expect every
 	// node to have its own Bleve directory so Layer-L queries
 	// have something to answer against.
-	bleveDir := filepath.Join(root, "bleve-idx")
-	index, err := indexer.Open(bleveDir)
+	//
+	// We open the index at cfg.IndexDir (not a separate
+	// bleve-idx dir) so Node.IndexDir reports the directory the
+	// index actually lives in. engine.New never opens
+	// cfg.IndexDir on its own — SetIndex is the sole index path —
+	// but reusing the same path keeps the reported location honest
+	// for any scenario test that locates index files on disk.
+	index, err := indexer.Open(cfg.IndexDir)
 	if err != nil {
 		eng.Close()
 		t.Fatalf("testlab: open index node %d: %v", idx, err)

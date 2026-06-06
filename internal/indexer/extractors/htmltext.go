@@ -17,7 +17,10 @@ import (
 // inside the archive) and any future plain-HTML backend. The
 // implementation walks the html.Tokenizer rather than building a
 // full DOM, which keeps memory bounded for very large books.
-func extractHTMLText(r io.Reader) (string, error) {
+func extractHTMLText(r io.Reader, maxOut int64) (string, error) {
+	if maxOut <= 0 {
+		maxOut = defaultTextOutputCap
+	}
 	tz := html.NewTokenizer(r)
 	var (
 		out       strings.Builder
@@ -55,6 +58,13 @@ func extractHTMLText(r io.Reader) (string, error) {
 	}
 
 	for {
+		// Output guard: a zip-bomb XHTML chapter can amplify a tiny
+		// compressed input into gigabytes of visible text. Stop once
+		// the accumulated text crosses the budget and return what we
+		// have so far.
+		if int64(out.Len()) > maxOut {
+			return strings.TrimSpace(out.String()), nil
+		}
 		tt := tz.Next()
 		switch tt {
 		case html.ErrorToken:

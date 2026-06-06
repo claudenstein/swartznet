@@ -122,8 +122,17 @@ type Publisher struct {
 	opts      PublisherOptions
 	log       *slog.Logger
 
-	mu             sync.Mutex
-	lastRefresh    time.Time
+	mu sync.Mutex
+	// lastRefresh is the time of the last SUCCESSFUL publish; it
+	// answers the "is my pointer still alive (<2h)?" question and
+	// must never be advanced by a failed refresh.
+	lastRefresh time.Time
+	// lastAttempt is the time of the last refresh attempt of any
+	// outcome. RefreshNow throttles on this so a manual retry right
+	// after a failure (e.g. the empty-index case on a fresh node)
+	// still respects MinInterval, while a failure no longer masquerades
+	// as a recent successful publish.
+	lastAttempt    time.Time
 	lastInfoHash   string
 	lastError      string
 	publishedCount int
@@ -206,7 +215,7 @@ func (p *Publisher) Stop() {
 // scheduled refresh tick handles things normally.
 func (p *Publisher) RefreshNow() error {
 	p.mu.Lock()
-	if !p.lastRefresh.IsZero() && time.Since(p.lastRefresh) < p.opts.MinInterval {
+	if !p.lastAttempt.IsZero() && time.Since(p.lastAttempt) < p.opts.MinInterval {
 		p.mu.Unlock()
 		return ErrTooSoon
 	}
@@ -227,7 +236,13 @@ var ErrTooSoon = errors.New("companion: refresh throttled (too soon since last r
 // Status is the publisher's view of its own state, suitable
 // for /status output.
 type PublisherStatus struct {
-	LastRefresh    time.Time
+	// LastRefresh is the time of the last SUCCESSFUL publish (zero
+	// until the first one lands). Use this for keepalive/expiry
+	// reasoning ("is my pointer still alive (<2h)?").
+	LastRefresh time.Time
+	// LastAttempt is the time of the last refresh attempt of any
+	// outcome, including failures such as the empty-index case.
+	LastAttempt    time.Time
 	LastInfoHash   string
 	LastError      string
 	PublishedCount int
@@ -240,6 +255,7 @@ func (p *Publisher) Status() PublisherStatus {
 	defer p.mu.Unlock()
 	return PublisherStatus{
 		LastRefresh:    p.lastRefresh,
+		LastAttempt:    p.lastAttempt,
 		LastInfoHash:   p.lastInfoHash,
 		LastError:      p.lastError,
 		PublishedCount: p.publishedCount,
@@ -328,9 +344,11 @@ func (p *Publisher) refreshOnce(parent context.Context) {
 }
 
 func (p *Publisher) recordSuccess(infoHashHex string) {
+	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.lastRefresh = time.Now()
+	p.lastRefresh = now
+	p.lastAttempt = now
 	p.lastInfoHash = infoHashHex
 	p.lastError = ""
 	p.publishedCount++
@@ -340,7 +358,9 @@ func (p *Publisher) recordFailure(err error) {
 	p.log.Warn("companion.publisher.refresh_failed", "err", err)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.lastRefresh = time.Now()
+	// Only the attempt timestamp advances on failure — lastRefresh
+	// stays put so it keeps reporting the last successful publish.
+	p.lastAttempt = time.Now()
 	p.lastError = err.Error()
 }
 

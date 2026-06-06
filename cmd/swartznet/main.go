@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -165,6 +166,19 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 		signal.Stop(sigCh)
 	}()
 	return ctx, cancel
+}
+
+// validInfoHash reports whether s is a 40-character lowercase-hex
+// SHA-1 infohash. The length check alone lets a 40-char non-hex typo
+// through to the daemon, which rejects it with a less obvious
+// API-status error; validating hex-ness locally gives a clearer
+// message before the round-trip.
+func validInfoHash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 // reportRunErr maps a runtime error to a useful exit code.

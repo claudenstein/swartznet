@@ -29,7 +29,7 @@ func cmdIndex(args []string, stdout, stderr io.Writer) int {
 	}
 	ih := strings.ToLower(strings.TrimSpace(fs.Arg(0)))
 	mode := strings.ToLower(strings.TrimSpace(fs.Arg(1)))
-	if len(ih) != 40 {
+	if !validInfoHash(ih) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}

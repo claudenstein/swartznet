@@ -12,7 +12,7 @@ import (
 func TestExtractDocumentTextMalformedXMLErrors(t *testing.T) {
 	t.Parallel()
 	// Truncated mid-tag: dec.Token() returns an error.
-	_, err := extractDocumentText(strings.NewReader("<p><t>hi"))
+	_, err := extractDocumentText(strings.NewReader("<p><t>hi"), 0)
 	if err == nil {
 		t.Error("extractDocumentText on truncated XML should error")
 	}
@@ -23,7 +23,7 @@ func TestExtractDocumentTextMalformedXMLErrors(t *testing.T) {
 func TestExtractDocumentTextHandlesCrTabBr(t *testing.T) {
 	t.Parallel()
 	xml := `<root><p><t>hello</t><tab/><t>world</t><br/><t>!</t><cr/><t>end</t></p></root>`
-	got, err := extractDocumentText(strings.NewReader(xml))
+	got, err := extractDocumentText(strings.NewReader(xml), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

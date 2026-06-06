@@ -72,7 +72,12 @@ func (e *PDFExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err
 	if err != nil {
 		return nil, fmt.Errorf("pdf: get plain text: %w", err)
 	}
-	text, err := io.ReadAll(plain)
+	// Bound the decoded text: a small PDF can decompress into a huge
+	// text stream (object-stream / flate amplification). Read through
+	// an io.LimitReader so the accumulated plain text cannot exceed the
+	// budget — we index the partial text rather than OOM. +1 lets us
+	// detect (but we do not need to act on) truncation.
+	text, err := io.ReadAll(io.LimitReader(plain, maxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("pdf: read plain text: %w", err)
 	}

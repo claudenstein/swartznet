@@ -38,11 +38,13 @@ func TestPublisherRunRefreshTickFires(t *testing.T) {
 	p.Start()
 	defer p.Stop()
 
-	// Wait for the initial refreshOnce so LastRefresh is set.
+	// Wait for the initial refreshOnce so LastAttempt is set. The
+	// index is empty, so each refreshOnce records a failure — only
+	// LastAttempt (not LastRefresh) advances on failure now.
 	var first time.Time
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if ts := p.Status().LastRefresh; !ts.IsZero() {
+		if ts := p.Status().LastAttempt; !ts.IsZero() {
 			first = ts
 			break
 		}
@@ -53,13 +55,13 @@ func TestPublisherRunRefreshTickFires(t *testing.T) {
 	}
 
 	// Wait for at least one tick-driven refresh that advances
-	// LastRefresh past `first`.
+	// LastAttempt past `first`.
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if p.Status().LastRefresh.After(first) {
+		if p.Status().LastAttempt.After(first) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("tick never fired refreshOnce; LastRefresh stayed at %v", first)
+	t.Errorf("tick never fired refreshOnce; LastAttempt stayed at %v", first)
 }

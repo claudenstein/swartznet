@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/swartznet/swartznet/internal/companion"
@@ -31,6 +32,13 @@ type Daemon struct {
 	Bootstrap *Bootstrap                  // v0.5 Aggregate bootstrap; nil when Lookup unavailable
 	Cfg       config.Config
 	Log       *slog.Logger
+
+	// bgCancel cancels the background bootstrap context derived in
+	// New; bgWG joins the background goroutines (e.g. anchor fetch)
+	// so Close can deterministically stop them before the engine is
+	// torn down, rather than relying on the caller cancelling ctx.
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
 }
 
 // bootstrapEndorsementSink adapts *Bootstrap to the
@@ -89,15 +97,22 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		opts.Cfg.NoIndex = true
 	}
 
+	// Derive a child context whose cancel func the Daemon owns, so
+	// Close can deterministically stop background bootstrap work
+	// regardless of whether the caller cancels the parent ctx.
+	bgCtx, bgCancel := context.WithCancel(ctx)
+
 	d := &Daemon{
-		Cfg: opts.Cfg,
-		Log: opts.Log,
+		Cfg:      opts.Cfg,
+		Log:      opts.Log,
+		bgCancel: bgCancel,
 	}
 	stderr := opts.stderr()
 
 	// --- engine ---
 	eng, err := engine.New(ctx, opts.Cfg, opts.Log)
 	if err != nil {
+		bgCancel()
 		return nil, err
 	}
 	d.Eng = eng
@@ -106,6 +121,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	if !opts.NoIndex {
 		idx, err := indexer.Open(opts.Cfg.IndexDir)
 		if err != nil {
+			bgCancel()
 			_ = eng.Close()
 			return nil, fmt.Errorf("open index: %w", err)
 		}
@@ -119,7 +135,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		if opts.Cfg.Regtest {
 			cpOpts = companion.RegtestPublisherOptions()
 		}
-		cpOpts.Dir = opts.Cfg.DataDir
+		cpOpts.Dir = opts.Cfg.CompanionDir
 		cpOpts.PublisherKey = eng.Identity().PublicKeyBytes()
 		compPub, err := companion.NewPublisher(d.Index, eng.PointerPutter(), eng, cpOpts, opts.Log)
 		if err != nil {
@@ -191,8 +207,13 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 				sw.SetPublisherObserver(bootstrapPublisherObserver{boot: boot})
 			}
 			if len(boot.AnchorKeys()) > 0 {
+				d.bgWG.Add(1)
 				go func() {
-					succeeded, errs := boot.RunAnchors(ctx)
+					defer d.bgWG.Done()
+					// Use the Daemon-owned bgCtx so Close can cancel
+					// this fetch deterministically; RunAnchors honors
+					// ctx cancellation via the per-anchor GetPPMI calls.
+					succeeded, errs := boot.RunAnchors(bgCtx)
 					if opts.Log != nil {
 						opts.Log.Info("daemon.aggregate_bootstrap.anchors",
 							"succeeded", succeeded, "errors", len(errs))
@@ -241,6 +262,16 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 
 // Close tears down every subsystem in reverse startup order.
 func (d *Daemon) Close() error {
+	// Stop background bootstrap work first: cancel the Daemon-owned
+	// context, then join the goroutines. This guarantees no anchor
+	// fetch is still touching the engine/Lookup when we close them
+	// below, independent of whether the caller has cancelled the
+	// parent ctx passed to New.
+	if d.bgCancel != nil {
+		d.bgCancel()
+	}
+	d.bgWG.Wait()
+
 	if d.API != nil {
 		shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()

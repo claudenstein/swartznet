@@ -12,7 +12,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
 )
+
+// allowRegtestEnv is the environment variable an operator must set
+// to "1" to permit the production-dangerous Regtest / DHTInsecure
+// flags outside of a `go test` binary. Without it Validate fails
+// closed (see Validate) so a stray config.json cannot silently put
+// a real node into regtest or BEP-42-insecure mode.
+const allowRegtestEnv = "SWARTZNET_ALLOW_REGTEST"
 
 // Config is the top-level runtime configuration for a SwartzNet instance.
 //
@@ -260,7 +268,35 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: cannot create parent of IndexDir %q: %w", c.IndexDir, err)
 		}
 	}
+	// Fail closed on the production-dangerous knobs. Regtest hammers
+	// the mainline DHT every ~5s and DHTInsecure disables BEP-42
+	// Sybil resistance; neither is ever correct on a real node. The
+	// engine also logs a Warn for Regtest, but a logged warning is
+	// easy to miss — a misconfigured config.json must be rejected,
+	// not merely flagged.
+	if err := c.dangerousFlagsRejected(testing.Testing()); err != nil {
+		return err
+	}
 	return nil
+}
+
+// dangerousFlagsRejected returns a non-nil error when the
+// production-dangerous Regtest / DHTInsecure knobs are set but the
+// caller has not earned the right to use them. They are legitimate
+// only from a `go test` binary (inTest — the testlab harness sets
+// both) or when the operator has explicitly opted in via
+// SWARTZNET_ALLOW_REGTEST=1. The boolean is threaded in (rather than
+// calling testing.Testing() directly) so the production branch is
+// unit-testable from within a test binary.
+func (c *Config) dangerousFlagsRejected(inTest bool) error {
+	if !c.Regtest && !c.DHTInsecure {
+		return nil
+	}
+	if inTest || os.Getenv(allowRegtestEnv) == "1" {
+		return nil
+	}
+	return fmt.Errorf("config: Regtest/DHTInsecure are test-only knobs; "+
+		"set %s=1 to use them outside tests", allowRegtestEnv)
 }
 
 // defaultDataDir returns the platform-appropriate default data directory.

@@ -12,6 +12,7 @@ import (
 	"os"
 
 	"github.com/swartznet/swartznet/internal/companion"
+	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/identity"
 )
 
@@ -107,37 +108,41 @@ func cmdAggregateBuild(args []string, stdout, stderr io.Writer) int {
 }
 
 // loadPrivKey loads the publisher's ed25519 keypair. An explicit
-// path overrides the default identity location; passing "" uses
-// identity.LoadOrCreate with the default XDG path.
+// path is treated as load-only: a missing file is an error, never a
+// trigger to mint a new (untrusted) identity. Passing "" uses
+// identity.LoadOrCreate with the daemon's default XDG path, which is
+// the only place auto-generation is appropriate.
 func loadPrivKey(keyPath string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
 	if keyPath == "" {
-		path, err := defaultIdentityPath()
-		if err != nil {
-			return nil, nil, err
-		}
-		id, err := identity.LoadOrCreate(path)
+		// Default resolution must be identical to the daemon's
+		// (config.Default honors $XDG_DATA_HOME) so a CLI build is
+		// signed by the same key everything else publishes under.
+		id, err := identity.LoadOrCreate(config.Default().IdentityPath)
 		if err != nil {
 			return nil, nil, err
 		}
 		return id.PrivateKey, id.PublicKey, nil
 	}
-	// Explicit path: load only, don't auto-generate.
-	id, err := identity.LoadOrCreate(keyPath)
+	// Explicit path: load only, don't auto-generate. Signing every
+	// record with a freshly minted key (e.g. because the file failed
+	// to mount or the path was a typo) would silently sever publisher
+	// reputation, so fail closed on a missing file instead.
+	id, err := loadIdentityNoCreate(keyPath)
 	if err != nil {
 		return nil, nil, err
 	}
 	return id.PrivateKey, id.PublicKey, nil
 }
 
-// defaultIdentityPath mirrors the XDG path the daemon uses. We
-// avoid importing internal/config just for this one constant —
-// keep the default co-located with the CLI so it's obvious.
-func defaultIdentityPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+// loadIdentityNoCreate loads an existing identity file, failing
+// closed (without minting a new key) if it is absent. Used for
+// user-supplied --key/--identity paths where implicit generation
+// would orphan the published records under an unknown pubkey.
+func loadIdentityNoCreate(path string) (*identity.Identity, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("identity file %q: %w", path, err)
 	}
-	return home + "/.local/share/swartznet/identity.key", nil
+	return identity.LoadOrCreate(path)
 }
 
 // readRecords parses JSONL from path (or stdin when path == "-")

@@ -20,9 +20,47 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
+
+// requireHTTPS validates that a bootstrap URL uses the https
+// scheme. An on-path attacker who can downgrade the fetch to
+// plaintext http:// could inject arbitrary anchor pubkeys, so we
+// fail closed on any non-https scheme.
+//
+// A narrow exemption is allowed for loopback hosts (localhost /
+// 127.0.0.1 / ::1) when allowInsecureLoopback is true — this lets
+// tests exercise the accept path against an httptest server
+// without TLS, and is never enabled on the production code paths.
+func requireHTTPS(raw string, allowInsecureLoopback bool) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("daemon: bootstrap URL parse: %w", err)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if allowInsecureLoopback && u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("daemon: bootstrap URL must use https scheme, got %q", u.Scheme)
+}
+
+// isLoopbackHost reports whether host names the local loopback
+// interface. Accepts the literal "localhost" plus any IP that
+// parses as a loopback address.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
 
 // DefaultBootstrapURL is the project-operated HTTPS endpoint
 // fetched by FallbackToHTTPS. Empty during development; real
@@ -55,10 +93,21 @@ type HTTPSFallbackClient interface {
 }
 
 // httpGetClient adapts a *http.Client to HTTPSFallbackClient.
-type httpGetClient struct{ c *http.Client }
+//
+// allowInsecureLoopback is a test-only escape hatch: production
+// constructors (NewHTTPSFallbackClient) leave it false so only
+// https:// URLs are ever fetched. Tests may set it true to point
+// at a plaintext httptest loopback server.
+type httpGetClient struct {
+	c                     *http.Client
+	allowInsecureLoopback bool
+}
 
-func (g httpGetClient) Get(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (g httpGetClient) Get(ctx context.Context, rawURL string) ([]byte, error) {
+	if err := requireHTTPS(rawURL, g.allowInsecureLoopback); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +149,14 @@ func NewHTTPSFallbackClient(timeout time.Duration) HTTPSFallbackClient {
 func (b *Bootstrap) FallbackToHTTPS(ctx context.Context, url string, client HTTPSFallbackClient) (int, error) {
 	if url == "" {
 		return 0, errors.New("daemon: FallbackToHTTPS requires a URL")
+	}
+	// Fail closed on any non-https URL before we hand it to the
+	// client. An on-path attacker who can downgrade to plaintext
+	// http:// could inject arbitrary anchor pubkeys; the loopback
+	// exemption is reserved for the httpGetClient test path, so the
+	// public FallbackToHTTPS entry point is strict.
+	if err := requireHTTPS(url, false); err != nil {
+		return 0, err
 	}
 	if client == nil {
 		client = NewHTTPSFallbackClient(0)

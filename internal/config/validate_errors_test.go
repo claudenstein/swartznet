@@ -55,6 +55,82 @@ func TestValidateMkdirIndexDirParentFailure(t *testing.T) {
 	}
 }
 
+// TestValidateRegtestGuard covers the fail-closed guard on the
+// production-dangerous Regtest / DHTInsecure knobs.
+//
+// Because this very binary is a `go test` binary, testing.Testing()
+// is true, so Validate must ACCEPT the dangerous flags here without
+// any env opt-in — otherwise the testlab harness (which always sets
+// Regtest=true) could never spawn an engine. The env-gated path is
+// covered separately by TestAllowRegtestOutsideTests, which drives
+// the decision through a seam that does not consult testing.Testing.
+func TestValidateRegtestGuard(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		regtest     bool
+		dhtInsecure bool
+	}{
+		{"clean", false, false},
+		{"regtest", true, false},
+		{"dht-insecure", false, true},
+		{"both", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := Default()
+			c.DataDir = t.TempDir()
+			c.IndexDir = filepath.Join(t.TempDir(), "index")
+			c.Regtest = tc.regtest
+			c.DHTInsecure = tc.dhtInsecure
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate() under a test binary must accept Regtest/DHTInsecure, got %v", err)
+			}
+		})
+	}
+}
+
+// TestAllowRegtestOutsideTests exercises the decision the guard
+// makes for a non-test ("production") binary: dangerous knobs are
+// rejected unless the operator opts in via the env var. We can't
+// flip testing.Testing() for this process, so we test the pure
+// decision helper that Validate delegates to.
+func TestAllowRegtestOutsideTests(t *testing.T) {
+	cases := []struct {
+		name        string
+		regtest     bool
+		dhtInsecure bool
+		inTest      bool
+		env         string
+		wantErr     bool
+	}{
+		{"prod-clean", false, false, false, "", false},
+		{"prod-regtest-no-optin", true, false, false, "", true},
+		{"prod-dht-insecure-no-optin", false, true, false, "", true},
+		{"prod-regtest-optin", true, false, false, "1", false},
+		{"prod-dht-insecure-optin", false, true, false, "1", false},
+		{"prod-regtest-bad-optin", true, false, false, "yes", true},
+		{"test-regtest-no-optin", true, false, true, "", false},
+		{"test-dht-insecure-no-optin", false, true, true, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(allowRegtestEnv, tc.env)
+			c := Default()
+			c.Regtest = tc.regtest
+			c.DHTInsecure = tc.dhtInsecure
+			err := c.dangerousFlagsRejected(tc.inTest)
+			if tc.wantErr && err == nil {
+				t.Fatalf("dangerousFlagsRejected(%v) = nil, want error", tc.inTest)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("dangerousFlagsRejected(%v) = %v, want nil", tc.inTest, err)
+			}
+		})
+	}
+}
+
 // TestSwartznetShareRootHomelessFallback covers the third return
 // in swartznetShareRoot: no XDG_DATA_HOME and no detectable home
 // directory. We force this by clearing every env var the stdlib

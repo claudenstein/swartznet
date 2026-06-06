@@ -265,8 +265,20 @@ collect:
 // delivers the result to the collector. Results without a matching
 // pending query (stale responses, spurious messages) are dropped.
 func (p *Protocol) routeResult(peerAddr string, r Result) {
+	// A semantically-garbage Result is a strong misbehavior signal
+	// even when it does correlate to a pending query — charge it
+	// before the txid lookup so a spoofer can't dodge the charge by
+	// guessing a live txid.
+	if resultIsMalformed(r) {
+		p.chargeMisbehavior(peerAddr, ScoreMalformedResult, "malformed_result")
+		return
+	}
 	pend := p.lookupPending(r.TxID)
 	if pend == nil {
+		// No outbound query owns this txid: a stale/late reply or a
+		// replay/spoof attempt. Charge a modest score — one stray
+		// frame is harmless, a stream of them is not.
+		p.chargeMisbehavior(peerAddr, ScoreStaleTxID, "stale_result_txid")
 		p.log.Debug("swarmsearch.route_result.no_pending",
 			"peer", peerAddr, "txid", r.TxID)
 		return
@@ -287,6 +299,8 @@ func (p *Protocol) routeResult(peerAddr string, r Result) {
 func (p *Protocol) routeReject(peerAddr string, r Reject) {
 	pend := p.lookupPending(r.TxID)
 	if pend == nil {
+		// Same stale/replay reasoning as routeResult.
+		p.chargeMisbehavior(peerAddr, ScoreStaleTxID, "stale_reject_txid")
 		return
 	}
 	select {
@@ -380,15 +394,43 @@ func (p *Protocol) selectTargets(snap []PeerState) []PeerState {
 	return targets
 }
 
+// resultIsMalformed reports whether a decoded Result is
+// syntactically valid bencode but semantically garbage: a hit
+// carrying an infohash that isn't 20 bytes, or a non-empty Total
+// with a completely empty hits array. Either shape is a misbehavior
+// signal — the wire decoder accepts them, but a correct responder
+// never produces them.
+func resultIsMalformed(r Result) bool {
+	if r.Total > 0 && len(r.Hits) == 0 {
+		return true
+	}
+	for _, h := range r.Hits {
+		if len(h.IH) != 20 {
+			return true
+		}
+	}
+	return false
+}
+
 func mergeResponses(responses []incomingResult) []MergedHit {
 	merged := make(map[string]*MergedHit)
 
 	for _, ir := range responses {
+		// Dedup within a single peer's Result: a buggy or malicious
+		// responder that lists the same infohash twice must not get
+		// to double-count its Rank toward the cap or pad Sources
+		// with repeats of its own address, which would skew both the
+		// score and the source-diversity signal.
+		seenIH := make(map[string]struct{}, len(ir.result.Hits))
 		for _, h := range ir.result.Hits {
 			ih := hex.EncodeToString(h.IH)
 			if len(ih) != 40 {
 				continue
 			}
+			if _, dup := seenIH[ih]; dup {
+				continue
+			}
+			seenIH[ih] = struct{}{}
 			m, ok := merged[ih]
 			if !ok {
 				m = &MergedHit{InfoHash: ih}

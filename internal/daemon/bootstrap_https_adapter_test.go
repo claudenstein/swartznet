@@ -53,7 +53,9 @@ func TestHttpGetClientHappyPath(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := NewHTTPSFallbackClient(2 * time.Second)
+	// httptest serves plaintext on loopback; use the test-only
+	// loopback exemption so the https scheme guard lets it through.
+	c := httpGetClient{c: srv.Client(), allowInsecureLoopback: true}
 	body, err := c.Get(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -73,7 +75,7 @@ func TestHttpGetClientNon200ReturnsError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := NewHTTPSFallbackClient(2 * time.Second)
+	c := httpGetClient{c: srv.Client(), allowInsecureLoopback: true}
 	_, err := c.Get(context.Background(), srv.URL)
 	if err == nil {
 		t.Fatal("expected error for 503 response")
@@ -127,7 +129,7 @@ func TestBootstrapAnchorCount(t *testing.T) {
 	pub := pubkeyBytes("anchor-count-test")
 	body := []byte(fmt.Sprintf(`{"version":1,"anchors":["%s"]}`,
 		hex.EncodeToString(pub[:])))
-	if _, err := b.FallbackToHTTPS(context.Background(), "x", fakeHTTPSClient{body: body}); err != nil {
+	if _, err := b.FallbackToHTTPS(context.Background(), "https://example.com/anchors", fakeHTTPSClient{body: body}); err != nil {
 		t.Fatalf("FallbackToHTTPS: %v", err)
 	}
 	if got := b.AnchorCount(); got != 1 {
@@ -176,11 +178,10 @@ func TestIngestEndorsementBloomPolicyFallback(t *testing.T) {
 	}
 }
 
-// TestNewBootstrapZeroOptionsFillDefaults covers the four
-// default-fill arms (MaxTrackedPublishers, AnchorReputation,
-// CandidateReputation, EndorsementThreshold) plus the nil-log
-// substitution branch. DefaultBootstrapOptions returns all
-// positive values so existing tests bypass these guards;
+// TestNewBootstrapZeroOptionsFillDefaults covers the two
+// default-fill arms (MaxTrackedPublishers, EndorsementThreshold)
+// plus the nil-log substitution branch. DefaultBootstrapOptions
+// returns all positive values so existing tests bypass these guards;
 // constructing with zero-valued options + nil log forces the
 // fallback assignments to run.
 func TestNewBootstrapZeroOptionsFillDefaults(t *testing.T) {

@@ -122,7 +122,10 @@ func (r *BTreeReader) Find(prefix string) ([]Record, error) {
 		return nil, fmt.Errorf("companion: piece 0 kind = 0x%02x, want root", hdr.Kind)
 	}
 
-	leafPieces, err := r.walkToLeaves(0, pLo, pHi)
+	// depthBudget bounds recursion independently of the structural
+	// child-index checks below, so a pathological-but-in-range tree
+	// can never recurse deeper than the page count allows.
+	leafPieces, err := r.walkToLeaves(0, pLo, pHi, r.src.NumPieces())
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +161,24 @@ func (r *BTreeReader) Find(prefix string) ([]Record, error) {
 // walkToLeaves does a DFS from the given interior/root page,
 // collecting leaf piece indices whose subtree overlaps [pLo, pHi).
 // A nil pHi is treated as +∞.
-func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte) ([]int, error) {
+//
+// The interior page structure is NOT covered by the trailer
+// signature (only the canonical leaf-record stream is), so the
+// ChildIndex bytes are attacker-controlled. To stay safe against
+// hostile trees we enforce, on every recursion, that each child
+// points strictly DOWNWARD (ChildIndex > pieceIdx), within range
+// (ChildIndex < NumPieces-1, i.e. excluding the trailer), and is
+// strictly increasing within a page. The honest top-down BFS
+// layout always satisfies this, so it costs honest builders
+// nothing. Together with depthBudget these invariants make a
+// cycle (self/back pointer) or a DAG (shared subtrees) impossible:
+// each recursion strictly increases the minimum reachable piece
+// index, so every page is visited at most once and recursion can
+// be no deeper than the page count.
+func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte, depthBudget int) ([]int, error) {
+	if depthBudget <= 0 {
+		return nil, fmt.Errorf("companion: tree too deep at piece %d (cycle or malformed interior page)", pieceIdx)
+	}
 	page, err := r.src.Piece(pieceIdx)
 	if err != nil {
 		return nil, fmt.Errorf("companion: fetch piece %d: %w", pieceIdx, err)
@@ -190,8 +210,25 @@ func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte) ([]int, error)
 		copied[i] = InteriorChild{Separator: sep, ChildIndex: c.ChildIndex}
 	}
 
+	// The last piece is always the trailer; leaves/interiors live
+	// strictly below it. lastChild lets us reject equal/back/forward
+	// pointers that would re-walk a page (cycle/DAG).
+	maxChild := r.src.NumPieces() - 1 // exclusive: trailer is NumPieces-1
+	lastChild := pieceIdx             // children must be strictly greater
+
 	var out []int
 	for i, ch := range copied {
+		ci := int(ch.ChildIndex)
+		// Fail closed on any child that does not point strictly
+		// downward, in range, and strictly increasing. This is the
+		// load-bearing anti-cycle / anti-DAG guard: interior bytes
+		// are unsigned, so we cannot trust them past these bounds.
+		if ci <= lastChild || ci >= maxChild {
+			return nil, fmt.Errorf(
+				"companion: piece %d child %d index %d out of range (must be in (%d, %d))",
+				pieceIdx, i, ci, lastChild, maxChild)
+		}
+		lastChild = ci
 		// Compute effective [lower, upper) range for this child.
 		// First child (i==0) has effective lower = -∞ (nil); all
 		// subsequent children use the preceding child's separator
@@ -210,7 +247,7 @@ func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte) ([]int, error)
 		if !rangeOverlapsPrefix(lower, upper, pLo, pHi) {
 			continue
 		}
-		leaves, err := r.walkToLeaves(int(ch.ChildIndex), pLo, pHi)
+		leaves, err := r.walkToLeaves(ci, pLo, pHi, depthBudget-1)
 		if err != nil {
 			return nil, err
 		}
@@ -254,6 +291,13 @@ func (r *BTreeReader) VerifyFingerprint() error {
 			}
 			h.Write(enc)
 			count++
+			// Bail out as soon as we exceed the trailer's claim, so a
+			// crafted file cannot make us hash unbounded extra records
+			// before the count mismatch is detected at the end.
+			if uint64(count) > r.trailer.NumRecords {
+				return fmt.Errorf("companion: more than %d records, trailer claim exceeded",
+					r.trailer.NumRecords)
+			}
 		}
 	}
 	if uint64(count) != r.trailer.NumRecords {

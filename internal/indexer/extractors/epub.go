@@ -89,7 +89,12 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 
 	var combined strings.Builder
 	for _, f := range chapters {
-		text, err := extractChapter(f)
+		// Output guard against zip-bomb amplification: stop combining
+		// further chapters once we cross the budget.
+		if int64(combined.Len()) > maxBytes {
+			break
+		}
+		text, err := extractChapter(f, maxBytes)
 		if err != nil {
 			// One bad chapter does not poison the rest of the book.
 			continue
@@ -109,13 +114,13 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 
 // extractChapter opens one zip entry, runs it through the shared
 // HTML text extractor, and returns the visible text.
-func extractChapter(f *zip.File) (string, error) {
+func extractChapter(f *zip.File, maxOut int64) (string, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return "", err
 	}
 	defer rc.Close()
-	return extractHTMLText(rc)
+	return extractHTMLText(rc, maxOut)
 }
 
 // isXHTMLChapter reports whether a zip entry is a candidate

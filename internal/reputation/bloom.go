@@ -207,6 +207,10 @@ func (b *BloomFilter) indices(input []byte) []uint64 {
 	h1 := h.Sum64()
 	h.Write([]byte{0xff})
 	h2 := h.Sum64()
+	// Force the stride odd (Kirsch-Mitzenmacher): if h2 % m == 0 the
+	// k indices would all collapse onto h1 % m, degrading to a single
+	// bit for that input. An odd stride guarantees distinct strides.
+	h2 |= 1
 
 	out := make([]uint64, b.k)
 	for i := uint64(0); i < b.k; i++ {
@@ -260,6 +264,13 @@ func readBloom(r io.Reader) (*BloomFilter, error) {
 	k := uint64(binary.LittleEndian.Uint16(hdr[6:8]))
 	m := binary.LittleEndian.Uint64(hdr[8:16])
 	bitsLen := binary.LittleEndian.Uint64(hdr[16:24])
+	// m and k must be positive: indices() divides by m and loops k
+	// times, so a corrupt/truncated header with m=0 (or k=0) would
+	// otherwise panic with a divide-by-zero on the next Test/Add.
+	// Fail closed with a recoverable load error instead.
+	if m == 0 || k == 0 {
+		return nil, fmt.Errorf("reputation: invalid bloom params m=%d k=%d", m, k)
+	}
 	if bitsLen > (m+63)/64+1 {
 		return nil, fmt.Errorf("reputation: bitsLen %d inconsistent with m %d", bitsLen, m)
 	}

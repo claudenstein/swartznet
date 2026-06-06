@@ -6,16 +6,17 @@ import (
 )
 
 // TestEncodeInteriorPayloadExceedsUint16 covers EncodeInterior's
-// `if payload.Len() > 65535 → err` arm. One child with a
-// 65536-byte separator drives the encoded payload past the
-// uint16 cap (separator + 3-byte uvarint length prefix + 4-byte
-// child index ≈ 65543 bytes).
+// `if payload.Len() > 65535 → err` arm. The first child's
+// separator is force-cleared by EncodeInterior (it is implicitly
+// -∞), so the oversized separator lives on the SECOND child; its
+// 65536-byte separator + 3-byte uvarint length prefix + 4-byte
+// child index drives the encoded payload past the uint16 cap.
 func TestEncodeInteriorPayloadExceedsUint16(t *testing.T) {
 	t.Parallel()
-	children := []InteriorChild{{
-		Separator:  bytes.Repeat([]byte{'x'}, 65536),
-		ChildIndex: 0,
-	}}
+	children := []InteriorChild{
+		{Separator: nil, ChildIndex: 0},
+		{Separator: bytes.Repeat([]byte{'x'}, 65536), ChildIndex: 1},
+	}
 	if _, err := EncodeInterior(PageKindInterior, 0, children, 1<<20); err == nil {
 		t.Error("EncodeInterior should reject payload > uint16")
 	}

@@ -1,6 +1,7 @@
 package dhtindex_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anacrolix/torrent/bencode"
@@ -75,4 +76,45 @@ func TestDecodePPMIRejectsBadNextPk(t *testing.T) {
 	if _, err := dhtindex.DecodePPMI(raw); err == nil {
 		t.Error("DecodePPMI with 64-byte next_pk should error")
 	}
+}
+
+// TestDecodePPMIRejectsOversize — a malicious node can return a
+// payload up to the UDP datagram limit (~64 KiB), far past the
+// BEP-44 cap this package writes. DecodePPMI must reject anything
+// over MaxPPMIValueBytes before unmarshalling. We build an
+// otherwise-valid dict padded with a large extra key.
+func TestDecodePPMIRejectsOversize(t *testing.T) {
+	t.Parallel()
+	// bencode dict: {"ih": <20 bytes>, "pad": <huge>, "ts": i1e}.
+	// Keys must be sorted; "ih" < "pad" < "ts".
+	var b strings.Builder
+	b.WriteString("d")
+	b.WriteString("2:ih20:")
+	b.Write(make([]byte, 20))
+	pad := strings.Repeat("a", dhtindex.MaxPPMIValueBytes+50)
+	b.WriteString("3:pad")
+	b.WriteString(itoa(len(pad)))
+	b.WriteString(":")
+	b.WriteString(pad)
+	b.WriteString("2:tsi1e")
+	b.WriteString("e")
+	raw := []byte(b.String())
+	if len(raw) <= dhtindex.MaxPPMIValueBytes {
+		t.Fatalf("test payload %d bytes not over cap %d", len(raw), dhtindex.MaxPPMIValueBytes)
+	}
+	if _, err := dhtindex.DecodePPMI(raw); err == nil {
+		t.Errorf("DecodePPMI accepted a %d-byte payload over the %d cap", len(raw), dhtindex.MaxPPMIValueBytes)
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var digits []byte
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
 }

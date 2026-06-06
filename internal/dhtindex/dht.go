@@ -246,8 +246,21 @@ func (a *AnacrolixPutter) Put(ctx context.Context, salt []byte, value KeywordVal
 		put.Sign(a.private)
 		return put
 	}
-	if _, err := getput.Put(ctx, target, a.server, salt, seqToPut); err != nil {
+	stats, err := getput.Put(ctx, target, a.server, salt, seqToPut)
+	if err != nil {
 		return fmt.Errorf("dhtindex: put traversal: %w", err)
+	}
+	// getput.Put returns a nil error even when the get-traversal
+	// reached zero nodes (a fresh node with a cold routing table, a
+	// transient partition, or a put where every peer rejected the
+	// value). In that case the BEP-44 item never lands. Treat it as
+	// failure so publishOne calls MarkFailed and does not advance
+	// LastPublished — otherwise the rate-limiter would suppress the
+	// retry for ~MinPutInterval while the keyword is undiscoverable.
+	// NumResponses counts get-traversal responses; zero means the
+	// closest-node set was empty, so no s.Put could have succeeded.
+	if stats == nil || stats.NumResponses == 0 {
+		return errors.New("dhtindex: put reached zero DHT nodes")
 	}
 	return nil
 }

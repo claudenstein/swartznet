@@ -37,11 +37,21 @@ const feelerQuery = "__sn_feeler__"
 // because it IS a real sn_search exchange, just self-initiated.
 //
 // Call this once from engine startup after the Protocol is fully
-// wired. Safe to call multiple times (subsequent calls are no-ops
-// if a feeler is already running), but that's a misuse — the
-// caller should track its own goroutine lifecycle.
+// wired. Safe to call multiple times: subsequent calls are genuine
+// no-ops while a feeler is already running, so a config reload that
+// re-invokes StartFeeler cannot leak duplicate goroutines each
+// firing their own query fan-outs.
 func (p *Protocol) StartFeeler(ctx context.Context, interval time.Duration) {
-	go p.feelerLoop(ctx, interval)
+	if !p.feelerRunning.CompareAndSwap(false, true) {
+		// A feeler is already running — honor the no-op contract.
+		return
+	}
+	go func() {
+		// Release the guard when the loop exits (context cancelled)
+		// so a later StartFeeler with a fresh context can restart it.
+		defer p.feelerRunning.Store(false)
+		p.feelerLoop(ctx, interval)
+	}()
 }
 
 func (p *Protocol) feelerLoop(ctx context.Context, interval time.Duration) {

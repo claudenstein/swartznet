@@ -410,7 +410,13 @@ func (t *Tracker) LoadSeedList(path string) (int, []error) {
 			errs = append(errs, fmt.Errorf("reputation: seed entry %d: bad pubkey %q", i, e.PubKey))
 			continue
 		}
-		t.MarkSeeded(PubKeyHex(e.PubKey), e.Label)
+		// Store under the canonical lowercase-hex key derived from the
+		// decoded bytes; seed-list JSON may carry upper/mixed-case hex,
+		// but every lookup path queries the lowercase form, so we must
+		// normalize here or the seed bonus silently never fires.
+		var pk [32]byte
+		copy(pk[:], raw)
+		t.MarkSeeded(PubKey(pk), e.Label)
 		imported++
 	}
 	return imported, errs

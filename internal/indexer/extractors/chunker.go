@@ -16,6 +16,17 @@ import "strings"
 // below ~512 bytes costs Bleve document-metadata overhead.
 const DefaultChunkTargetBytes = 2 * 1024
 
+// defaultTextOutputCap is the fallback ceiling on accumulated
+// decompressed/decoded text when a caller does not supply an explicit
+// budget (maxBytes <= 0). ZIP/XML/PDF extractors cap their *compressed*
+// input but a malicious archive can still amplify a small input into
+// gigabytes of text inside an in-memory strings.Builder. Bounding the
+// output (mirroring rtf.go's `out.Len() > maxBytes` break) caps that
+// amplification — we return whatever partial text we accumulated up to
+// the cap. 64 MiB of indexable text per file is far beyond any
+// legitimate document and keeps the pipeline RAM-safe.
+const defaultTextOutputCap = 64 * 1024 * 1024
+
 // chunkMaxOverrunRatio bounds how much bigger a chunk is allowed to be
 // than DefaultChunkTargetBytes before we force a split even in the
 // middle of a paragraph. 1.5× means "paragraphs up to 15 KiB stay

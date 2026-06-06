@@ -92,11 +92,8 @@ func (i *Index) DeleteContentForTorrent(infoHash string) (int, error) {
 	}
 
 	// Build a query that selects only content docs for this infohash.
-	// Using the QueryString form keeps this simple and mirrors how the
-	// real Search path issues queries.
-	q := fmt.Sprintf("+%s:%s +%s:%s",
-		fieldType, typeContent,
-		fieldInfoHash, strings.ToLower(infoHash),
-	)
-	return i.deleteByQueryLocked(q)
+	// Uses exact-match term queries (not a QueryString) so a malformed
+	// or hostile infohash cannot inject Bleve query syntax — mirrors
+	// the SignedBy filter path in Search().
+	return i.deleteByQueryLocked(contentForInfoHashQuery(infoHash))
 }

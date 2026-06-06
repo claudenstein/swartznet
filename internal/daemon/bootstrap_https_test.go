@@ -54,7 +54,7 @@ func TestFallbackToHTTPSDedupesExisting(t *testing.T) {
 	body := []byte(fmt.Sprintf(`{"version":1,"anchors":["%s"]}`,
 		hex.EncodeToString(existing[:])))
 
-	added, err := b.FallbackToHTTPS(context.Background(), "x", fakeHTTPSClient{body: body})
+	added, err := b.FallbackToHTTPS(context.Background(), "https://example.com/anchors", fakeHTTPSClient{body: body})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestFallbackToHTTPSSkipsMalformedEntries(t *testing.T) {
 		`{"version":1,"anchors":["not-hex","deadbeef","%s","",""]}`,
 		hex.EncodeToString(good[:])))
 
-	added, err := b.FallbackToHTTPS(context.Background(), "x", fakeHTTPSClient{body: body})
+	added, err := b.FallbackToHTTPS(context.Background(), "https://example.com/anchors", fakeHTTPSClient{body: body})
 	if err != nil {
 		t.Fatalf("FallbackToHTTPS: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestFallbackToHTTPSPropagatesGetError(t *testing.T) {
 	lookup := newTestLookup()
 	b, _ := NewBootstrap(lookup, nil, nil, nil, DefaultBootstrapOptions(), nil)
 
-	_, err := b.FallbackToHTTPS(context.Background(), "x",
+	_, err := b.FallbackToHTTPS(context.Background(), "https://example.com/anchors",
 		fakeHTTPSClient{err: errors.New("transport down")})
 	if err == nil {
 		t.Fatal("expected error from failing client")
@@ -122,7 +122,7 @@ func TestFallbackToHTTPSRejectsBadJSON(t *testing.T) {
 	lookup := newTestLookup()
 	b, _ := NewBootstrap(lookup, nil, nil, nil, DefaultBootstrapOptions(), nil)
 
-	_, err := b.FallbackToHTTPS(context.Background(), "x",
+	_, err := b.FallbackToHTTPS(context.Background(), "https://example.com/anchors",
 		fakeHTTPSClient{body: []byte("not json")})
 	if err == nil {
 		t.Fatal("expected decode error")
@@ -137,7 +137,7 @@ func TestFallbackToHTTPSRejectsOversizedResponse(t *testing.T) {
 	for i := range huge {
 		huge[i] = 'x'
 	}
-	_, err := b.FallbackToHTTPS(context.Background(), "x", fakeHTTPSClient{body: huge})
+	_, err := b.FallbackToHTTPS(context.Background(), "https://example.com/anchors", fakeHTTPSClient{body: huge})
 	if err == nil {
 		t.Fatal("expected oversize-response error")
 	}
@@ -154,7 +154,7 @@ func TestFallbackThenRunAnchors(t *testing.T) {
 	body := []byte(fmt.Sprintf(`{"version":1,"anchors":["%s"]}`,
 		hex.EncodeToString(newPub[:])))
 
-	if _, err := b.FallbackToHTTPS(context.Background(), "x", fakeHTTPSClient{body: body}); err != nil {
+	if _, err := b.FallbackToHTTPS(context.Background(), "https://example.com/anchors", fakeHTTPSClient{body: body}); err != nil {
 		t.Fatal(err)
 	}
 

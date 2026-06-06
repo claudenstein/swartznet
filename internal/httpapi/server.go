@@ -125,6 +125,30 @@ type TorrentAdder interface {
 // result set is rarely useful and the memory cost grows linearly.
 const maxSearchLimit = 500
 
+// maxSearchTimeout caps a client-supplied per-layer search timeout
+// (SwarmTimeoutMs / DHTTimeoutMs). Without it a local client could
+// pass an enormous value and pin the swarm/DHT query — and the
+// handler goroutine driving it — open far longer than intended;
+// WriteTimeout only fails the eventual write, it does not cancel
+// the context. 30s mirrors the server's WriteTimeout and is well
+// above any sane fan-out budget.
+const maxSearchTimeout = 30 * time.Second
+
+// clampSearchTimeout turns a client-supplied per-layer timeout in
+// milliseconds into a bounded time.Duration: zero (or negative)
+// falls back to def, and any value above maxSearchTimeout is
+// capped. Mirrors how maxSearchLimit clamps the hit count.
+func clampSearchTimeout(ms int, def time.Duration) time.Duration {
+	if ms <= 0 {
+		return def
+	}
+	d := time.Duration(ms) * time.Millisecond
+	if d > maxSearchTimeout {
+		return maxSearchTimeout
+	}
+	return d
+}
+
 // Server is the HTTP entry point into a running SwartzNet instance.
 // Construct with New, call Start once, and Stop to tear down
 // gracefully. A single Server can be reused across multiple
@@ -149,9 +173,10 @@ type Server struct {
 	// bootstrapped" apart from "DHT has peers but get-traversal
 	// finds nothing". Leaving it nil omits the field from the
 	// JSON response.
-	dhtStats  func() (good, total int)
-	bootstrap BootstrapProbe
-	timeout   time.Duration
+	dhtStats        func() (good, total int)
+	bootstrap       BootstrapProbe
+	publisherPubKey func() string
+	timeout         time.Duration
 
 	httpServer *http.Server
 	listener   net.Listener
@@ -183,6 +208,12 @@ type Options struct {
 	// daemon.Bootstrap has been constructed. Nil-safe — a nil
 	// probe simply omits the "bootstrap" field from /aggregate.
 	Bootstrap BootstrapProbe
+	// PublisherPubKey is an optional probe returning the
+	// publisher's ed25519 public key as lowercase hex. When
+	// supplied (and a publisher is active), /status fills the
+	// "publisher.pubkey" field the web UI renders. The daemon
+	// wires identity.PublicKeyHex here. Nil-safe.
+	PublisherPubKey func() string
 }
 
 // New constructs a Server with the legacy index+swarm signature.
@@ -203,21 +234,22 @@ func NewWithOptions(addr string, log *slog.Logger, opts Options) *Server {
 		addr = "localhost:7654"
 	}
 	return &Server{
-		addr:      addr,
-		log:       log,
-		idx:       opts.Index,
-		swarm:     opts.Swarm,
-		publisher: opts.Publisher,
-		lookup:    opts.Lookup,
-		bloom:     opts.Bloom,
-		tracker:   opts.Tracker,
-		sources:   opts.Sources,
-		adder:     opts.Adder,
-		control:   opts.Control,
-		companion: opts.Companion,
-		dhtStats:  opts.DHTStats,
-		bootstrap: opts.Bootstrap,
-		timeout:   10 * time.Second,
+		addr:            addr,
+		log:             log,
+		idx:             opts.Index,
+		swarm:           opts.Swarm,
+		publisher:       opts.Publisher,
+		lookup:          opts.Lookup,
+		bloom:           opts.Bloom,
+		tracker:         opts.Tracker,
+		sources:         opts.Sources,
+		adder:           opts.Adder,
+		control:         opts.Control,
+		companion:       opts.Companion,
+		dhtStats:        opts.DHTStats,
+		bootstrap:       opts.Bootstrap,
+		publisherPubKey: opts.PublisherPubKey,
+		timeout:         10 * time.Second,
 	}
 }
 
@@ -231,6 +263,16 @@ func (s *Server) Addr() string {
 	return s.listener.Addr().String()
 }
 
+// listenHost extracts the host portion of a bound listener
+// address. Returns "" when the address cannot be parsed.
+func listenHost(addr net.Addr) string {
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
 // Start binds the listen socket and launches the HTTP server in a
 // background goroutine. Returns as soon as the listener is bound
 // so callers can reliably call Addr(). Errors from Serve are logged
@@ -241,6 +283,18 @@ func (s *Server) Start() error {
 		return err
 	}
 	s.listener = ln
+
+	// The API has no authentication and exposes torrent control,
+	// follow-list mutation, capability/rate-limit changes, and
+	// reputation/Bloom mutation. Binding to anything but loopback
+	// puts all of that on the network for the whole LAN/internet.
+	// We still bind (operators may front it with their own auth),
+	// but make the exposure impossible to miss.
+	if host := listenHost(ln.Addr()); host != "" && !isLoopbackHostHeader(host) {
+		s.log.Warn("httpapi.non_loopback_bind",
+			"addr", ln.Addr().String(),
+			"msg", "API is UNAUTHENTICATED and reachable off-host; anyone who can reach this address controls torrents, capabilities, and reputation")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /search", s.handleSearch)
@@ -284,11 +338,15 @@ func (s *Server) Start() error {
 	}
 
 	srv := &http.Server{
-		// withMaxBodyBytes caps every incoming request body at
-		// maxRequestBody so a slow or malicious client cannot
-		// stream an unbounded JSON document into our json.Decoder.
-		// See bodylimit.go.
-		Handler: withMaxBodyBytes(mux, maxRequestBody),
+		// withCSRFGuard rejects cross-origin browser requests and
+		// DNS-rebinding attempts on every state-mutating endpoint
+		// (see csrf.go). withMaxBodyBytes caps every incoming
+		// request body at maxRequestBody so a slow or malicious
+		// client cannot stream an unbounded JSON document into our
+		// json.Decoder (see bodylimit.go). Order: cap the body
+		// first, then apply the origin/host guard so a rejected
+		// request never reads its body.
+		Handler: withMaxBodyBytes(withCSRFGuard(mux), maxRequestBody),
 		// Read/write timeouts bound the time a single client
 		// can tie up a handler goroutine. The daemon is
 		// localhost-only, but a stuck browser fetch or buggy
@@ -483,10 +541,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Swarm search — optional, requires search-capable peers.
 	if req.Swarm && s.swarm != nil {
-		timeout := time.Duration(req.SwarmTimeoutMs) * time.Millisecond
-		if timeout == 0 {
-			timeout = 2 * time.Second
-		}
+		timeout := clampSearchTimeout(req.SwarmTimeoutMs, 2*time.Second)
 		ctx, cancel := context.WithTimeout(r.Context(), timeout+500*time.Millisecond)
 		defer cancel()
 		out, err := s.swarm.Query(ctx, swarmsearch.QueryRequest{
@@ -517,10 +572,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// DHT lookup — optional, requires a configured Lookup.
 	if req.DHT && s.lookup != nil {
-		timeout := time.Duration(req.DHTTimeoutMs) * time.Millisecond
-		if timeout == 0 {
-			timeout = 5 * time.Second
-		}
+		timeout := clampSearchTimeout(req.DHTTimeoutMs, 5*time.Second)
 		ctx, cancel := context.WithTimeout(r.Context(), timeout+500*time.Millisecond)
 		defer cancel()
 		out, err := s.lookup.Query(ctx, req.Q)
@@ -677,6 +729,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if s.publisher != nil {
 		st := s.publisher.Status()
+		if s.publisherPubKey != nil {
+			out.Publisher.PubKey = s.publisherPubKey()
+		}
 		out.Publisher.TotalKeywords = st.TotalKeywords
 		out.Publisher.TotalHits = st.TotalHits
 		for _, ks := range st.LastPublishes {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -27,10 +28,16 @@ type companionTab struct {
 	pubInfoHashLbl *widget.Label
 
 	// Follow list.
-	followList     *widget.List
-	follows        []followRow
-	followsEmpty   *widget.Label // hint shown when the follow list is empty
-	followSelected int           // -1 = none; tracks the currently right-click target
+	followList   *widget.List
+	follows      []followRow
+	followsEmpty *widget.Label // hint shown when the follow list is empty
+	// followSelectedKey is the pubkey hex of the row the user last
+	// clicked/right-clicked, NOT a row index. Rows are re-sorted on
+	// every 4s refresh, so a stored index would point at a different
+	// publisher after a refresh — keying by pubkey keeps the
+	// context-menu (Unfollow / Copy) bound to the publisher the user
+	// actually clicked. Empty string = nothing selected.
+	followSelectedKey string
 }
 
 type followRow struct {
@@ -53,7 +60,7 @@ func newCompanionTab(ctx context.Context, d *daemon.Daemon) *companionTab {
 // pollLoop's fyne.Do refresh racing test-thread widget reads
 // under -race.
 func buildCompanionTab(d *daemon.Daemon) *companionTab {
-	ct := &companionTab{d: d, followSelected: -1}
+	ct := &companionTab{d: d}
 
 	// Publisher status labels.
 	// pubKeyLbl shows the full 64-char ed25519 pubkey hex —
@@ -115,23 +122,32 @@ func buildCompanionTab(d *daemon.Daemon) *companionTab {
 				return
 			}
 			f := ct.follows[id]
-			pk := f.pubkey
-			if len(pk) > 16 {
-				pk = pk[:16] + "..."
+			shortPK := f.pubkey
+			if len(shortPK) > 16 {
+				shortPK = shortPK[:16] + "..."
 			}
-			box.Objects[0].(*widget.Label).SetText(fmt.Sprintf("%s (%s)", f.label, pk))
+			box.Objects[0].(*widget.Label).SetText(fmt.Sprintf("%s (%s)", f.label, shortPK))
 			stats := fmt.Sprintf("torrents=%d  content=%d  sync=%s", f.torrents, f.content, f.lastSync)
 			if f.lastErr != "" {
 				stats += "  err=" + f.lastErr
 			}
 			box.Objects[1].(*widget.Label).SetText(stats)
+			// Capture the full pubkey (not the row index) so a
+			// recycled button that fires after a re-sort still
+			// targets the publisher whose row was last rendered
+			// into this widget.
+			fullPK := f.pubkey
 			box.Objects[2].(*widget.Button).OnTapped = func() {
-				ct.unfollowAt(id)
+				ct.unfollowByKey(fullPK)
 			}
 		},
 	)
 	ct.followList.OnSelected = func(id widget.ListItemID) {
-		ct.followSelected = id
+		if id < 0 || id >= len(ct.follows) {
+			ct.followSelectedKey = ""
+			return
+		}
+		ct.followSelectedKey = ct.follows[id].pubkey
 	}
 
 	// Follow form.
@@ -232,6 +248,18 @@ func (ct *companionTab) refresh() {
 		}
 	}
 
+	// CompSub.Following() returns a map, so iteration order is
+	// non-deterministic. Sort by label then pubkey so a given
+	// publisher always occupies the same screen position across
+	// refreshes — without this the rows would visibly jump every
+	// 4s and a stored selection would target the wrong publisher.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].label != rows[j].label {
+			return rows[i].label < rows[j].label
+		}
+		return rows[i].pubkey < rows[j].pubkey
+	})
+
 	fyne.Do(func() {
 		ct.pubKeyLbl.SetText(pubKey)
 		ct.pubRefreshLbl.SetText(lastRefresh)
@@ -291,11 +319,10 @@ func (ct *companionTab) doFollow(pubkeyHex, label string) {
 // been clicked yet (rightClickCapture treats nil as "do
 // nothing", so the menu silently no-ops on an empty list).
 func (ct *companionTab) buildFollowMenu() *fyne.Menu {
-	idx := ct.followSelected
-	if idx < 0 || idx >= len(ct.follows) {
+	row, ok := ct.selectedRow()
+	if !ok {
 		return nil
 	}
-	row := ct.follows[idx]
 	pkHex := row.pubkey
 	label := row.label
 	items := []*fyne.MenuItem{
@@ -310,18 +337,38 @@ func (ct *companionTab) buildFollowMenu() *fyne.Menu {
 	}
 	items = append(items,
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Unfollow", func() { ct.unfollowAt(idx) }),
+		fyne.NewMenuItem("Unfollow", func() { ct.unfollowByKey(pkHex) }),
 	)
 	return fyne.NewMenu("Publisher actions", items...)
 }
 
-func (ct *companionTab) unfollowAt(idx int) {
-	if ct.d.CompSub == nil || idx >= len(ct.follows) {
+// selectedRow resolves the currently-selected follow row by its
+// pubkey (followSelectedKey), scanning the live ct.follows slice.
+// Returns ok=false when nothing is selected or the previously-
+// selected publisher is no longer in the list (e.g. it was
+// unfollowed or dropped between refreshes).
+func (ct *companionTab) selectedRow() (followRow, bool) {
+	if ct.followSelectedKey == "" {
+		return followRow{}, false
+	}
+	for _, r := range ct.follows {
+		if r.pubkey == ct.followSelectedKey {
+			return r, true
+		}
+	}
+	return followRow{}, false
+}
+
+// unfollowByKey unfollows the publisher identified by its pubkey
+// hex. Keying by pubkey (rather than by a possibly-stale row index)
+// guarantees we unfollow exactly the publisher the user clicked,
+// even if the row order changed in the meantime.
+func (ct *companionTab) unfollowByKey(pkHex string) {
+	if ct.d.CompSub == nil || pkHex == "" {
 		return
 	}
-	pkHex := ct.follows[idx].pubkey
 	raw, err := hex.DecodeString(pkHex)
-	if err != nil {
+	if err != nil || len(raw) != 32 {
 		return
 	}
 	var pub [32]byte

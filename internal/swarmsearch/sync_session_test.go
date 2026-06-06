@@ -52,11 +52,11 @@ func TestSyncSessionEndToEnd(t *testing.T) {
 	stable := 0
 	lastDecoded := 0
 	for i := 0; i < 500; i++ {
-		syms, _, err := responder.ProduceSymbols(20)
+		syms, baseIdx, err := responder.ProduceSymbols(20)
 		if err != nil {
 			t.Fatalf("ProduceSymbols: %v", err)
 		}
-		symsMsg := SyncSymbols{TxID: 42, Symbols: syms}
+		symsMsg := SyncSymbols{TxID: 42, Symbols: syms, Index: baseIdx}
 		if err := initiator.ApplySymbols(symsMsg); err != nil {
 			t.Fatalf("ApplySymbols: %v", err)
 		}
@@ -133,11 +133,11 @@ func TestSyncSessionOneSidedDiff(t *testing.T) {
 	}
 
 	for i := 0; i < 300; i++ {
-		syms, _, err := resp.ProduceSymbols(20)
+		syms, baseIdx, err := resp.ProduceSymbols(20)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = ini.ApplySymbols(SyncSymbols{TxID: 1, Symbols: syms})
+		_ = ini.ApplySymbols(SyncSymbols{TxID: 1, Symbols: syms, Index: baseIdx})
 		if ini.Converged() && len(ini.NeedIDs()) == 40 {
 			break
 		}

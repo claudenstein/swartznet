@@ -3,6 +3,7 @@ package swarmsearch
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pp "github.com/anacrolix/torrent/peer_protocol"
@@ -179,6 +180,27 @@ type Protocol struct {
 	// SPEC §3.3 channel-C gossip primitive. Nil when no
 	// Bootstrap is wired.
 	endorsementSink EndorsementSink
+
+	// feelerRunning guards StartFeeler so repeated calls are
+	// genuine no-ops (the doc contract). Set once via CAS when the
+	// first feeler goroutine launches.
+	feelerRunning atomic.Bool
+
+	// announceSends bounds the fire-and-forget PeerAnnounce
+	// goroutines spawned from OnRemoteHandshake. A full channel
+	// drops the announce rather than spawning an unbounded
+	// goroutine per handshake. See announceWorker.
+	announceSends chan announceJob
+	announceOnce  sync.Once
+}
+
+// announceJob is a queued outbound PeerAnnounce for the bounded
+// announce worker. Carrying the captured sender keeps the worker
+// free of a lock on the read path.
+type announceJob struct {
+	sender  Sender
+	addr    string
+	payload []byte
 }
 
 // IndexerSink is the narrow interface the Protocol uses to
@@ -542,9 +564,7 @@ func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessag
 			}
 			payload, err := EncodePeerAnnounce(pa)
 			if err == nil {
-				go func() {
-					_ = sender.Send(addr, payload)
-				}()
+				p.enqueueAnnounce(announceJob{sender: sender, addr: addr, payload: payload})
 			}
 		}
 		p.log.Info("swarmsearch.peer_capable",
@@ -557,6 +577,42 @@ func (p *Protocol) OnRemoteHandshake(addr string, hs *pp.ExtendedHandshakeMessag
 			"peer", addr,
 			"client", hs.V,
 		)
+	}
+}
+
+// announceQueueDepth bounds the buffered PeerAnnounce queue feeding
+// the single announce worker. One handshake enqueues one job; if the
+// write path is backed up enough to fill this buffer the excess
+// announces are dropped (the peer learns our services on its next
+// handshake) rather than spawning an unbounded goroutine fan-out.
+const announceQueueDepth = 64
+
+// enqueueAnnounce hands a PeerAnnounce to the bounded background
+// worker. The worker is started lazily on first use so a Protocol
+// that never handshakes a capable peer pays nothing. A full queue
+// drops the announce — fire-and-forget semantics are preserved, but
+// the goroutine count is now bounded to exactly one.
+func (p *Protocol) enqueueAnnounce(job announceJob) {
+	p.announceOnce.Do(func() {
+		p.announceSends = make(chan announceJob, announceQueueDepth)
+		go p.announceWorker()
+	})
+	select {
+	case p.announceSends <- job:
+	default:
+		p.log.Debug("swarmsearch.peer_announce.queue_full", "peer", job.addr)
+	}
+}
+
+// announceWorker drains the announce queue serially. Send errors are
+// logged at Debug — a failed announce is non-fatal because the peer
+// re-learns our services on its next handshake.
+func (p *Protocol) announceWorker() {
+	for job := range p.announceSends {
+		if err := job.sender.Send(job.addr, job.payload); err != nil {
+			p.log.Debug("swarmsearch.peer_announce.send_err",
+				"peer", job.addr, "err", err)
+		}
 	}
 }
 

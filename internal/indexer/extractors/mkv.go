@@ -113,6 +113,17 @@ func (e *MKVExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err
 		}
 		switch id {
 		case ebmlIDInfo, ebmlIDTracks, ebmlIDChapters, ebmlIDTags:
+			// Bound the allocation before reading: `size` comes from an
+			// untrusted EBML VINT and can claim multi-GB. Metadata
+			// elements are always small; if one claims more than our
+			// read cap, skip it rather than allocate. This also guards
+			// against the unsigned size overflowing the int conversion.
+			if size > uint64(maxBytes) {
+				if _, err := br.Discard(int(size)); err != nil {
+					return nil, fmt.Errorf("mkv: discard oversized %x: %w", id, err)
+				}
+				continue
+			}
 			body, err := readFull(br, int(size))
 			if err != nil {
 				return nil, fmt.Errorf("mkv: read %x body: %w", id, err)
