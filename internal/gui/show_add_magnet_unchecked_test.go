@@ -2,7 +2,6 @@ package gui
 
 import (
 	"testing"
-	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -26,6 +25,8 @@ func TestShowAddMagnetDialogPrefilledShouldNotIndex(t *testing.T) {
 		d:       d,
 		content: widget.NewLabel("downloads"),
 	}
+
+	wait := joinAddMagnet(t, 1)
 
 	dl.showAddMagnetDialog()
 
@@ -58,5 +59,5 @@ func TestShowAddMagnetDialogPrefilledShouldNotIndex(t *testing.T) {
 		indexCheck.SetChecked(false)
 		addBtn.OnTapped()
 	}
-	time.Sleep(500 * time.Millisecond)
+	wait()
 }

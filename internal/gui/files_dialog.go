@@ -242,6 +242,14 @@ func (fd *filesDialog) sortFilesLocked() {
 	}
 }
 
+// afterSetAllPriorities, when non-nil, is invoked at the very end of the
+// setAllPriorities goroutine (after any fyne.Do error render returns). It
+// exists only so tests can deterministically join the async UI goroutine
+// under the Fyne test driver, which runs fyne.Do callbacks inline on the
+// calling goroutine. It is nil in production, so real-app timing/behavior
+// is unchanged.
+var afterSetAllPriorities func()
+
 func (fd *filesDialog) setAllPriorities(priority engine.FilePriority) {
 	fd.mu.RLock()
 	indices := make([]int, 0, len(fd.files))
@@ -260,6 +268,12 @@ func (fd *filesDialog) setAllPriorities(priority engine.FilePriority) {
 			fyne.Do(func() {
 				dialog.ShowError(fmt.Errorf("some files failed: %v", failed), fd.win)
 			})
+		}
+		// fyne.Do under the test driver runs its callback inline+synchronously,
+		// so by here any async render has finished. Signal the test seam (nil in
+		// production) so tests can join this goroutine deterministically.
+		if afterSetAllPriorities != nil {
+			afterSetAllPriorities()
 		}
 	}()
 }

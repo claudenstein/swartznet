@@ -17,6 +17,17 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
+// afterRemoveSelected and afterAddMagnet, when non-nil, are invoked at the
+// very end of the removeSelected / showAddMagnetDialogPrefilled goroutines
+// respectively (after any fyne.Do render returns). They exist only so tests
+// can deterministically join those async UI goroutines under the Fyne test
+// driver, which runs fyne.Do callbacks inline on the calling goroutine. Both
+// are nil in production, so real-app timing/behavior is unchanged.
+var (
+	afterRemoveSelected func()
+	afterAddMagnet      func()
+)
+
 // downloadsTab holds the Downloads tab state.
 type downloadsTab struct {
 	content fyne.CanvasObject
@@ -603,6 +614,16 @@ func (dl *downloadsTab) showAddMagnetDialogPrefilled(prefill string, indexChecke
 			return
 		}
 		go func() {
+			// Signal the test seam (nil in production) as the very last
+			// action of this goroutine, after any fyne.Do error render
+			// has returned, so tests can join it deterministically. The
+			// Fyne test driver runs fyne.Do callbacks inline+synchronously,
+			// so by the time this defer fires the async render is done.
+			defer func() {
+				if afterAddMagnet != nil {
+					afterAddMagnet()
+				}
+			}()
 			ih, err := dl.d.Eng.AddMagnetURI(uri)
 			if err != nil {
 				fyne.Do(func() {
@@ -834,6 +855,13 @@ func (dl *downloadsTab) removeSelected() {
 					dl.mu.Unlock()
 					dl.refreshSelectionLabel()
 				})
+				// fyne.Do under the test driver runs its callback
+				// inline+synchronously, so by here the async render has
+				// finished. Signal the test seam (nil in production) so
+				// tests can join this goroutine deterministically.
+				if afterRemoveSelected != nil {
+					afterRemoveSelected()
+				}
 			}()
 		},
 		dl.win(),

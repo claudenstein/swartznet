@@ -2,7 +2,6 @@ package gui
 
 import (
 	"testing"
-	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -26,6 +25,8 @@ func TestRunSearchDHTLayerOn(t *testing.T) {
 		return
 	}
 
+	wait := joinRunSearch(t)
+
 	st := newSearchTab(nil, d)
 	st.localChk.SetChecked(false)
 	st.swarmChk.SetChecked(false)
@@ -34,6 +35,7 @@ func TestRunSearchDHTLayerOn(t *testing.T) {
 	st.runSearch()
 
 	// runSearch's outer goroutine has a 10s context timeout; the
-	// inner Lookup fan-out times out at 2s with no peers.
-	time.Sleep(2500 * time.Millisecond)
+	// inner Lookup fan-out times out at 2s with no peers. The seam
+	// fires once that orchestrator goroutine's fyne.Do render returns.
+	wait()
 }

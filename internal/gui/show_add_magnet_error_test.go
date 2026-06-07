@@ -34,4 +34,3 @@ func TestShowAddMagnetErrorOpensDialog(t *testing.T) {
 		}
 	}
 }
-

@@ -15,6 +15,41 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Fixed — `internal/gui` is race-clean under `-race`
+
+The GUI tests raced under the Fyne *test* driver: a background
+worker goroutine routes its UI update through `fyne.Do`, which the
+test driver (unlike the real GLFW driver) runs inline on the
+spawned goroutine. That render then touched Fyne's process-global,
+unsynchronized font/SVG cache concurrently with other
+test-goroutine rendering — `DATA RACE` reports, all inside Fyne
+internals. Production behavior is unchanged and was never racy:
+with the real driver, `fyne.Do` serializes every callback onto the
+single UI thread, so exactly one goroutine ever touches those
+caches.
+
+The fix is test-only. Each async UI flow that a test exercises now
+exposes an unexported, nil-in-production seam invoked at the very
+end of its goroutine (after `fyne.Do` returns); tests set the seam
+and deterministically join the goroutine before any further
+rendering or teardown, restoring the single-UI-thread invariant
+under the test driver and replacing the prior `time.Sleep` drains.
+Seams added: `afterCreateTorrent` (create.go), `afterRunSearch`
+(search.go), `afterRefreshPublisher` (companion.go),
+`afterSetAllPriorities` (files_dialog.go), and `afterRemoveSelected`
+/ `afterAddMagnet` (downloads.go). No production logic, signatures,
+or off-thread behavior changed. Verified across 38+ full-suite
+`-race` iterations with zero `DATA RACE` reports.
+
+Also widened a handful of tight test wall-clock budgets that could
+flake under a fully-saturated parallel `-race` sweep (CPU starvation,
+not a code defect): the regtest Layer-D refresh scenario
+(`TestLayerDPublisherRefreshKeepsItemFresh`, 12 s → 30 s) and four
+`cmd/swartznet` "did this near-instant event happen?" assertions —
+the two `signalContext` cancellation tests (1 s → 5 s) and the two
+`progressLoop` exit tests (2 s → 5 s). Each assertion's meaning is
+unchanged; a genuinely hung loop still fails.
+
 ### Fixed — Whole-codebase review hardening pass (55 findings)
 
 A multi-package review swept every subsystem and produced 55

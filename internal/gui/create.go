@@ -269,6 +269,13 @@ func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
 	dlg.Show()
 }
 
+// afterCreateTorrent, when non-nil, is invoked at the very end of the
+// runCreateTorrent goroutine (after the fyne.Do callback returns). It exists
+// only so tests can deterministically join the async UI goroutine under the
+// Fyne test driver, which runs fyne.Do callbacks inline on the calling
+// goroutine. It is nil in production, so real-app timing/behavior is unchanged.
+var afterCreateTorrent func()
+
 // runCreateTorrent spawns the hashing goroutine and shows a
 // progress dialog until it completes.
 func runCreateTorrent(d *daemon.Daemon, win fyne.Window, opts engine.CreateTorrentOptions, outPath string, andSeed bool) {
@@ -313,6 +320,12 @@ func runCreateTorrent(d *daemon.Daemon, win fyne.Window, opts engine.CreateTorre
 			}
 			dialog.ShowInformation("Torrent created", msg, win)
 		})
+		// fyne.Do under the test driver runs its callback inline+synchronously,
+		// so by here the async render has finished. Signal the test seam (nil in
+		// production) so tests can join this goroutine deterministically.
+		if afterCreateTorrent != nil {
+			afterCreateTorrent()
+		}
 	}()
 }
 

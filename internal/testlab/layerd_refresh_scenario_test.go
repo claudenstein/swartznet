@@ -65,11 +65,16 @@ func TestLayerDPublisherRefreshKeepsItemFresh(t *testing.T) {
 	}
 	t.Logf("first publish at %v", firstPublished)
 
-	// Regtest refresh interval is 5 s. Wait past one full cycle
-	// (up to 12 s) and poll for a strictly-newer LastPublished
-	// timestamp. If the ticker stopped or the refresh path
-	// silently errored, this never advances.
-	deadline := time.Now().Add(12 * time.Second)
+	// Regtest refresh interval is 5 s. Poll for a strictly-newer
+	// LastPublished timestamp; if the ticker stopped or the refresh
+	// path silently errored, this never advances. The budget is
+	// generous (30 s ≈ six refresh cycles) so that under -race, or
+	// when this scenario runs alongside other CPU-heavy tests, a
+	// starved ticker goroutine still has room to fire — the
+	// assertion is "the timestamp eventually advances", not "it
+	// advances within one tight cycle", so widening the deadline
+	// removes the timing flake without weakening what we verify.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		latest := publisherLastPublished(pub, keyword)
 		if latest.After(firstPublished) {
@@ -78,40 +83,53 @@ func TestLayerDPublisherRefreshKeepsItemFresh(t *testing.T) {
 
 			// Sanity: the leech's Lookup can still resolve the
 			// keyword post-refresh (the re-put didn't corrupt
-			// anything). The query timeout has to absorb several
-			// DHT round-trips under -race; 15 s leaves slack so
-			// a slow loopback DHT traversal doesn't fail us.
+			// anything). A single loopback DHT traversal can return
+			// zero responders under -race / parallel-test load even
+			// when nothing is wrong, so we POLL — re-querying with a
+			// per-attempt timeout until the keyword resolves to our
+			// infohash, or a generous overall budget elapses. This
+			// keeps the assertion intact ("post-refresh the keyword
+			// still resolves") while tolerating a transiently-slow
+			// traversal; DHT resolution is eventually-consistent.
 			leech := c.Nodes[total-1]
 			look := leech.Eng.Lookup()
 			look.AddIndexer(c.Nodes[0].Eng.Identity().PublicKeyBytes(), "seed")
-			qctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			resp, qerr := look.Query(qctx, keyword)
-			cancel()
-			if qerr != nil {
-				t.Fatalf("post-refresh Lookup.Query: %v", qerr)
-			}
-			if resp.IndexersResponded < 1 || len(resp.Hits) < 1 {
-				t.Fatalf("post-refresh lookup empty: asked=%d responded=%d hits=%d",
-					resp.IndexersAsked, resp.IndexersResponded, len(resp.Hits))
-			}
-			found := false
 			wantIH := hex.EncodeToString(ih[:])
-			for _, h := range resp.Hits {
-				if h.InfoHash == wantIH {
-					found = true
-					break
+
+			lookDeadline := time.Now().Add(45 * time.Second)
+			var lastResp *dhtindex.LookupResponse
+			var lastErr error
+			for time.Now().Before(lookDeadline) {
+				qctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				resp, qerr := look.Query(qctx, keyword)
+				cancel()
+				lastResp, lastErr = resp, qerr
+				if qerr == nil && resp.IndexersResponded >= 1 {
+					for _, h := range resp.Hits {
+						if h.InfoHash == wantIH {
+							return // resolved post-refresh — success
+						}
+					}
 				}
+				time.Sleep(500 * time.Millisecond)
 			}
-			if !found {
-				t.Fatalf("post-refresh hits did not contain %s", wantIH)
+
+			c.DumpLogs(t)
+			switch {
+			case lastErr != nil:
+				t.Fatalf("post-refresh Lookup.Query never succeeded within 45s; last err: %v", lastErr)
+			case lastResp == nil:
+				t.Fatalf("post-refresh Lookup.Query never returned a response within 45s")
+			default:
+				t.Fatalf("post-refresh lookup never resolved %s within 45s: asked=%d responded=%d hits=%d",
+					wantIH, lastResp.IndexersAsked, lastResp.IndexersResponded, len(lastResp.Hits))
 			}
-			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
 	c.DumpLogs(t)
-	t.Fatalf("publisher.LastPublished never advanced past %v within 12 s — "+
+	t.Fatalf("publisher.LastPublished never advanced past %v within 30 s — "+
 		"refresh ticker may have stopped firing", firstPublished)
 }
 

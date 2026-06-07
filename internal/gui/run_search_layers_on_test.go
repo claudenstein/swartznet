@@ -8,6 +8,35 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// joinRunSearch arms the afterRunSearch test seam and returns a wait
+// func that blocks until runSearch's spawned goroutine (including its
+// inline fyne.Do render under the test driver) has fully completed.
+// This replaces time.Sleep so the async render is drained
+// deterministically, keeping rendering single-threaded against Fyne's
+// unsynchronized global font/SVG caches. The wait timeout is generous
+// because runSearch's orchestrator goroutine is bounded by an internal
+// 10s context (the DHT/swarm fan-out can run nearly that long when no
+// peers answer).
+func joinRunSearch(t *testing.T) func() {
+	t.Helper()
+	done := make(chan struct{}, 1)
+	afterRunSearch = func() {
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { afterRunSearch = nil })
+	return func() {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Fatal("runSearch goroutine did not complete")
+		}
+	}
+}
+
 // TestRunSearchLocalLayerOn covers runSearch's doLocal && Index!=nil
 // arm. newTestDaemon constructs a non-nil Bleve Index, so toggling
 // localChk on takes runSearch into the spawned local-search
@@ -22,6 +51,8 @@ func TestRunSearchLocalLayerOn(t *testing.T) {
 
 	d := newTestDaemon(t)
 
+	wait := joinRunSearch(t)
+
 	st := newSearchTab(nil, d)
 	st.localChk.SetChecked(true)
 	st.swarmChk.SetChecked(false)
@@ -29,7 +60,7 @@ func TestRunSearchLocalLayerOn(t *testing.T) {
 	st.queryEntry.SetText("anything")
 	st.runSearch()
 
-	time.Sleep(500 * time.Millisecond)
+	wait()
 }
 
 // TestRunSearchSwarmLayerOn covers runSearch's doSwarm &&
@@ -45,6 +76,8 @@ func TestRunSearchSwarmLayerOn(t *testing.T) {
 
 	d := newTestDaemon(t)
 
+	wait := joinRunSearch(t)
+
 	st := newSearchTab(nil, d)
 	st.localChk.SetChecked(false)
 	st.swarmChk.SetChecked(true)
@@ -52,6 +85,7 @@ func TestRunSearchSwarmLayerOn(t *testing.T) {
 	st.queryEntry.SetText("anything")
 	st.runSearch()
 
-	// Swarm Query has a 2s internal timeout; sleep beyond it.
-	time.Sleep(2500 * time.Millisecond)
+	// Swarm Query has a 2s internal timeout; the seam fires once the
+	// orchestrator goroutine's fyne.Do render returns.
+	wait()
 }

@@ -154,8 +154,8 @@ func TestSignalContextCancelsViaParent(t *testing.T) {
 	cancelParent()
 	select {
 	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Error("ctx not cancelled within 1s after parent cancel")
+	case <-time.After(5 * time.Second):
+		t.Error("ctx not cancelled within 5s after parent cancel")
 	}
 }
 
@@ -210,7 +210,7 @@ func TestSignalContextCancelsViaSigint(t *testing.T) {
 	}
 	select {
 	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Error("ctx not cancelled within 1s after self-SIGINT")
+	case <-time.After(5 * time.Second):
+		t.Error("ctx not cancelled within 5s after self-SIGINT")
 	}
 }

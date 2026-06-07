@@ -32,4 +32,3 @@ func TestStatusRefreshPausedTorrent(t *testing.T) {
 	st := buildStatusTab(d)
 	st.refresh()
 }
-

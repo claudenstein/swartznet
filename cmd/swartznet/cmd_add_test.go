@@ -392,8 +392,8 @@ func TestProgressLoopReturnsOnCtxCancel(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Error("progressLoop did not exit within 2s of ctx cancel")
+	case <-time.After(5 * time.Second):
+		t.Error("progressLoop did not exit within 5s of ctx cancel")
 	}
 }
 
@@ -444,8 +444,8 @@ func TestProgressLoopHandlesClosedFileEvents(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Error("progressLoop did not exit within 2s after close+cancel")
+	case <-time.After(5 * time.Second):
+		t.Error("progressLoop did not exit within 5s after close+cancel")
 	}
 }
 

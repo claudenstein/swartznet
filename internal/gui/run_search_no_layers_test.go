@@ -2,7 +2,6 @@ package gui
 
 import (
 	"testing"
-	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -26,6 +25,8 @@ func TestRunSearchAllLayersOff(t *testing.T) {
 
 	d := newTestDaemon(t)
 
+	wait := joinRunSearch(t)
+
 	st := newSearchTab(nil, d)
 	st.localChk.SetChecked(false)
 	st.swarmChk.SetChecked(false)
@@ -33,8 +34,7 @@ func TestRunSearchAllLayersOff(t *testing.T) {
 	st.queryEntry.SetText("anything")
 	st.runSearch()
 
-	// All-layers-off path completes within a few ms; sleep
-	// generously to let the orchestrator goroutine + fyne.Do
-	// drain before the test returns.
-	time.Sleep(500 * time.Millisecond)
+	// All-layers-off path still spawns the orchestrator goroutine +
+	// fyne.Do(buildResults); join it deterministically via the seam.
+	wait()
 }

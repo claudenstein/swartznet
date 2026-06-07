@@ -2,7 +2,6 @@ package gui
 
 import (
 	"testing"
-	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -29,6 +28,10 @@ func TestFilesDialogBulkButtonsRealTorrent(t *testing.T) {
 		t.Fatalf("TorrentFiles: %v", err)
 	}
 
+	// Both Select All and Deselect All each spawn a setAllPriorities
+	// goroutine, so arm the seam for two joins.
+	wait := joinSetAllPriorities(t, 2)
+
 	fd := &filesDialog{
 		d:           d,
 		win:         w,
@@ -52,11 +55,12 @@ func TestFilesDialogBulkButtonsRealTorrent(t *testing.T) {
 	}
 	if allBtn != nil && allBtn.OnTapped != nil {
 		allBtn.OnTapped()
+		wait()
 	}
 	if noneBtn != nil && noneBtn.OnTapped != nil {
 		noneBtn.OnTapped()
+		wait()
 	}
 
 	fd.dlg.Hide()
-	time.Sleep(200 * time.Millisecond)
 }

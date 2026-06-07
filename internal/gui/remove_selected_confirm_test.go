@@ -24,6 +24,18 @@ func TestRemoveSelectedConfirmAction(t *testing.T) {
 	d := newTestDaemon(t)
 	ih := addTestTorrent(t, d.Eng)
 
+	// Tapping "Yes" spawns removeSelected's goroutine, which ends in
+	// fyne.Do. Join it deterministically via the afterRemoveSelected
+	// seam instead of sleeping.
+	done := make(chan struct{}, 1)
+	afterRemoveSelected = func() {
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { afterRemoveSelected = nil })
+
 	dl := &downloadsTab{
 		d:        d,
 		content:  widget.NewLabel("downloads"),
@@ -41,7 +53,11 @@ func TestRemoveSelectedConfirmAction(t *testing.T) {
 			}
 		}
 	}
-	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("removeSelected goroutine did not complete")
+	}
 }
 
 // TestRemoveSelectedConfirmCanceled covers the `if !ok { return }`

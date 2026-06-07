@@ -15,7 +15,10 @@ import (
 // TestRunCreateTorrentSuccessSeed covers the success arm of
 // runCreateTorrent at create.go:225-257 including the andSeed
 // branch that calls AddTorrentMetaInfo. We create a tiny file
-// in a tempdir, run with andSeed=true, then drain.
+// in a tempdir, run with andSeed=true, then join the async UI
+// goroutine via the afterCreateTorrent seam (the seam fires after
+// the fyne.Do callback returns, so AddTorrentMetaInfoSeedFrom and
+// its render are covered too).
 func TestRunCreateTorrentSuccessSeed(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()
@@ -24,6 +27,15 @@ func TestRunCreateTorrentSuccessSeed(t *testing.T) {
 	w.SetContent(widget.NewLabel("anchor"))
 
 	d := newTestDaemon(t)
+
+	done := make(chan struct{}, 1)
+	afterCreateTorrent = func() {
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { afterCreateTorrent = nil })
 
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "payload.bin")
@@ -37,7 +49,9 @@ func TestRunCreateTorrentSuccessSeed(t *testing.T) {
 		Name: "test",
 	}, out, true)
 
-	// Drain: hashing tiny file is near-instant; AddTorrentMetaInfo
-	// returns quickly too. 800ms covers both arms.
-	time.Sleep(800 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runCreateTorrent goroutine did not complete")
+	}
 }

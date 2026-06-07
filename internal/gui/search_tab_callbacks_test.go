@@ -2,7 +2,6 @@ package gui
 
 import (
 	"testing"
-	"time"
 
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -24,6 +23,8 @@ func TestSearchTabSubmitCallback(t *testing.T) {
 	d := newTestDaemon(t)
 	st := newSearchTab(nil, d)
 
+	wait := joinRunSearch(t)
+
 	st.localChk.SetChecked(false)
 	st.swarmChk.SetChecked(false)
 	st.dhtChk.SetChecked(false)
@@ -31,7 +32,7 @@ func TestSearchTabSubmitCallback(t *testing.T) {
 	if st.queryEntry.OnSubmitted != nil {
 		st.queryEntry.OnSubmitted("submit")
 	}
-	time.Sleep(1500 * time.Millisecond)
+	wait()
 }
 
 // TestSearchTabButtonCallback covers the searchBtn OnTapped
@@ -48,6 +49,8 @@ func TestSearchTabButtonCallback(t *testing.T) {
 	d := newTestDaemon(t)
 	st := newSearchTab(nil, d)
 
+	wait := joinRunSearch(t)
+
 	st.localChk.SetChecked(false)
 	st.swarmChk.SetChecked(false)
 	st.dhtChk.SetChecked(false)
@@ -55,5 +58,5 @@ func TestSearchTabButtonCallback(t *testing.T) {
 	if st.searchBtn.OnTapped != nil {
 		st.searchBtn.OnTapped()
 	}
-	time.Sleep(1500 * time.Millisecond)
+	wait()
 }

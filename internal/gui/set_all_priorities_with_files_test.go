@@ -10,6 +10,33 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
+// joinSetAllPriorities arms the afterSetAllPriorities test seam with a
+// channel buffered for up to n goroutines, and returns a wait func that
+// blocks until one setAllPriorities goroutine (including any inline
+// fyne.Do error render under the test driver) completes. Call wait once
+// per expected goroutine. This replaces time.Sleep so the async render
+// is drained deterministically, keeping rendering single-threaded
+// against Fyne's unsynchronized global caches.
+func joinSetAllPriorities(t *testing.T, n int) func() {
+	t.Helper()
+	done := make(chan struct{}, n)
+	afterSetAllPriorities = func() {
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { afterSetAllPriorities = nil })
+	return func() {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("setAllPriorities goroutine did not complete")
+		}
+	}
+}
+
 // TestSetAllPrioritiesWithFiles covers setAllPriorities's
 // failed-arm at files_dialog.go:227-237. With non-empty files
 // and an unknown infohash, the goroutine's SetFilePriority calls
@@ -25,6 +52,8 @@ func TestSetAllPrioritiesWithFiles(t *testing.T) {
 
 	d := newTestDaemon(t)
 
+	wait := joinSetAllPriorities(t, 1)
+
 	fd := &filesDialog{
 		d:           d,
 		win:         w,
@@ -35,5 +64,5 @@ func TestSetAllPrioritiesWithFiles(t *testing.T) {
 		},
 	}
 	fd.setAllPriorities(engine.FilePriorityNormal)
-	time.Sleep(500 * time.Millisecond)
+	wait()
 }

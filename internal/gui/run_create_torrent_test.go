@@ -14,8 +14,10 @@ import (
 // TestRunCreateTorrentMissingRoot covers runCreateTorrent at
 // create.go:225-257. With a non-existent Root path, CreateTorrentFile
 // errs and the goroutine's fyne.Do callback hits the err arm
-// (ShowError + return). We sleep generously at end so the
-// goroutine fully drains before the test returns.
+// (ShowError + return). We join the goroutine via the
+// afterCreateTorrent seam so its inline fyne.Do render finishes
+// before the test returns, keeping rendering single-threaded under
+// the Fyne test driver.
 func TestRunCreateTorrentMissingRoot(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()
@@ -25,13 +27,23 @@ func TestRunCreateTorrentMissingRoot(t *testing.T) {
 
 	d := newTestDaemon(t)
 
+	done := make(chan struct{}, 1)
+	afterCreateTorrent = func() {
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { afterCreateTorrent = nil })
+
 	runCreateTorrent(d, w, engine.CreateTorrentOptions{
 		Root: filepath.Join(t.TempDir(), "does-not-exist"),
 		Name: "test",
 	}, filepath.Join(t.TempDir(), "out.torrent"), false)
 
-	// Drain the goroutine: it calls CreateTorrentFile which errs
-	// quickly on missing path, then fyne.Do(ShowError). 500ms is
-	// far more than needed.
-	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runCreateTorrent goroutine did not complete")
+	}
 }

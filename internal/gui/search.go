@@ -103,6 +103,14 @@ func newSearchTab(_ context.Context, d *daemon.Daemon) *searchTab {
 	return st
 }
 
+// afterRunSearch, when non-nil, is invoked at the very end of the
+// runSearch goroutine (after the fyne.Do callback that renders results
+// returns). It exists only so tests can deterministically join the async
+// UI goroutine under the Fyne test driver, which runs fyne.Do callbacks
+// inline on the calling goroutine. It is nil in production, so real-app
+// timing/behavior is unchanged.
+var afterRunSearch func()
+
 func (st *searchTab) runSearch() {
 	q := strings.TrimSpace(st.queryEntry.Text)
 	if q == "" {
@@ -187,6 +195,12 @@ func (st *searchTab) runSearch() {
 			st.progress.Hide()
 			st.buildResults(q, localResp, localErr, swarmResp, swarmErr, dhtResp, dhtErr)
 		})
+		// fyne.Do under the test driver runs its callback inline+synchronously,
+		// so by here the async render has finished. Signal the test seam (nil in
+		// production) so tests can join this goroutine deterministically.
+		if afterRunSearch != nil {
+			afterRunSearch()
+		}
 	}()
 }
 
