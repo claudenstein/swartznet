@@ -23,9 +23,8 @@ func TestDownloadsPollLoopTickEmpty(t *testing.T) {
 
 	d := newTestDaemon(t)
 	dl := &downloadsTab{
-		d:        d,
-		selected: -1,
-		sortCol:  -1,
+		d:       d,
+		sortCol: -1,
 		table: widget.NewTable(
 			func() (int, int) { return 0, 0 },
 			func() fyne.CanvasObject { return widget.NewLabel("") },
@@ -60,9 +59,8 @@ func TestDownloadsPollLoopTick(t *testing.T) {
 	addTestTorrent(t, d.Eng)
 
 	dl := &downloadsTab{
-		d:        d,
-		selected: -1,
-		sortCol:  -1,
+		d:       d,
+		sortCol: -1,
 		table: widget.NewTable(
 			func() (int, int) { return 0, 0 },
 			func() fyne.CanvasObject { return widget.NewLabel("") },

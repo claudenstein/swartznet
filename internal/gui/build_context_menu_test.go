@@ -22,8 +22,8 @@ import (
 func TestBuildContextMenu(t *testing.T) {
 	t.Parallel()
 
-	// Early-return arm — selected = -1.
-	dlEmpty := &downloadsTab{selected: -1}
+	// Early-return arm — no primary selection.
+	dlEmpty := &downloadsTab{}
 	if m := dlEmpty.buildContextMenu(); m != nil {
 		t.Errorf("expected nil menu for unselected row, got %+v", m)
 	}
@@ -43,8 +43,8 @@ func TestBuildContextMenu(t *testing.T) {
 	}
 	for i, snap := range cases {
 		dl := &downloadsTab{
-			selected: 0,
-			snaps:    []engine.TorrentSnapshot{snap},
+			selectedKey: ih,
+			snaps:       []engine.TorrentSnapshot{snap},
 		}
 		menu := dl.buildContextMenu()
 		if menu == nil {
@@ -73,10 +73,10 @@ func TestBuildContextMenuPauseActionsRun(t *testing.T) {
 
 	// Paused=false → menu has "Pause" → tapping it calls pauseSelected.
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
-		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Paused: false, Indexing: true}},
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
+		snaps:       []engine.TorrentSnapshot{{InfoHash: ih, Paused: false, Indexing: true}},
 	}
 	menu := dl.buildContextMenu()
 	for _, item := range menu.Items {
@@ -87,10 +87,10 @@ func TestBuildContextMenuPauseActionsRun(t *testing.T) {
 
 	// Paused=true → menu has "Resume" → tapping it calls resumeSelected.
 	dl2 := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
-		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Paused: true, Indexing: true}},
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
+		snaps:       []engine.TorrentSnapshot{{InfoHash: ih, Paused: true, Indexing: true}},
 	}
 	menu2 := dl2.buildContextMenu()
 	for _, item := range menu2.Items {
@@ -116,10 +116,10 @@ func TestBuildContextMenuFilesActionWithRealTorrent(t *testing.T) {
 	ih := addTestTorrent(t, d.Eng)
 
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
-		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Name: "test", Indexing: true}},
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
+		snaps:       []engine.TorrentSnapshot{{InfoHash: ih, Name: "test", Indexing: true}},
 	}
 	menu := dl.buildContextMenu()
 	for _, item := range menu.Items {
@@ -154,9 +154,9 @@ func TestBuildContextMenuRemoveActionTapsNo(t *testing.T) {
 	d := newTestDaemon(t)
 
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: "0123456789abcdef0123456789abcdef01234567",
 		snaps: []engine.TorrentSnapshot{
 			{InfoHash: "0123456789abcdef0123456789abcdef01234567", Name: "test"},
 		},
@@ -194,10 +194,10 @@ func TestBuildContextMenuQueuedActionsRun(t *testing.T) {
 
 	ih := "0123456789abcdef0123456789abcdef01234567"
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
-		snaps:    []engine.TorrentSnapshot{{InfoHash: ih, Paused: false, Indexing: true, Queued: true}},
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
+		snaps:       []engine.TorrentSnapshot{{InfoHash: ih, Paused: false, Indexing: true, Queued: true}},
 	}
 	menu := dl.buildContextMenu()
 	for _, item := range menu.Items {

@@ -28,8 +28,8 @@ func TestRemoveSelectedShowsConfirmDialog(t *testing.T) {
 
 	// Named torrent → uses snap.Name as label.
 	dlNamed := &downloadsTab{
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
 		snaps: []engine.TorrentSnapshot{
 			{InfoHash: ih, Name: "ubuntu.iso"},
 		},
@@ -38,8 +38,8 @@ func TestRemoveSelectedShowsConfirmDialog(t *testing.T) {
 
 	// Unnamed torrent → falls back to truncated infohash label.
 	dlUnnamed := &downloadsTab{
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
 		snaps: []engine.TorrentSnapshot{
 			{InfoHash: ih, Name: ""},
 		},

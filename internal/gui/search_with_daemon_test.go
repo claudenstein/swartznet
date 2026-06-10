@@ -40,12 +40,10 @@ func TestConfirmHitArms(t *testing.T) {
 	st.confirmHit("0123456789abcdef0123456789abcdef01234567")
 }
 
-// TestFlagHitArms covers flagHit at search.go:356-382 against a
-// real daemon. With no flagged torrents, sources.Sources returns
-// empty; the fallback "demote all known indexers" path also yields
-// an empty list (tracker.Snapshot is empty too) — but the function
-// still calls RecordFlagged and ShowInformation, exercising every
-// arm except the nil-tracker early-return.
+// TestFlagHitArms covers flagHit against a real daemon. With no
+// flagged torrents, sources.Sources returns empty, so the
+// no-attribution arm fires: flagHit shows the "no reputations
+// changed" note and returns without touching the tracker.
 func TestFlagHitArms(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()

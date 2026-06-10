@@ -54,9 +54,9 @@ func TestBuildContextMenuActions(t *testing.T) {
 	// First snap: paused + queued + signed-trusted → revoke-trust
 	// submenu item.
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
 		snaps: []engine.TorrentSnapshot{
 			{
 				InfoHash:         ih,
@@ -78,9 +78,9 @@ func TestBuildContextMenuActions(t *testing.T) {
 	// Second snap: not paused + signed-untrusted → trust-publisher
 	// submenu item, copyMagnet with empty Name.
 	dl2 := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
 		snaps: []engine.TorrentSnapshot{
 			{
 				InfoHash:         ih,

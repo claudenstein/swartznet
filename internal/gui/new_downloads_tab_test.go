@@ -35,8 +35,8 @@ func TestNewDownloadsTabConstructs(t *testing.T) {
 	if dl.content == nil {
 		t.Error("expected content to be wired up")
 	}
-	if dl.selected != -1 || dl.sortCol != -1 {
-		t.Errorf("expected default selected=-1 sortCol=-1, got selected=%d sortCol=%d",
-			dl.selected, dl.sortCol)
+	if dl.selectedKey != "" || dl.sortCol != -1 {
+		t.Errorf("expected default selectedKey=\"\" sortCol=-1, got selectedKey=%q sortCol=%d",
+			dl.selectedKey, dl.sortCol)
 	}
 }

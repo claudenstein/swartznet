@@ -25,9 +25,9 @@ func TestShowFilesForSelectedEmptyName(t *testing.T) {
 
 	d := newTestDaemon(t)
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: "0123456789abcdef0123456789abcdef01234567",
 		snaps: []engine.TorrentSnapshot{
 			{InfoHash: "0123456789abcdef0123456789abcdef01234567", Name: ""},
 		},

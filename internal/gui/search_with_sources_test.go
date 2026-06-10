@@ -56,12 +56,14 @@ func TestFlagHitWithSources(t *testing.T) {
 	st.flagHit(ih)
 }
 
-// TestFlagHitFallbackSnapshot covers flagHit's `len(pks) == 0`
-// fallback at search.go:367-374. We pre-record reputation
-// entries so tracker.Snapshot returns rows, but flag an
-// infohash that has no sources — the function then iterates
-// the snapshot to populate pks.
-func TestFlagHitFallbackSnapshot(t *testing.T) {
+// TestFlagHitNoSourcesDoesNotDemoteAll is the regression test for
+// flagHit's old `len(pks) == 0` fallback, which demoted EVERY
+// known indexer when a hit had no source attribution. That was
+// attacker-weaponizable: seed unattributed spam, get it flagged
+// once, and the whole reputation table craters — including
+// trusted publishers. Flagging an unattributed infohash must now
+// be a no-op for reputation: no tracker entry gains a flag.
+func TestFlagHitNoSourcesDoesNotDemoteAll(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()
 	w := app.NewWindow("anchor")
@@ -70,14 +72,23 @@ func TestFlagHitFallbackSnapshot(t *testing.T) {
 
 	d := newTestDaemon(t)
 
-	// Seed a tracker entry so Snapshot is non-empty.
+	// Seed tracker entries so the old fallback would have had
+	// victims to demote.
 	d.Eng.ReputationTracker().RecordReturned("known-publisher", 1)
+	d.Eng.ReputationTracker().RecordReturned("other-publisher", 1)
 
 	st := &searchTab{
 		d:       d,
 		content: widget.NewLabel("search"),
 	}
-	// This infohash has no sources recorded, so the empty-pks
-	// fallback path fires.
+	// This infohash has no sources recorded — flagHit must show
+	// the "no attribution" note and leave all reputations alone.
 	st.flagHit("ffffffffffffffffffffffffffffffffffffffff")
+
+	for _, e := range d.Eng.ReputationTracker().Snapshot() {
+		if e.Counters.HitsFlagged != 0 {
+			t.Fatalf("flagHit with no sources demoted %q (HitsFlagged=%d); fan-out fallback regressed",
+				e.PubKey, e.Counters.HitsFlagged)
+		}
+	}
 }

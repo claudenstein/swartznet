@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -111,6 +112,23 @@ func newSearchTab(_ context.Context, d *daemon.Daemon) *searchTab {
 // timing/behavior is unchanged.
 var afterRunSearch func()
 
+// parseSearchLimit parses the Limit entry strictly: the whole field
+// must be a positive integer, otherwise the default of 20 applies.
+// Sscanf-style lax parsing previously let negative numbers and
+// leading-digits-plus-garbage ("5; rm") through to the search layers.
+func parseSearchLimit(text string) int {
+	const def = 20
+	v := strings.TrimSpace(text)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
 func (st *searchTab) runSearch() {
 	q := strings.TrimSpace(st.queryEntry.Text)
 	if q == "" {
@@ -127,10 +145,7 @@ func (st *searchTab) runSearch() {
 	// buildResults if every layer returned zero hits.
 	st.emptyState.Hide()
 
-	limit := 20
-	if v := strings.TrimSpace(st.limitEntry.Text); v != "" {
-		fmt.Sscanf(v, "%d", &limit)
-	}
+	limit := parseSearchLimit(st.limitEntry.Text)
 
 	doLocal := st.localChk.Checked
 	doSwarm := st.swarmChk.Checked
@@ -353,10 +368,11 @@ func (st *searchTab) makeDHTHitCard(h dhtindex.LookupHit) fyne.CanvasObject {
 // attached.
 func (st *searchTab) wrapHitMenu(card fyne.CanvasObject, infoHash, name, signedBy string) fyne.CanvasObject {
 	build := func() *fyne.Menu {
-		magnet := "magnet:?xt=urn:btih:" + infoHash
-		if name != "" {
-			magnet += "&dn=" + name
-		}
+		// magnetLink URL-escapes the name — search-hit names are
+		// remote-sourced, and this magnet is fed straight back into
+		// AddMagnetURI below, so an unescaped '&' would be parameter
+		// injection, not just clipboard breakage.
+		magnet := magnetLink(infoHash, name)
 		items := []*fyne.MenuItem{
 			fyne.NewMenuItem("Add to downloads", func() {
 				go func() {
@@ -428,12 +444,17 @@ func (st *searchTab) flagHit(infoHashHex string) {
 		pks = sources.Sources(infoHashHex)
 	}
 	if len(pks) == 0 {
-		// Fallback: demote all known indexers.
-		snap := tracker.Snapshot()
-		pks = make([]reputation.PubKeyHex, 0, len(snap))
-		for _, e := range snap {
-			pks = append(pks, e.PubKey)
-		}
+		// No recorded source attribution for this hit (common for
+		// swarm/DHT results, or after an earlier flag's Forget).
+		// Deliberately do NOT fall back to demoting every known
+		// indexer: a single click on unattributed spam would crater
+		// the whole reputation table, which an attacker could
+		// weaponize by seeding unattributed results. No-op with a
+		// note instead.
+		dialog.ShowInformation("Flagged",
+			fmt.Sprintf("No indexer attribution recorded for %s — no reputations changed", infoHashHex[:16]),
+			st.win())
+		return
 	}
 
 	tracker.RecordFlagged(pks...)

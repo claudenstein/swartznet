@@ -72,3 +72,38 @@ func TestPollNotificationsNotifiesOnTransition(t *testing.T) {
 		t.Fatalf("repeat poll emitted %d notifications, want 0 (duplicate suppression broken)", len(again))
 	}
 }
+
+// TestPollNotificationsPrunesRemovedTorrents proves lastNotified
+// cannot grow without bound: entries for torrents that have left
+// the snapshot list (removed by the user) are dropped on the next
+// poll instead of accumulating across long remove/re-add sessions.
+func TestPollNotificationsPrunesRemovedTorrents(t *testing.T) {
+	t.Parallel()
+
+	a := &App{lastNotified: make(map[string]bool)}
+
+	// Prime with two seeding torrents.
+	prime := []engine.TorrentSnapshot{
+		{InfoHash: "aa", Name: "keep", Status: "seeding"},
+		{InfoHash: "bb", Name: "doomed", Status: "seeding"},
+	}
+	a.pollNotifications(prime, false)
+	if !a.lastNotified["aa"] || !a.lastNotified["bb"] {
+		t.Fatalf("prime did not record both torrents: %v", a.lastNotified)
+	}
+
+	// "bb" gets removed; the next poll must prune its entry.
+	later := []engine.TorrentSnapshot{
+		{InfoHash: "aa", Name: "keep", Status: "seeding"},
+	}
+	a.pollNotifications(later, true)
+	if a.lastNotified["bb"] {
+		t.Fatal("removed torrent still tracked in lastNotified (unbounded-growth regression)")
+	}
+	if !a.lastNotified["aa"] {
+		t.Fatal("still-present torrent was wrongly pruned from lastNotified")
+	}
+	if len(a.lastNotified) != 1 {
+		t.Fatalf("lastNotified has %d entries, want 1", len(a.lastNotified))
+	}
+}

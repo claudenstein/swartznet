@@ -426,6 +426,19 @@ func (a *App) pollNotifications(snaps []engine.TorrentSnapshot, primed bool) []*
 			Content: s.Name,
 		})
 	}
+	// Prune entries for torrents no longer present so the map can't
+	// grow without bound across long sessions of remove/re-add churn.
+	// A re-added torrent that is already seeding will re-notify, which
+	// is the lesser evil versus a slow leak.
+	present := make(map[string]struct{}, len(snaps))
+	for _, s := range snaps {
+		present[s.InfoHash] = struct{}{}
+	}
+	for ih := range a.lastNotified {
+		if _, ok := present[ih]; !ok {
+			delete(a.lastNotified, ih)
+		}
+	}
 	return out
 }
 

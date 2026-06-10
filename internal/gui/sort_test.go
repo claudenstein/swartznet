@@ -171,8 +171,7 @@ func TestSortSnapsSliceEdgeCases(t *testing.T) {
 func TestToggleSortSameColumnCycle(t *testing.T) {
 	t.Parallel()
 	dl := &downloadsTab{
-		sortCol:  -1,
-		selected: -1,
+		sortCol: -1,
 	}
 	// We can't call toggleSort without a widget (it calls
 	// dl.table.Refresh). Fake the refresh-safe code path by
@@ -227,18 +226,19 @@ func TestToggleSortSameColumnCycle(t *testing.T) {
 
 func TestSelectedInfoHashGuards(t *testing.T) {
 	t.Parallel()
-	dl := &downloadsTab{selected: -1}
+	dl := &downloadsTab{}
 	if ih := dl.selectedInfoHash(); ih != "" {
-		t.Errorf("selected=-1: got %q, want \"\"", ih)
+		t.Errorf("no selection: got %q, want \"\"", ih)
 	}
 	dl.snaps = []engine.TorrentSnapshot{{InfoHash: "abc"}, {InfoHash: "def"}}
-	dl.selected = 1
+	dl.selectedKey = "def"
 	if ih := dl.selectedInfoHash(); ih != "def" {
-		t.Errorf("selected=1: got %q, want def", ih)
+		t.Errorf("selectedKey=def: got %q, want def", ih)
 	}
-	// Out-of-range must return "" rather than panic on indexing.
-	dl.selected = 99
+	// A key for a torrent that vanished must return "" rather
+	// than resolve to some other row.
+	dl.selectedKey = "zzz"
 	if ih := dl.selectedInfoHash(); ih != "" {
-		t.Errorf("selected=99: got %q, want \"\" (out of range)", ih)
+		t.Errorf("selectedKey=zzz: got %q, want \"\" (gone)", ih)
 	}
 }

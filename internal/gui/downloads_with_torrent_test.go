@@ -63,9 +63,9 @@ func TestDownloadsSelectedActionsHappyPath(t *testing.T) {
 	ih := addTestTorrent(t, d.Eng)
 
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
 		snaps: []engine.TorrentSnapshot{
 			{InfoHash: ih, Name: "payload.bin", Indexing: true},
 		},

@@ -12,8 +12,8 @@ import (
 
 // TestRemoveSelectedConfirmAction taps the "Yes" button on
 // removeSelected's confirm dialog so the !ok early-return is
-// bypassed and the goroutine runs RemoveTorrent + flips selected
-// back to -1. A 500 ms drain at end of test bounds the goroutine.
+// bypassed and the goroutine runs RemoveTorrent + clears the
+// primary selectedKey. A 500 ms drain at end of test bounds the goroutine.
 func TestRemoveSelectedConfirmAction(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()
@@ -37,9 +37,9 @@ func TestRemoveSelectedConfirmAction(t *testing.T) {
 	t.Cleanup(func() { afterRemoveSelected = nil })
 
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: ih,
 		snaps: []engine.TorrentSnapshot{
 			{InfoHash: ih, Name: "test"},
 		},
@@ -73,9 +73,9 @@ func TestRemoveSelectedConfirmCanceled(t *testing.T) {
 	d := newTestDaemon(t)
 
 	dl := &downloadsTab{
-		d:        d,
-		content:  widget.NewLabel("downloads"),
-		selected: 0,
+		d:           d,
+		content:     widget.NewLabel("downloads"),
+		selectedKey: "0123456789abcdef0123456789abcdef01234567",
 		snaps: []engine.TorrentSnapshot{
 			{InfoHash: "0123456789abcdef0123456789abcdef01234567", Name: "test"},
 		},

@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +37,16 @@ type downloadsTab struct {
 	mu    sync.RWMutex
 	snaps []engine.TorrentSnapshot
 
-	table    *widget.Table
-	selected int // -1 = none — last-clicked row, drives the right-click menu
+	table *widget.Table
+
+	// selectedKey is the primary (last-clicked) selection, keyed by
+	// infohash — "" = none. It drives the right-click menu and the
+	// single-row fallback for toolbar actions. Keying by infohash
+	// (rather than row index) matters: pollLoop re-sorts dl.snaps
+	// every 2 s, so a stored row index can silently come to point
+	// at a different torrent between the click and the action —
+	// catastrophic for Remove.
+	selectedKey string
 
 	// selectedSet is the multi-selection set keyed by infohash.
 	// Bulk actions (pause/resume/remove/toggle-index) iterate
@@ -93,7 +102,6 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 	dl := &downloadsTab{
 		d:           d,
-		selected:    -1,
 		sortCol:     -1, // no active sort — engine insertion order
 		selectedSet: make(map[string]struct{}),
 	}
@@ -211,7 +219,6 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 			return
 		}
 		dl.mu.Lock()
-		dl.selected = id.Row
 		// Toggle multi-selection on each row tap. Standard
 		// table widgets gate this behind Ctrl/Shift, but Fyne
 		// does not surface modifier state through OnSelected;
@@ -222,11 +229,14 @@ func buildDownloadsTab(d *daemon.Daemon) *downloadsTab {
 		// keeps the door open to a true Ctrl-aware variant later.
 		if id.Row >= 0 && id.Row < len(dl.snaps) {
 			ih := dl.snaps[id.Row].InfoHash
+			dl.selectedKey = ih
 			if _, ok := dl.selectedSet[ih]; ok {
 				delete(dl.selectedSet, ih)
 			} else {
 				dl.selectedSet[ih] = struct{}{}
 			}
+		} else {
+			dl.selectedKey = ""
 		}
 		dl.mu.Unlock()
 		dl.refreshSelectionLabel()
@@ -351,11 +361,7 @@ func (dl *downloadsTab) buildContextMenu() *fyne.Menu {
 	}
 
 	copyMagnet := fyne.NewMenuItem("Copy magnet link", func() {
-		magnet := "magnet:?xt=urn:btih:" + ih
-		if snap.Name != "" {
-			magnet += "&dn=" + snap.Name
-		}
-		fyne.CurrentApp().Clipboard().SetContent(magnet)
+		fyne.CurrentApp().Clipboard().SetContent(magnetLink(ih, snap.Name))
 	})
 	copyHash := fyne.NewMenuItem("Copy infohash", func() {
 		fyne.CurrentApp().Clipboard().SetContent(ih)
@@ -475,6 +481,21 @@ func (dl *downloadsTab) pollLoop(ctx context.Context) {
 				dl.mu.Lock()
 				dl.snaps = snaps
 				dl.sortSnapsLocked()
+				// Drop the primary selection once its torrent is
+				// gone (removed via another frontend, say) so a
+				// later action can't latch onto a stale key.
+				if dl.selectedKey != "" {
+					found := false
+					for _, s := range snaps {
+						if s.InfoHash == dl.selectedKey {
+							found = true
+							break
+						}
+					}
+					if !found {
+						dl.selectedKey = ""
+					}
+				}
 				dl.mu.Unlock()
 				dl.table.Refresh()
 				if len(snaps) == 0 {
@@ -672,6 +693,20 @@ func showAddMagnetError(dl *downloadsTab, msg, uri string, indexChecked bool) {
 	info.Show()
 }
 
+// magnetLink builds a magnet URI for the given infohash, attaching
+// the display name as a dn parameter when present. The name is
+// URL-escaped: torrent names arrive from remote peers / DHT entries
+// (attacker-controlled), so an embedded '&' or '=' must not be able
+// to inject extra magnet parameters (e.g. a bogus tracker via
+// "foo&tr=evil").
+func magnetLink(infoHash, name string) string {
+	magnet := "magnet:?xt=urn:btih:" + infoHash
+	if name != "" {
+		magnet += "&dn=" + url.QueryEscape(name)
+	}
+	return magnet
+}
+
 // validateMagnetURI runs cheap checks on a pasted magnet string so
 // we can fail fast with a friendly message instead of surfacing
 // anacrolix's internal error text. Returns an empty string when
@@ -848,7 +883,7 @@ func (dl *downloadsTab) removeSelected() {
 				}
 				fyne.Do(func() {
 					dl.mu.Lock()
-					dl.selected = -1
+					dl.selectedKey = ""
 					for _, ih := range targets {
 						delete(dl.selectedSet, ih)
 					}
@@ -888,10 +923,10 @@ func (dl *downloadsTab) actionTargets() []string {
 		}
 		return out
 	}
-	if dl.selected < 0 || dl.selected >= len(dl.snaps) {
-		return nil
+	if ih := dl.resolveSelectedKeyLocked(); ih != "" {
+		return []string{ih}
 	}
-	return []string{dl.snaps[dl.selected].InfoHash}
+	return nil
 }
 
 // selectAll adds every currently-displayed torrent to the
@@ -936,10 +971,25 @@ func (dl *downloadsTab) refreshSelectionLabel() {
 func (dl *downloadsTab) selectedInfoHash() string {
 	dl.mu.RLock()
 	defer dl.mu.RUnlock()
-	if dl.selected < 0 || dl.selected >= len(dl.snaps) {
+	return dl.resolveSelectedKeyLocked()
+}
+
+// resolveSelectedKeyLocked resolves the primary selection against
+// the current snapshot list, returning "" when nothing is selected
+// or the selected torrent no longer exists. Resolving through the
+// snaps (rather than trusting a stored row index) keeps the
+// selection pinned to the same torrent across pollLoop re-sorts.
+// Caller must hold dl.mu (read or write).
+func (dl *downloadsTab) resolveSelectedKeyLocked() string {
+	if dl.selectedKey == "" {
 		return ""
 	}
-	return dl.snaps[dl.selected].InfoHash
+	for _, s := range dl.snaps {
+		if s.InfoHash == dl.selectedKey {
+			return s.InfoHash
+		}
+	}
+	return ""
 }
 
 // win returns the parent window for dialogs.
