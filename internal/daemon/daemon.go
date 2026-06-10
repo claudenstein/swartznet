@@ -206,20 +206,17 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 				sw.SetEndorsementSink(bootstrapEndorsementSink{boot: boot})
 				sw.SetPublisherObserver(bootstrapPublisherObserver{boot: boot})
 			}
-			if len(boot.AnchorKeys()) > 0 {
-				d.bgWG.Add(1)
-				go func() {
-					defer d.bgWG.Done()
-					// Use the Daemon-owned bgCtx so Close can cancel
-					// this fetch deterministically; RunAnchors honors
-					// ctx cancellation via the per-anchor GetPPMI calls.
-					succeeded, errs := boot.RunAnchors(bgCtx)
-					if opts.Log != nil {
-						opts.Log.Info("daemon.aggregate_bootstrap.anchors",
-							"succeeded", succeeded, "errors", len(errs))
-					}
-				}()
-			}
+			// Channel-A driver: fetches configured anchors now and
+			// re-runs whenever FallbackToHTTPS adds anchors later —
+			// the dev default ships zero anchors, so without the
+			// loop a late HTTPS-supplied anchor list would never be
+			// fetched. Uses the Daemon-owned bgCtx so Close cancels
+			// it deterministically, and bgWG so Close joins it.
+			d.bgWG.Add(1)
+			go func() {
+				defer d.bgWG.Done()
+				boot.runAnchorLoop(bgCtx)
+			}()
 		}
 	}
 

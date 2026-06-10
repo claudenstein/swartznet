@@ -137,6 +137,50 @@ func TestLoadFollowFileMixedEntries(t *testing.T) {
 	}
 }
 
+// TestLoadFollowFileOversizedRejected — a follow file over the
+// 1 MiB cap is rejected wholesale (fail closed), even when it is
+// perfectly valid JSON the old unbounded decoder would have
+// happily slurped into memory and registered.
+func TestLoadFollowFileOversizedRejected(t *testing.T) {
+	t.Parallel()
+	w := newTestSubscriberWorker(t)
+
+	// Build a >1 MiB, fully valid follow list of distinct pubkeys.
+	var sb strings.Builder
+	sb.WriteString("[")
+	var pub [32]byte
+	for i := 0; sb.Len() <= 1<<20; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		pub[0] = byte(i)
+		pub[1] = byte(i >> 8)
+		pub[2] = byte(i >> 16)
+		sb.WriteString(`{"pubkey":"` + hex.EncodeToString(pub[:]) + `","label":"bulk"}`)
+	}
+	sb.WriteString("]")
+	path := filepath.Join(t.TempDir(), "follows.json")
+	if err := os.WriteFile(path, []byte(sb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+
+	n, err := daemon.LoadFollowFile(w, path, &stderr)
+
+	if n != 0 {
+		t.Errorf("n = %d, want 0 (oversized file must be rejected wholesale)", n)
+	}
+	if err == nil {
+		t.Error("err = nil, want size-cap error (oversized file must fail closed)")
+	}
+	if got := len(w.Following()); got != 0 {
+		t.Errorf("worker should have no follows after oversized reject, got %d", got)
+	}
+	if !strings.Contains(stderr.String(), "exceeds") {
+		t.Errorf("stderr should mention the size cap, got %q", stderr.String())
+	}
+}
+
 func TestLoadFollowFileEmptyArray(t *testing.T) {
 	t.Parallel()
 	w := newTestSubscriberWorker(t)

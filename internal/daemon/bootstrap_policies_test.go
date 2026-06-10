@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/swartznet/swartznet/internal/reputation"
@@ -9,6 +12,8 @@ import (
 // TestBootstrapAdmitCapEnforced — admit must reject the
 // (MaxTrackedPublishers+1)-th candidate to keep the lookup
 // set bounded. We use a low cap so the test stays cheap.
+// Candidates use non-anchor sources because anchors are exempt
+// from the cap (see TestBootstrapAdmitAnchorsExemptFromCap).
 func TestBootstrapAdmitCapEnforced(t *testing.T) {
 	t.Parallel()
 	lookup := newTestLookup()
@@ -23,17 +28,87 @@ func TestBootstrapAdmitCapEnforced(t *testing.T) {
 	c2 := pubkeyBytes("admit-cap-2")
 	c3 := pubkeyBytes("admit-cap-3")
 
-	if !b.admit(c1, "label1", "anchor") {
+	if !b.admit(c1, "label1", "bep51") {
 		t.Fatal("admit c1 should succeed")
 	}
-	if !b.admit(c2, "label2", "anchor") {
+	if !b.admit(c2, "label2", "endorsement") {
 		t.Fatal("admit c2 should succeed (still below cap)")
 	}
-	if b.admit(c3, "label3", "anchor") {
+	if b.admit(c3, "label3", "bep51") {
 		t.Error("admit c3 should fail — cap=2 reached")
 	}
 	if got := b.AdmittedCount(); got != 2 {
 		t.Errorf("AdmittedCount = %d, want 2", got)
+	}
+}
+
+// TestBootstrapAdmitAnchorsExemptFromCap — anchors are the trust
+// seeds the admission policy leans on, so they must neither be
+// refused by MaxTrackedPublishers nor occupy candidate slots.
+// Before the exemption, a node whose cap had been filled by
+// crawl/endorsement candidates would silently drop a late-arriving
+// anchor (and vice versa: anchors admitted first silently shrank
+// the candidate budget).
+func TestBootstrapAdmitAnchorsExemptFromCap(t *testing.T) {
+	t.Parallel()
+	lookup := newTestLookup()
+	opts := DefaultBootstrapOptions()
+	opts.MaxTrackedPublishers = 1
+	b, err := NewBootstrap(lookup, nil, nil, nil, opts, nil)
+	if err != nil {
+		t.Fatalf("NewBootstrap: %v", err)
+	}
+
+	// Fill the candidate cap.
+	if !b.admit(pubkeyBytes("exempt-cand-1"), "cand1", "bep51") {
+		t.Fatal("first candidate should fill cap=1")
+	}
+	// Anchors still admit past the full cap.
+	if !b.admit(pubkeyBytes("exempt-anchor-1"), "anchor1", "anchor") {
+		t.Error("anchor must be admitted even when the candidate cap is full")
+	}
+	if !b.admit(pubkeyBytes("exempt-anchor-2"), "anchor2", "anchor") {
+		t.Error("second anchor must also be admitted (anchors don't count toward cap)")
+	}
+	// And anchors don't consume candidate slots: a further
+	// candidate is still refused (cap of 1 already used by cand1),
+	// proving the count excludes anchors rather than racing them.
+	if b.admit(pubkeyBytes("exempt-cand-2"), "cand2", "endorsement") {
+		t.Error("second candidate should still be refused — cap excludes anchors but stays enforced")
+	}
+	if got := b.AdmittedCount(); got != 3 {
+		t.Errorf("AdmittedCount = %d, want 3 (1 candidate + 2 anchors)", got)
+	}
+}
+
+// TestBootstrapAdmitCapRefusalLogged — refusing a candidate at the
+// cap must not be silent: operators need to distinguish a starved
+// node from a quiet network. We capture the slog output and assert
+// the warn line fires with the refused source.
+func TestBootstrapAdmitCapRefusalLogged(t *testing.T) {
+	t.Parallel()
+	lookup := newTestLookup()
+	opts := DefaultBootstrapOptions()
+	opts.MaxTrackedPublishers = 1
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	b, err := NewBootstrap(lookup, nil, nil, nil, opts, log)
+	if err != nil {
+		t.Fatalf("NewBootstrap: %v", err)
+	}
+
+	if !b.admit(pubkeyBytes("logged-cand-1"), "cand1", "bep51") {
+		t.Fatal("first candidate should admit")
+	}
+	if b.admit(pubkeyBytes("logged-cand-2"), "cand2", "endorsement") {
+		t.Fatal("second candidate should be refused at cap=1")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "admit_capped") {
+		t.Errorf("cap refusal should log admit_capped, got %q", out)
+	}
+	if !strings.Contains(out, "endorsement") {
+		t.Errorf("cap refusal log should carry the refused source, got %q", out)
 	}
 }
 

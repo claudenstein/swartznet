@@ -83,12 +83,18 @@ type Bootstrap struct {
 
 	opts BootstrapOptions
 
-	mu             sync.Mutex
-	anchorKeys     [][32]byte
-	admitted       map[[32]byte]struct{}
-	endorsements   map[[32]byte]map[[32]byte]struct{} // candidate → endorsers
-	observed       map[[32]byte]struct{}              // pubkeys from channel B that didn't clear bloomPolicy
-	candidateQueue []candidate
+	mu              sync.Mutex
+	anchorKeys      [][32]byte
+	admitted        map[[32]byte]struct{}
+	anchorsAdmitted int // admitted entries with source "anchor"; exempt from MaxTrackedPublishers
+	endorsements    map[[32]byte]map[[32]byte]struct{} // candidate → endorsers
+	observed        map[[32]byte]struct{}              // pubkeys from channel B that didn't clear bloomPolicy
+	candidateQueue  []candidate
+
+	// anchorsAdded receives a (buffered, coalesced) signal whenever
+	// FallbackToHTTPS extends the anchor set after construction, so
+	// runAnchorLoop can re-run channel A against the new anchors.
+	anchorsAdded chan struct{}
 }
 
 // candidate is one publisher observed via channel B/C, waiting
@@ -131,6 +137,7 @@ func NewBootstrap(lookup *dhtindex.Lookup, ppmi dhtindex.PPMIGetter, bloom *repu
 		admitted:     make(map[[32]byte]struct{}),
 		endorsements: make(map[[32]byte]map[[32]byte]struct{}),
 		observed:     make(map[[32]byte]struct{}),
+		anchorsAdded: make(chan struct{}, 1),
 	}
 
 	for _, s := range opts.AnchorHexes {
@@ -205,6 +212,37 @@ func (b *Bootstrap) RunAnchors(ctx context.Context) (int, []error) {
 		}
 	}
 	return succeeded, errs
+}
+
+// runAnchorLoop is the daemon's channel-A driver: it runs
+// RunAnchors once at startup when anchors are already configured,
+// then re-runs it every time FallbackToHTTPS extends the anchor
+// set. Without the re-run, a build with an empty
+// DefaultAnchorPubkeys (the dev default) would snapshot zero
+// anchors at daemon.New and never fetch anchors supplied later by
+// the HTTPS fallback — a dead cold-start path. Returns when ctx is
+// cancelled. RunAnchors is idempotent over already-admitted
+// anchors, so re-running against the full list is safe.
+func (b *Bootstrap) runAnchorLoop(ctx context.Context) {
+	if len(b.AnchorKeys()) > 0 {
+		b.runAnchorsLogged(ctx)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-b.anchorsAdded:
+			b.runAnchorsLogged(ctx)
+		}
+	}
+}
+
+// runAnchorsLogged wraps RunAnchors with the daemon's standard
+// channel-A outcome log line.
+func (b *Bootstrap) runAnchorsLogged(ctx context.Context) {
+	succeeded, errs := b.RunAnchors(ctx)
+	b.log.Info("daemon.aggregate_bootstrap.anchors",
+		"succeeded", succeeded, "errors", len(errs))
 }
 
 // IngestEndorsement processes one entry from a peer_announce
@@ -350,19 +388,33 @@ func (b *Bootstrap) PendingCount() int {
 }
 
 // admit performs the actual Lookup registration + reputation
-// seeding + admitted bookkeeping. Returns false if we've already
-// admitted this pubkey or hit the MaxTrackedPublishers cap.
+// seeding + admitted bookkeeping. Returns true if the pubkey was
+// already admitted; false when a candidate is refused because the
+// MaxTrackedPublishers cap is full. Anchors are exempt from the
+// cap: they are the trust seeds the whole admission policy leans
+// on, and the anchor set is small and project-controlled
+// (hardcoded list + size-capped HTTPS response), so the exemption
+// cannot grow the admitted set unboundedly. Counting anchors
+// against the cap would silently shrink the slots available to
+// crawl/endorsement candidates. Cap refusals are logged so a
+// starved node doesn't look identical to a quiet network.
 func (b *Bootstrap) admit(pub [32]byte, label, source string) bool {
 	b.mu.Lock()
 	if _, ok := b.admitted[pub]; ok {
 		b.mu.Unlock()
 		return true
 	}
-	if len(b.admitted) >= b.opts.MaxTrackedPublishers {
+	if source != "anchor" && len(b.admitted)-b.anchorsAdmitted >= b.opts.MaxTrackedPublishers {
 		b.mu.Unlock()
+		b.log.Warn("daemon.aggregate_bootstrap.admit_capped",
+			"pubkey", hex.EncodeToString(pub[:8]), "source", source,
+			"cap", b.opts.MaxTrackedPublishers)
 		return false
 	}
 	b.admitted[pub] = struct{}{}
+	if source == "anchor" {
+		b.anchorsAdmitted++
+	}
 	b.mu.Unlock()
 
 	b.lookup.AddIndexer(pub, label)

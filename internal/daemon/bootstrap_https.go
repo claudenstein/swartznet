@@ -204,5 +204,16 @@ func (b *Bootstrap) FallbackToHTTPS(ctx context.Context, url string, client HTTP
 		b.mu.Unlock()
 		added++
 	}
+	if added > 0 {
+		// Wake runAnchorLoop (non-blocking; the buffered channel
+		// coalesces signals) so the daemon's channel-A goroutine
+		// fetches the new anchors even when the build started with
+		// an empty anchor set. Direct RunAnchors callers are
+		// unaffected — the loop re-run is idempotent.
+		select {
+		case b.anchorsAdded <- struct{}{}:
+		default:
+		}
+	}
 	return added, nil
 }
