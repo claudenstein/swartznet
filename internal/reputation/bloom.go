@@ -271,7 +271,10 @@ func readBloom(r io.Reader) (*BloomFilter, error) {
 	if m == 0 || k == 0 {
 		return nil, fmt.Errorf("reputation: invalid bloom params m=%d k=%d", m, k)
 	}
-	if bitsLen > (m+63)/64+1 {
+	// The writer always emits exactly (m+63)/64 words. Anything else —
+	// undersized (truncated/corrupt file, would panic out-of-bounds on
+	// the first Add/Test) or oversized — is rejected at parse time.
+	if bitsLen != (m+63)/64 {
 		return nil, fmt.Errorf("reputation: bitsLen %d inconsistent with m %d", bitsLen, m)
 	}
 	bits := make([]uint64, bitsLen)
