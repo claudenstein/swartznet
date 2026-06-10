@@ -15,6 +15,96 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Fixed — Second whole-codebase review pass (32 findings: 3 blocking, 11 important, 18 nits)
+
+A fresh review + regression-check against the prior 55-finding
+audit confirmed every prior fix holds, found two of them
+incomplete, and surfaced new hardening work. All 32 confirmed
+findings are fixed here, each with a regression test. No on-wire
+bytes changed (the swarmsearch budget work *implements*
+already-specified `limit_exceeded` behavior) and Layer L/S/D
+isolation is preserved, so the mainline-compat matrix stays green.
+
+**Blocking (remote OOM/DoS that `recover()` cannot catch):**
+
+- **extractors:** the ZIP-container document extractors
+  (DOCX/ODT/ODP/PPTX/EPUB) fed the *decompressed* entry stream to
+  the XML parser unbounded — the between-token output guard never
+  runs inside a single giant `Token()` call, so one deflate-bomb
+  text node (~1032:1 amplification) buffered the whole decompressed
+  body. Every zip-entry reader is now wrapped in
+  `io.LimitReader(rc, maxDocTextBytes)` (64 MiB text budget; PPTX
+  slides and EPUB chapters share a shrinking budget). The HTML
+  tokenizer now sets `SetMaxBuf` (default was unlimited) and treats
+  buffer/budget exhaustion as graceful truncation. Also: archive
+  name-list extraction enforces its documented 4 MiB cap on the
+  tar.gz branch (plus a 1 GiB decompression-walk bound), and EXIF
+  IFD parsing is integer-overflow-safe on 32-bit targets.
+- **companion:** the B-tree walker's per-page child checks could
+  not see *cross-page* fan-in — pages laid out `i → {i+1, i+2}`
+  grow root-to-leaf paths Fibonacci-ally (reproduced: 5M+ piece
+  fetches for a 40-piece file). This was the incomplete half of the
+  prior audit's fix. The walk now shares a visited-set across the
+  entire traversal and fails closed the moment any page is reached
+  twice, capping the walk at `NumPieces` fetches; `Find`
+  additionally rejects duplicate leaf indices as defense-in-depth.
+
+**Important:**
+
+- **dhtindex:** all three BEP-44 put paths (keyword, BEP-46
+  companion pointer, PPMI) now share one `checkPutStats` guard and
+  fail closed when the put traversal reaches zero DHT nodes — the
+  prior audit hardened only the keyword path, so a companion
+  pointer that never landed still recorded success and showed a
+  green refresh. Pointer values fetched from the DHT are size-capped
+  at the BEP-44 1000-byte limit before decoding; PPMI seqs use the
+  overflow-clamping `nextSeq`.
+- **swarmsearch:** the per-session sync `max_bytes` budget was
+  declared and echoed on the wire but never enforced (dead code).
+  `ApplyRecords` now phase-guards, accounts every frame into
+  `bytes_in`, and aborts with the documented `limit_exceeded` once
+  over budget; `sync_symbols`/`sync_records` protocol violations now
+  tear the session down (terminal `sync_end`, release, misbehavior
+  charge) instead of logging at Debug; query `result`/`reject`
+  frames from peers outside the query's fan-out set are dropped and
+  charged.
+- **indexer pipeline:** the extract reader is now closed by the
+  extracting goroutine strictly after `Extract` returns — never by
+  the worker on the watchdog-timeout path — fixing a
+  Read-after-Close data race on anacrolix `torrent.Reader` when an
+  extractor wedges.
+- **engine:** companion-index torrent downloads are capped at
+  32 MiB (`maxCompanionBytes`) — an attacker-controlled BEP-46
+  pointer can no longer fill the disk; the fetch fails closed before
+  any piece is requested. `sn_search` reply writers are gated by a
+  bounded semaphore; `autoDownload`/`autoIndex`/magnet-upgrade
+  metadata waits now honor `bgCtx` so Close doesn't leak them.
+- **reputation:** corrupt/truncated `known-good.bloom` files are
+  rejected at load time (exact bitset-length match) instead of
+  panicking the daemon on the first `Add`/`Test`.
+- **httpapi + gui:** flagging an infohash with no recorded source
+  attribution no longer demotes *every* known indexer's reputation
+  (an attacker-weaponizable fan-out); both sides now fail closed
+  with zero demotions, and `FlagResponse` gained an additive
+  `indexers_flagged` field. GUI: the Downloads primary selection is
+  infohash-keyed so Remove/Pause can't hit the wrong torrent after
+  the 2 s background re-sort; copied magnet links URL-escape the
+  display name (closing a magnet-parameter-injection vector from
+  remote-sourced names).
+- **cmd:** `create --seed` now keeps DHT enabled so trackerless
+  seeds are actually discoverable; `--identity` without `--sign` is
+  a usage error instead of silently ignored.
+- **daemon:** the anchor-fetch loop re-runs when the HTTPS
+  bootstrap fallback adds anchors after startup (previously a dead
+  cold-start path); the companion follow file is capped at 1 MiB
+  (rejected wholesale over the cap); anchors no longer consume
+  `MaxTrackedPublishers` slots and cap refusals are logged.
+- Plus input-validation nits across httpapi (search query length
+  cap, strict file-index parsing), cmd, gui (strict search-limit
+  parsing, notification-map pruning), indexer (bounded doc-walk
+  pagination, SignedBy-only search now accepted as documented), and
+  engine (untrusted-name validation on companion/session paths).
+
 ### Fixed — `internal/gui` is race-clean under `-race`
 
 The GUI tests raced under the Fyne *test* driver: a background

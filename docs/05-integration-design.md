@@ -347,7 +347,14 @@ Properties:
   barely notices.
 - **No 1000-byte cap** — the companion torrent at `v.ih` holds
   the full keyword→records index as a signed B-tree (SPEC §1),
-  scaling to millions of records per publisher.
+  scaling to millions of records per publisher. Subscribers do
+  enforce a 32 MiB acceptance limit (`maxCompanionBytes`) on the
+  companion torrent's declared size before downloading any pieces
+  — publishers must keep companion indexes under it. Reader-side
+  validation additionally visits each B-tree page at most once
+  (shared visited-set) and fails closed on any re-visit: the
+  interior page structure is unsigned, so a hostile layout could
+  otherwise force an exponential number of page reads.
 - **Double-hashed salt** means DHT observers see only
   `SHA1(pk || SHA256("snet.index"))` — a fixed mask across all
   publishers. Keyword enumeration moves from "passive observation"

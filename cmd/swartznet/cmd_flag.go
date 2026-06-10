@@ -15,9 +15,10 @@ import (
 )
 
 // cmdFlag implements `swartznet flag <infohash>`. POSTs to the
-// running daemon's /flag endpoint, which decrements every known
-// indexer's reputation for the given infohash. Used by the user
-// to mark a hit as spam or unwanted.
+// running daemon's /flag endpoint, which demotes the reputation of
+// the indexers attributed to the given infohash (no attribution
+// recorded ⇒ no reputations change). Used by the user to mark a
+// hit as spam or unwanted.
 func cmdFlag(args []string, stdout, stderr io.Writer) int {
 	return cmdFlagOrConfirm("flag", "/flag", args, stdout, stderr)
 }
