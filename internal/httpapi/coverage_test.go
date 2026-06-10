@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fmt"
@@ -352,6 +353,9 @@ func TestHTTPFlagWithSourceAttribution(t *testing.T) {
 	if !out.OK {
 		t.Error("OK=false, want true")
 	}
+	if out.IndexersFlagged != 1 {
+		t.Errorf("IndexersFlagged=%d, want 1", out.IndexersFlagged)
+	}
 
 	// The targeted indexer should have been demoted.
 	snap := tracker.Snapshot()
@@ -389,14 +393,28 @@ func TestHTTPFlagFallbackNoSources(t *testing.T) {
 		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
 	}
 
-	// Both indexers should have been flagged (fallback path).
+	// Fail closed: with no source attribution, NO indexer may be
+	// demoted (the old demote-everyone fallback let an attacker
+	// crater the whole reputation table with one unattributed
+	// spam result). The response still succeeds but reports zero
+	// indexers flagged.
+	var out httpapi.FlagResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK {
+		t.Error("OK=false, want true")
+	}
+	if out.IndexersFlagged != 0 {
+		t.Errorf("IndexersFlagged=%d, want 0", out.IndexersFlagged)
+	}
 	snap := tracker.Snapshot()
 	if len(snap) != 2 {
 		t.Fatalf("snapshot len=%d, want 2", len(snap))
 	}
 	for _, entry := range snap {
-		if entry.Counters.HitsFlagged != 1 {
-			t.Errorf("indexer %s HitsFlagged=%d, want 1", entry.PubKey, entry.Counters.HitsFlagged)
+		if entry.Counters.HitsFlagged != 0 {
+			t.Errorf("indexer %s HitsFlagged=%d, want 0 (fail-closed)", entry.PubKey, entry.Counters.HitsFlagged)
 		}
 	}
 }
@@ -647,6 +665,46 @@ func TestHTTPSearchBadJSON(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHTTPSearchQueryTooLong(t *testing.T) {
+	t.Parallel()
+	// A multi-kilobyte query string must be rejected with 400
+	// before it reaches Bleve (or any swarm/DHT fan-out), not
+	// parsed.
+	base := startServer(t, httpapi.Options{})
+
+	body, _ := json.Marshal(httpapi.SearchRequest{Q: strings.Repeat("a", 4096)})
+	resp, err := http.Post(base+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(raw), "query too long") {
+		t.Errorf("response should mention query length, got %q", raw)
+	}
+}
+
+func TestHTTPSearchQueryAtMaxLength(t *testing.T) {
+	t.Parallel()
+	// A query exactly at the cap (1024 bytes) must still be
+	// accepted — the limit is exclusive of valid input.
+	base := startServer(t, httpapi.Options{})
+
+	body, _ := json.Marshal(httpapi.SearchRequest{Q: strings.Repeat("a", 1024)})
+	resp, err := http.Post(base+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("status=%d body=%s, want 200", resp.StatusCode, b)
 	}
 }
 

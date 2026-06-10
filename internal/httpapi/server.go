@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -148,6 +149,13 @@ func clampSearchTimeout(ms int, def time.Duration) time.Duration {
 	}
 	return d
 }
+
+// maxSearchQueryBytes caps the length of a /search query string
+// before it reaches Bleve (and, when fan-out is requested, every
+// swarm peer / DHT indexer). Real queries are a handful of words;
+// anything kilobytes long is malformed or hostile and is rejected
+// outright rather than parsed.
+const maxSearchQueryBytes = 1024
 
 // Server is the HTTP entry point into a running SwartzNet instance.
 // Construct with New, call Start once, and Stop to tear down
@@ -497,6 +505,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing query field 'q'", http.StatusBadRequest)
 		return
 	}
+	if len(req.Q) > maxSearchQueryBytes {
+		http.Error(w, fmt.Sprintf("query too long: %d bytes (max %d)", len(req.Q), maxSearchQueryBytes), http.StatusBadRequest)
+		return
+	}
 	if req.Limit <= 0 {
 		req.Limit = 50
 	}
@@ -793,9 +805,14 @@ type FlagRequest struct {
 type ConfirmRequest = FlagRequest
 
 // FlagResponse is the JSON body returned from /flag and /confirm.
+// IndexersFlagged reports how many indexer pubkeys were demoted by
+// a /flag call; zero means the hash had no recorded source
+// attribution so no reputation was touched. Always zero for
+// /confirm.
 type FlagResponse struct {
-	OK       bool   `json:"ok"`
-	InfoHash string `json:"infohash"`
+	OK              bool   `json:"ok"`
+	InfoHash        string `json:"infohash"`
+	IndexersFlagged int    `json:"indexers_flagged,omitempty"`
 }
 
 func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
@@ -835,32 +852,24 @@ func (s *Server) handleFlag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// M9: prefer per-hit source attribution. The SourceTracker
+	// M9: per-hit source attribution only. The SourceTracker
 	// (populated by Lookup.Query) tells us exactly which indexer
-	// pubkeys returned this hit, so we can demote only those
-	// rather than punishing every known indexer indiscriminately.
+	// pubkeys returned this hit, so we demote only those.
 	//
 	// If no source attribution exists for this hash (the user
 	// never queried it through Layer D, or it has been evicted
-	// from the LRU), fall back to the M5d behaviour of demoting
-	// every known indexer — it is the safest fallback because
-	// any indexer that ends up claiming the same hash later will
-	// also lose reputation, which is exactly what we want for a
-	// hash the user has explicitly flagged.
+	// from the LRU), fail closed and demote nobody. The old
+	// fallback of penalizing every known indexer was attacker-
+	// weaponizable: seed an unattributed spam result, get it
+	// flagged, and crater the user's whole reputation table —
+	// trusted publishers included.
 	var pks []reputation.PubKeyHex
-	var attribution string
 	if s.sources != nil {
 		pks = s.sources.Sources(req.InfoHash)
 	}
-	if len(pks) > 0 {
-		attribution = "targeted"
-	} else {
-		attribution = "fallback"
-		snap := s.tracker.Snapshot()
-		pks = make([]reputation.PubKeyHex, 0, len(snap))
-		for _, e := range snap {
-			pks = append(pks, e.PubKey)
-		}
+	attribution := "targeted"
+	if len(pks) == 0 {
+		attribution = "none"
 	}
 	s.tracker.RecordFlagged(pks...)
 	if s.sources != nil {
@@ -872,7 +881,11 @@ func (s *Server) handleFlag(w http.ResponseWriter, r *http.Request) {
 		"attribution", attribution,
 	)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(FlagResponse{OK: true, InfoHash: req.InfoHash})
+	_ = json.NewEncoder(w).Encode(FlagResponse{
+		OK:              true,
+		InfoHash:        req.InfoHash,
+		IndexersFlagged: len(pks),
+	})
 }
 
 // AddTorrentRequest is the JSON body for POST /torrent.
@@ -1049,8 +1062,10 @@ func (s *Server) handleSetFilePriority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	idxStr := r.PathValue("index")
-	var idx int
-	if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil || idx < 0 {
+	// strconv.Atoi rather than Sscanf: Atoi rejects trailing
+	// garbage ("3abc") instead of silently parsing the prefix.
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil || idx < 0 {
 		http.Error(w, "file index must be a non-negative integer", http.StatusBadRequest)
 		return
 	}
