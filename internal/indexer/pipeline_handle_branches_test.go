@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -177,23 +178,27 @@ func TestPipelineHandleAllChunksFailedCounter(t *testing.T) {
 	}
 }
 
-// closingReader wraps a bytes.Reader with a Close method so the
-// pipeline's `r.(io.Closer); ok` type-assertion fires the
-// defer-Close branch.
+// closingReader wraps a bytes.Reader with a Close method so
+// safeExtract's `r.(io.Closer); ok` type-assertion fires the
+// defer-Close branch. The flag is atomic because the Close runs
+// in safeExtract's extracting goroutine, concurrent with the
+// asserting test goroutine.
 type closingReader struct {
 	*bytes.Reader
-	closed bool
+	closed atomic.Bool
 }
 
 func (c *closingReader) Close() error {
-	c.closed = true
+	c.closed.Store(true)
 	return nil
 }
 
 // TestPipelineHandleClosesReader covers the
-// `r.(io.Closer); ok → defer c.Close()` branch. Submit a .txt
-// file whose OpenReader returns a *closingReader; assert that
-// after pipeline.handle ran, Close has been called on it.
+// `r.(io.Closer); ok → defer c.Close()` branch in safeExtract's
+// extracting goroutine. Submit a .txt file whose OpenReader
+// returns a *closingReader; assert that Close is (eventually)
+// called on it. "Eventually" because the Close runs in the child
+// goroutine's defer, which may fire just after handle returns.
 func TestPipelineHandleClosesReader(t *testing.T) {
 	t.Parallel()
 	idx, err := Open(filepath.Join(t.TempDir(), "p3.bleve"))
@@ -218,7 +223,11 @@ func TestPipelineHandleClosesReader(t *testing.T) {
 	}
 	pollPipelineProcessed(t, p, ih)
 
-	if !cr.closed {
-		t.Errorf("OpenReader's *closingReader.Close was never invoked")
+	deadline := time.Now().Add(5 * time.Second)
+	for !cr.closed.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("OpenReader's *closingReader.Close was never invoked")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

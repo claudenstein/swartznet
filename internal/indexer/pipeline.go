@@ -181,9 +181,9 @@ func (p *Pipeline) handle(in FileInput) {
 		counters.failed.Add(1)
 		return
 	}
-	if c, ok := r.(io.Closer); ok {
-		defer c.Close()
-	}
+	// r is closed by safeExtract's extracting goroutine (after Extract
+	// returns), never here: closing from this goroutine would race a
+	// still-running Read when the extract watchdog fires.
 
 	chunks, err := safeExtract(p.log, ex, r, p.maxFileBytes)
 	if err != nil {
@@ -299,6 +299,12 @@ var errExtractTimeout = fmt.Errorf("pipeline: extract exceeded %s hard deadline"
 // leaving the wedged goroutine to (eventually) finish or leak. A
 // recovered panic inside the child is converted into an error so the
 // caller sees an ordinary extract failure.
+//
+// safeExtract owns closing r (when it implements io.Closer). The Close
+// runs in the extracting goroutine's defer, strictly after Extract
+// returns — never in the caller — so a timed-out extract can never
+// have its reader closed out from under a concurrent Read (anacrolix
+// torrent.Reader's Read and Close are not safe to race).
 func safeExtract(log *slog.Logger, ex extractors.Extractor, r io.Reader, maxBytes int64) (chunks []extractors.Chunk, err error) {
 	if log == nil {
 		log = slog.Default()
@@ -313,6 +319,11 @@ func safeExtract(log *slog.Logger, ex extractors.Extractor, r io.Reader, maxByte
 	done := make(chan result, 1)
 
 	go func() {
+		// Registered before the recover defer (LIFO), so the Close
+		// also runs when Extract panics — always after the last Read.
+		if c, ok := r.(io.Closer); ok {
+			defer c.Close()
+		}
 		defer func() {
 			if rec := recover(); rec != nil {
 				done <- result{nil, fmt.Errorf("pipeline: extractor %q panicked: %v", ex.Name(), rec)}

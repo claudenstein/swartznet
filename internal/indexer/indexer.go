@@ -432,7 +432,24 @@ func (i *Index) AllTorrentDocs() ([]TorrentDoc, error) {
 		out  []TorrentDoc
 		from = 0
 	)
-	for {
+	// Defensive ceiling on the pagination walk, scaled off a cheap
+	// count-only query (mirrors the Stats text-scan guard): this loop
+	// holds the global mutex, so a pathological index that kept
+	// returning full pages would otherwise pin every other caller
+	// forever. Hitting the ceiling is logged so the truncation is
+	// observable.
+	countReq := bleve.NewSearchRequestOptions(q, 0, 0, false)
+	countRes, err := i.bleve.Search(countReq)
+	if err != nil {
+		return nil, fmt.Errorf("indexer: AllTorrentDocs count: %w", err)
+	}
+	maxPages := int(countRes.Total/batch) + 2
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			i.log.Warn("indexer.all_torrent_docs_truncated",
+				"pages", page, "scanned", from, "torrent_count", countRes.Total)
+			break
+		}
 		sr := bleve.NewSearchRequestOptions(q, batch, from, false)
 		sr.Fields = []string{
 			fieldInfoHash, fieldName, fieldFilePaths, fieldTrackers,
@@ -472,7 +489,22 @@ func (i *Index) ContentDocsForInfoHash(infoHash string) ([]ContentDoc, error) {
 		out  []ContentDoc
 		from = 0
 	)
-	for {
+	// Same defensive ceiling as AllTorrentDocs — the walk holds the
+	// global mutex, so bound it off a cheap count-only query and log
+	// if the ceiling ever fires.
+	countReq := bleve.NewSearchRequestOptions(q, 0, 0, false)
+	countRes, err := i.bleve.Search(countReq)
+	if err != nil {
+		return nil, fmt.Errorf("indexer: ContentDocsForInfoHash count: %w", err)
+	}
+	maxPages := int(countRes.Total/batch) + 2
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			i.log.Warn("indexer.content_docs_truncated",
+				"pages", page, "scanned", from,
+				"info_hash", infoHash, "content_count", countRes.Total)
+			break
+		}
 		sr := bleve.NewSearchRequestOptions(q, batch, from, true)
 		sr.Fields = []string{
 			fieldInfoHash, fieldFileIndex, fieldFilePath, fieldFileSize,
@@ -661,7 +693,10 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 	if i.bleve == nil {
 		return nil, errors.New("indexer: closed")
 	}
-	if req.Query == "" {
+	// A SignedBy-only request (empty Query) is valid — SearchRequest
+	// documents it as "fetch every signed torrent from this
+	// publisher". Only a request with neither is rejected.
+	if req.Query == "" && req.SignedBy == "" {
 		return nil, errors.New("indexer: empty query")
 	}
 	if req.Limit <= 0 {
@@ -678,12 +713,20 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 
 	// Build the query: free-form text (req.Query) AND, if
 	// SignedBy is set, an exact-match keyword filter on the
-	// signing pubkey.
-	var q query.Query = bleve.NewQueryStringQuery(req.Query)
+	// signing pubkey. With an empty Query the pubkey filter
+	// stands alone.
+	var q query.Query
+	if req.Query != "" {
+		q = bleve.NewQueryStringQuery(req.Query)
+	}
 	if req.SignedBy != "" {
 		signedQ := bleve.NewTermQuery(strings.ToLower(req.SignedBy))
 		signedQ.SetField(fieldSignedBy)
-		q = bleve.NewConjunctionQuery(q, signedQ)
+		if q == nil {
+			q = signedQ
+		} else {
+			q = bleve.NewConjunctionQuery(q, signedQ)
+		}
 	}
 	sr := bleve.NewSearchRequestOptions(q, req.Limit, 0, false)
 	sr.Fields = []string{
