@@ -39,6 +39,18 @@ type Extractor interface {
 	Extract(r io.Reader, maxBytes int64) ([]Chunk, error)
 }
 
+// maxDocTextBytes caps the extracted-text *output* of the
+// container-based document extractors (DOCX/ODT/ODP/PPTX/EPUB and the
+// shared HTML walker). The per-extractor input caps bound the
+// *compressed* bytes we buffer, but DEFLATE amplifies up to ~1032:1
+// once decompressed — so every zip-entry reader must be wrapped in
+// io.LimitReader(rc, maxDocTextBytes) before it reaches an XML/HTML
+// parser. Without that, a single oversized text node buffers the
+// whole decompressed body inside one Token()/Next() call, an OOM
+// that recover() cannot catch. 64 MiB of plain text is far beyond
+// any real document.
+const maxDocTextBytes = 64 * 1024 * 1024
+
 // Candidate describes a file the dispatcher is considering.
 type Candidate struct {
 	// Path is the user-visible file path (for extension sniffing).

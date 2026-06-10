@@ -89,12 +89,16 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 
 	var combined strings.Builder
 	for _, f := range chapters {
-		// Output guard against zip-bomb amplification: stop combining
-		// further chapters once we cross the budget.
-		if int64(combined.Len()) > maxBytes {
-			break
+		// The text budget is the intended *output* cap (64 MiB), not
+		// the 256 MiB input cap above: a deflate-bomb chapter
+		// amplifies ~1032:1 once decompressed. The remaining budget
+		// shrinks as chapters accumulate so the total output is
+		// bounded too. See maxDocTextBytes.
+		remaining := int64(maxDocTextBytes) - int64(combined.Len())
+		if remaining <= 0 {
+			break // output budget exhausted; index what we have
 		}
-		text, err := extractChapter(f, maxBytes)
+		text, err := extractChapter(f, remaining)
 		if err != nil {
 			// One bad chapter does not poison the rest of the book.
 			continue
@@ -113,14 +117,17 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 }
 
 // extractChapter opens one zip entry, runs it through the shared
-// HTML text extractor, and returns the visible text.
+// HTML text extractor, and returns the visible text. maxOut bounds
+// the DECOMPRESSED entry stream: f.Open() hands back a raw deflate
+// reader, so without the limit a bomb chapter buffers its whole
+// decompressed body inside the tokenizer.
 func extractChapter(f *zip.File, maxOut int64) (string, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return "", err
 	}
 	defer rc.Close()
-	return extractHTMLText(rc, maxOut)
+	return extractHTMLText(io.LimitReader(rc, maxOut), maxOut)
 }
 
 // isXHTMLChapter reports whether a zip entry is a candidate

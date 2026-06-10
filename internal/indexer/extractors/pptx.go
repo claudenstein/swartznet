@@ -65,10 +65,14 @@ func (e *PPTXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 
 	var out strings.Builder
 	for i, slide := range slides {
-		// Output guard against zip-bomb amplification: stop opening
-		// further slides once the accumulated text crosses the budget.
-		if int64(out.Len()) > maxBytes {
-			break
+		// Bound the DECOMPRESSED slide stream before it reaches the
+		// XML decoder: the input cap above only limits the compressed
+		// bytes, and a deflate bomb amplifies ~1032:1. The remaining
+		// budget shrinks as slides accumulate so the total output is
+		// bounded too. See maxDocTextBytes.
+		remaining := int64(maxDocTextBytes) - int64(out.Len())
+		if remaining <= 0 {
+			break // output budget exhausted; index what we have
 		}
 		if i > 0 {
 			out.WriteString("\n\n")
@@ -77,7 +81,7 @@ func (e *PPTXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 		if err != nil {
 			return nil, fmt.Errorf("pptx: open %s: %w", slide.Name, err)
 		}
-		text, err := extractDrawingMLText(rc, maxBytes)
+		text, err := extractDrawingMLText(io.LimitReader(rc, remaining), maxBytes)
 		rc.Close()
 		if err != nil {
 			return nil, err

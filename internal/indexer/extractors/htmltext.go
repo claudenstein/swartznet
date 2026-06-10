@@ -17,11 +17,21 @@ import (
 // inside the archive) and any future plain-HTML backend. The
 // implementation walks the html.Tokenizer rather than building a
 // full DOM, which keeps memory bounded for very large books.
+//
+// maxOut bounds both the raw bytes consumed and the tokenizer's
+// internal buffer (SetMaxBuf — the default is unlimited, so without
+// it one giant text node or unterminated tag buffers the whole
+// stream before a single token is emitted). Values <= 0 or above
+// maxDocTextBytes are clamped to maxDocTextBytes. Hitting either
+// bound is graceful truncation, not an error: we return the text
+// accumulated so far so one oversized chapter doesn't poison the
+// rest of a book.
 func extractHTMLText(r io.Reader, maxOut int64) (string, error) {
-	if maxOut <= 0 {
-		maxOut = defaultTextOutputCap
+	if maxOut <= 0 || maxOut > maxDocTextBytes {
+		maxOut = maxDocTextBytes
 	}
-	tz := html.NewTokenizer(r)
+	tz := html.NewTokenizer(io.LimitReader(r, maxOut))
+	tz.SetMaxBuf(int(maxOut))
 	var (
 		out       strings.Builder
 		skipDepth int  // counts nested <script>/<style> blocks we are inside
@@ -69,7 +79,10 @@ func extractHTMLText(r io.Reader, maxOut int64) (string, error) {
 		switch tt {
 		case html.ErrorToken:
 			err := tz.Err()
-			if err == io.EOF {
+			if err == io.EOF || err == html.ErrBufferExceeded {
+				// EOF includes hitting the maxOut LimitReader;
+				// ErrBufferExceeded means a single token outgrew
+				// the budget. Both are graceful truncation.
 				return strings.TrimSpace(out.String()), nil
 			}
 			return "", err

@@ -66,7 +66,10 @@ func (e *ODPExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err
 	}
 	defer rc.Close()
 
-	text, err := extractODTText(rc, maxBytes)
+	// Bound the DECOMPRESSED entry stream before it reaches the XML
+	// decoder: the input cap above only limits the compressed bytes,
+	// and a deflate bomb amplifies ~1032:1. See maxDocTextBytes.
+	text, err := extractODTText(io.LimitReader(rc, maxDocTextBytes), maxBytes)
 	if err != nil {
 		return nil, err
 	}

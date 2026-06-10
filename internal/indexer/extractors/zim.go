@@ -487,7 +487,7 @@ func zimIsExtractableMime(m string) bool {
 // returned as-is (trimmed).
 func zimDecodeArticle(blob []byte, mime string) string {
 	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "application/xhtml") {
-		text, err := extractHTMLText(bytes.NewReader(blob), zimMaxClusterBytes)
+		text, err := extractHTMLText(bytes.NewReader(blob), maxDocTextBytes)
 		if err != nil {
 			return ""
 		}

@@ -170,10 +170,13 @@ func parseTIFF(t []byte) (map[uint16]string, error) {
 	default:
 		return nil, fmt.Errorf("exif: bad byte-order marker")
 	}
-	ifdOffset := int(bo.Uint32(t[4:8]))
-	if ifdOffset >= len(t) {
+	// Keep the offset in int64 so the range check cannot be defeated
+	// by uint32→int truncation on 32-bit targets.
+	ifdOffset64 := int64(bo.Uint32(t[4:8]))
+	if ifdOffset64 >= int64(len(t)) {
 		return nil, fmt.Errorf("exif: IFD offset out of range")
 	}
+	ifdOffset := int(ifdOffset64)
 	gpsIFDOffset := parseIFD(t, ifdOffset, bo, out)
 	if gpsIFDOffset > 0 && gpsIFDOffset < len(t) {
 		gps := make(map[uint16]string)
@@ -202,7 +205,10 @@ func parseIFD(t []byte, offset int, bo binary.ByteOrder, out map[uint16]string) 
 	for i := 0; i < count && p+12 <= len(t); i++ {
 		tag := bo.Uint16(t[p : p+2])
 		typ := bo.Uint16(t[p+2 : p+4])
-		cnt := int(bo.Uint32(t[p+4 : p+8]))
+		// cnt is attacker-controlled. Keep it in int64 so the size
+		// arithmetic below (cnt*8) cannot wrap a 32-bit int and slip
+		// past the bounds checks on 32-bit targets.
+		cnt := int64(bo.Uint32(t[p+4 : p+8]))
 		valSlot := t[p+8 : p+12]
 		p += 12
 
@@ -232,7 +238,7 @@ func parseIFD(t []byte, offset int, bo binary.ByteOrder, out map[uint16]string) 
 			}
 		case 1, 7: // BYTE, UNDEFINED — usually reference strings ("N","E")
 			if cnt <= 4 {
-				out[tag] = strings.TrimSpace(string(bytes.TrimRight(valSlot[:cnt], "\x00")))
+				out[tag] = strings.TrimSpace(string(bytes.TrimRight(valSlot[:int(cnt)], "\x00")))
 			}
 		}
 	}
@@ -242,12 +248,20 @@ func parseIFD(t []byte, offset int, bo binary.ByteOrder, out map[uint16]string) 
 // readValueBytes returns a tag's data bytes. If cnt ≤ 4, data
 // is inline in the value slot. Otherwise the slot is a uint32
 // offset into t.
-func readValueBytes(t []byte, valSlot []byte, size int, bo binary.ByteOrder) []byte {
+//
+// size and off are kept in int64 throughout: off ≤ 2³² and size
+// ≤ 2³⁵ (cnt*8), so off+size cannot overflow an int64 even on
+// 32-bit targets — where the old int math could wrap past the
+// bounds check and panic on the slice below.
+func readValueBytes(t []byte, valSlot []byte, size int64, bo binary.ByteOrder) []byte {
+	if size < 0 {
+		return nil
+	}
 	if size <= 4 {
 		return valSlot[:size]
 	}
-	off := int(bo.Uint32(valSlot))
-	if off < 0 || off+size > len(t) {
+	off := int64(bo.Uint32(valSlot))
+	if off+size > int64(len(t)) {
 		return nil
 	}
 	return t[off : off+size]

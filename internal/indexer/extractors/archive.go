@@ -36,6 +36,20 @@ type ArchiveExtractor struct{}
 // NewArchiveExtractor returns a ready-to-use archive extractor.
 func NewArchiveExtractor() *ArchiveExtractor { return &ArchiveExtractor{} }
 
+// archiveMaxNameBytes is the documented 4 MiB cap on the
+// concatenated member-name list. Enforced while collecting: once the
+// budget is spent we stop reading names rather than ballooning on
+// pathological archives (millions of entries, or a gzip bomb
+// expanding into endless tar headers).
+const archiveMaxNameBytes = 4 * 1024 * 1024
+
+// archiveMaxTarGzBytes bounds how many DECOMPRESSED bytes we walk
+// through a .tar.gz stream. The raw input is capped at maxBytes, but
+// DEFLATE amplifies up to ~1032:1 and tar.Next() must read through
+// member contents to reach the next header — without this a bomb
+// burns unbounded CPU skipping a single huge member.
+const archiveMaxTarGzBytes = 1 << 30 // 1 GiB
+
 // Name implements Extractor.
 func (*ArchiveExtractor) Name() string { return "archive" }
 
@@ -96,6 +110,7 @@ func zipMemberNames(raw []byte) ([]string, error) {
 		return nil, fmt.Errorf("archive: zip: %w", err)
 	}
 	names := make([]string, 0, len(rd.File))
+	total := 0
 	for _, f := range rd.File {
 		if f.Name == "" {
 			continue
@@ -103,6 +118,10 @@ func zipMemberNames(raw []byte) ([]string, error) {
 		// Skip directory entries (they have no interesting text).
 		if strings.HasSuffix(f.Name, "/") {
 			continue
+		}
+		total += len(f.Name) + 1 // +1 for the joining newline
+		if total > archiveMaxNameBytes {
+			break // documented name-list cap; index what we have
 		}
 		names = append(names, f.Name)
 	}
@@ -115,12 +134,16 @@ func tarGzMemberNames(raw []byte) ([]string, error) {
 		return nil, fmt.Errorf("archive: gzip: %w", err)
 	}
 	defer gz.Close()
-	return tarMemberNames(gz)
+	// Bound the decompressed stream — see archiveMaxTarGzBytes. A
+	// stream truncated by the limit surfaces as a tar read error,
+	// which fails the extraction closed.
+	return tarMemberNames(io.LimitReader(gz, archiveMaxTarGzBytes))
 }
 
 func tarMemberNames(r io.Reader) ([]string, error) {
 	tr := tar.NewReader(r)
 	var names []string
+	total := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -133,6 +156,10 @@ func tarMemberNames(r io.Reader) ([]string, error) {
 			continue
 		}
 		if hdr.Name != "" {
+			total += len(hdr.Name) + 1 // +1 for the joining newline
+			if total > archiveMaxNameBytes {
+				break // documented name-list cap; index what we have
+			}
 			names = append(names, hdr.Name)
 		}
 	}

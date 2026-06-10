@@ -75,7 +75,10 @@ func (e *DOCXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 	}
 	defer rc.Close()
 
-	text, err := extractDocumentText(rc, maxBytes)
+	// Bound the DECOMPRESSED entry stream before it reaches the XML
+	// decoder: the input cap above only limits the compressed bytes,
+	// and a deflate bomb amplifies ~1032:1. See maxDocTextBytes.
+	text, err := extractDocumentText(io.LimitReader(rc, maxDocTextBytes), maxBytes)
 	if err != nil {
 		return nil, err
 	}
