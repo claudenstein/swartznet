@@ -12,19 +12,23 @@ import (
 func TestOnSyncSymbolsUnknownSession(t *testing.T) {
 	t.Parallel()
 	p := New(slog.Default())
-	p.onSyncSymbols("never-registered:1", SyncSymbols{TxID: 99})
+	p.onSyncSymbols("never-registered:1", SyncSymbols{TxID: 99}, nil)
 }
 
 // TestOnSyncSymbolsApplyError — registered session in the wrong
 // phase (PhaseIdle on a responder) makes ApplySymbols error;
-// the handler logs and returns silently.
+// the handler fails closed: terminal sync_end, session released,
+// peer charged.
 func TestOnSyncSymbolsApplyError(t *testing.T) {
 	t.Parallel()
 	p := New(slog.Default())
 	sess := NewSyncSession(7, RoleResponder, nil)
 	p.registerSyncSession("p:1", sess)
 	// PhaseIdle ApplySymbols returns an error — exercise that arm.
-	p.onSyncSymbols("p:1", SyncSymbols{TxID: 7})
+	p.onSyncSymbols("p:1", SyncSymbols{TxID: 7}, nil)
+	if p.lookupSyncSession("p:1", 7) != nil {
+		t.Error("session should be released after ApplySymbols violation")
+	}
 }
 
 // TestOnSyncNeedUnknownSession — same shape as the two

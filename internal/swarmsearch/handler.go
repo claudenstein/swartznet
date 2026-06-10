@@ -2,6 +2,7 @@ package swarmsearch
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -264,7 +265,7 @@ func (p *Protocol) handleSyncFrame(peerAddr string, hdr messageHeader, payload [
 			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_symbols")
 			return
 		}
-		p.onSyncSymbols(peerAddr, m)
+		p.onSyncSymbols(peerAddr, m, reply)
 	case MsgTypeSyncNeed:
 		m, err := DecodeSyncNeed(payload)
 		if err != nil {
@@ -278,7 +279,7 @@ func (p *Protocol) handleSyncFrame(peerAddr string, hdr messageHeader, payload [
 			p.chargeMisbehavior(peerAddr, ScoreBadBencode, "bad_sync_records")
 			return
 		}
-		p.onSyncRecords(peerAddr, m)
+		p.onSyncRecords(peerAddr, m, reply)
 	case MsgTypeSyncEnd:
 		m, err := DecodeSyncEnd(payload)
 		if err != nil {
@@ -364,7 +365,7 @@ func (p *Protocol) onSyncBegin(peerAddr string, m SyncBegin, reply ReplyFunc) {
 	})
 }
 
-func (p *Protocol) onSyncSymbols(peerAddr string, m SyncSymbols) {
+func (p *Protocol) onSyncSymbols(peerAddr string, m SyncSymbols, reply ReplyFunc) {
 	sess := p.lookupSyncSession(peerAddr, m.TxID)
 	if sess == nil {
 		p.log.Debug("swarmsearch.sync_symbols.unknown_session",
@@ -372,8 +373,20 @@ func (p *Protocol) onSyncSymbols(peerAddr string, m SyncSymbols) {
 		return
 	}
 	if err := sess.ApplySymbols(m); err != nil {
+		// Fail closed: every ApplySymbols error (phase violation,
+		// txid mismatch, symbol budget) is an unambiguous protocol
+		// violation. Tear the session down with a terminal
+		// sync_end instead of leaving it in limbo for the reaper —
+		// otherwise the peer can keep firing violating frames.
 		p.log.Debug("swarmsearch.sync_symbols.apply_err",
 			"peer", peerAddr, "err", err)
+		status := SyncStatusAborted
+		if errors.Is(err, ErrSymbolBudgetExceeded) {
+			status = SyncStatusLimitExceeded
+		}
+		p.sendSyncEnd(reply, sess.Finish(status))
+		p.releaseSyncSession(peerAddr, m.TxID)
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "sync_symbols_violation")
 	}
 }
 
@@ -403,7 +416,7 @@ func (p *Protocol) onSyncNeed(peerAddr string, m SyncNeed, reply ReplyFunc) {
 	p.sendSyncRecords(reply, frame)
 }
 
-func (p *Protocol) onSyncRecords(peerAddr string, m SyncRecords) {
+func (p *Protocol) onSyncRecords(peerAddr string, m SyncRecords, reply ReplyFunc) {
 	sess := p.lookupSyncSession(peerAddr, m.TxID)
 	if sess == nil {
 		p.log.Debug("swarmsearch.sync_records.unknown_session",
@@ -412,8 +425,20 @@ func (p *Protocol) onSyncRecords(peerAddr string, m SyncRecords) {
 	}
 	records, err := sess.ApplyRecords(m)
 	if err != nil {
+		// Fail closed: phase violations and bad record sizes get
+		// the documented sync_end aborted; crossing the max_bytes
+		// budget gets the documented limit_exceeded (SPEC §2.3).
+		// Either way the session is torn down and the peer charged
+		// so it cannot stream violating frames forever.
 		p.log.Debug("swarmsearch.sync_records.apply_err",
 			"peer", peerAddr, "err", err)
+		status := SyncStatusAborted
+		if errors.Is(err, ErrSyncBytesBudgetExceeded) {
+			status = SyncStatusLimitExceeded
+		}
+		p.sendSyncEnd(reply, sess.Finish(status))
+		p.releaseSyncSession(peerAddr, m.TxID)
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "sync_records_violation")
 		return
 	}
 	// Feed verified records into the sink. Per-record sig and

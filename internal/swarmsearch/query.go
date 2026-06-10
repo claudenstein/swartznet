@@ -82,6 +82,18 @@ type pendingQuery struct {
 	txid     uint32
 	results  chan incomingResult
 	expected int // number of peers we fired the query to
+	// asked is the set of peer addresses this query was fanned out
+	// to. Populated once before registerPending and read-only
+	// afterwards, so lookups need no lock. Results/rejects from any
+	// other peer are dropped and charged — txids are guessable, so
+	// "the txid matches" alone is not proof the peer was queried.
+	asked map[string]struct{}
+}
+
+// askedPeer reports whether addr is in the query's fan-out set.
+func (q *pendingQuery) askedPeer(addr string) bool {
+	_, ok := q.asked[addr]
+	return ok
 }
 
 // incomingResult bundles a decoded Result with the address of the
@@ -162,10 +174,18 @@ func (p *Protocol) Query(ctx context.Context, req QueryRequest) (*QueryResponse,
 	}
 
 	txid := p.nextTxID()
+	// Record the fan-out set BEFORE registering the pending query —
+	// routeResult may fire concurrently the instant a Send goes out,
+	// so the asked map must already be complete and immutable.
+	askedSet := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		askedSet[t.Addr] = struct{}{}
+	}
 	pend := &pendingQuery{
 		txid:     txid,
 		results:  make(chan incomingResult, len(targets)),
 		expected: len(targets),
+		asked:    askedSet,
 	}
 	p.registerPending(pend)
 	defer p.releasePending(txid)
@@ -283,6 +303,14 @@ func (p *Protocol) routeResult(peerAddr string, r Result) {
 			"peer", peerAddr, "txid", r.TxID)
 		return
 	}
+	if !pend.askedPeer(peerAddr) {
+		// A live txid from a peer we never queried: treat as
+		// result spoofing, not a stale reply.
+		p.log.Debug("swarmsearch.route_result.unasked_peer",
+			"peer", peerAddr, "txid", r.TxID)
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "result_from_unasked_peer")
+		return
+	}
 	select {
 	case pend.results <- incomingResult{peer: peerAddr, result: r}:
 	default:
@@ -301,6 +329,12 @@ func (p *Protocol) routeReject(peerAddr string, r Reject) {
 	if pend == nil {
 		// Same stale/replay reasoning as routeResult.
 		p.chargeMisbehavior(peerAddr, ScoreStaleTxID, "stale_reject_txid")
+		return
+	}
+	if !pend.askedPeer(peerAddr) {
+		// Same guard as routeResult: only asked peers may inject
+		// outcomes into the collector.
+		p.chargeMisbehavior(peerAddr, ScoreUnexpectedMessage, "reject_from_unasked_peer")
 		return
 	}
 	select {

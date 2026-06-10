@@ -22,10 +22,13 @@ func TestOnSyncRecordsRoutesValidRecordsToSink(t *testing.T) {
 	p.SetRecordSink(cache)
 
 	// Build a session that's in a phase where ApplyRecords
-	// won't reject (PhaseSymbolsFlowing).
+	// won't reject (PhaseNeeded — we asked for records).
 	sess := NewSyncSession(1, RoleInitiator, nil)
 	if _, err := sess.Begin(SyncFilter{}); err != nil {
 		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := sess.NeedFrame(nil); err != nil {
+		t.Fatalf("NeedFrame: %v", err)
 	}
 	p.registerSyncSession("p:hh", sess)
 
@@ -49,7 +52,7 @@ func TestOnSyncRecordsRoutesValidRecordsToSink(t *testing.T) {
 		Pow: rec.Pow,
 		Sig: rec.Sig[:],
 	}
-	p.onSyncRecords("p:hh", SyncRecords{TxID: 1, Records: []SyncRecord{wireRec}})
+	p.onSyncRecords("p:hh", SyncRecords{TxID: 1, Records: []SyncRecord{wireRec}}, nil)
 
 	if cache.Len() != 1 {
 		t.Errorf("sink received %d records, want 1", cache.Len())

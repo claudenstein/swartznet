@@ -30,6 +30,12 @@ import (
 	"time"
 )
 
+// ErrSyncBytesBudgetExceeded signals that the peer shipped more
+// sync_records payload than the session's max_bytes budget allows
+// (SPEC §2.3/§2.9). handler.go maps it onto the documented
+// sync_end "limit_exceeded" status.
+var ErrSyncBytesBudgetExceeded = errors.New("swarmsearch: sync_records byte budget exceeded")
+
 // SyncRole identifies which side of a session this is.
 type SyncRole int
 
@@ -89,11 +95,14 @@ type SyncSession struct {
 	maxSymbols int
 	maxBytes   int
 
-	// Observability.
+	// Observability. bytesIn doubles as the enforced max_bytes
+	// counter — ApplyRecords aborts the session once it crosses
+	// maxBytes (SPEC §2.3/§2.9).
 	symbolsOut int
 	symbolsIn  int
 	bytesIn    int
 	bytesOut   int
+	recordsIn  int // cumulative records accepted via ApplyRecords
 
 	// After decoding, a stable list of IDs we need records for.
 	neededIDs [][32]byte
@@ -403,12 +412,14 @@ func (s *SyncSession) BuildRecordsFrame(recs []LocalRecord, missing [][32]byte) 
 			Pow: r.Pow,
 			Sig: append([]byte(nil), r.Sig[:]...),
 		})
+		s.bytesOut += syncRecordWireSize(wireRecs[len(wireRecs)-1])
 	}
 	missingSlices := make([][]byte, 0, len(missing))
 	for _, id := range missing {
 		b := make([]byte, 32)
 		copy(b, id[:])
 		missingSlices = append(missingSlices, b)
+		s.bytesOut += 32
 	}
 	s.phase = PhaseFulfilled
 	return SyncRecords{
@@ -428,15 +439,37 @@ func (s *SyncSession) ApplyRecords(m SyncRecords) ([]SyncRecord, error) {
 	if m.TxID != s.txid {
 		return nil, fmt.Errorf("swarmsearch: sync_records txid %d, want %d", m.TxID, s.txid)
 	}
+	// Phase guard: records are only legitimate after this side
+	// requested them via sync_need (PhaseNeeded) or while a
+	// fulfilment is already streaming in chunks (PhaseFulfilled).
+	// A peer firing sync_records straight after sync_begin is a
+	// protocol violation, not a flow to limp along with.
+	if s.phase != PhaseNeeded && s.phase != PhaseFulfilled {
+		return nil, fmt.Errorf("swarmsearch: ApplyRecords in phase %d", s.phase)
+	}
 	// SPEC §2.7: receiver re-verifies sigs. This session wrapper
 	// treats records as opaque — it's the dhtindex/companion
 	// layer that knows how to verify. We still range-check sizes
 	// as the wire-level guard.
+	frameBytes := 0
 	for i, r := range m.Records {
 		if len(r.Pk) != 32 || len(r.Ih) != 20 || len(r.Sig) != 64 {
 			return nil, fmt.Errorf("swarmsearch: sync_records record[%d] bad sizes", i)
 		}
+		frameBytes += syncRecordWireSize(r)
 	}
+	for _, id := range m.Missing {
+		frameBytes += len(id)
+	}
+	// SPEC §2.3/§2.9: enforce the negotiated max_bytes budget.
+	// Without this a peer could stream unbounded sync_records
+	// frames, each costing up to MaxRecordsPerMessage ed25519
+	// verifications on the read-loop goroutine.
+	if s.bytesIn+frameBytes > s.maxBytes {
+		return nil, ErrSyncBytesBudgetExceeded
+	}
+	s.bytesIn += frameBytes
+	s.recordsIn += len(m.Records)
 	s.phase = PhaseFulfilled
 	return m.Records, nil
 }
@@ -452,6 +485,7 @@ func (s *SyncSession) Finish(status string) SyncEnd {
 	return SyncEnd{
 		TxID:     s.txid,
 		Status:   status,
+		Decoded:  s.recordsIn,
 		Sent:     s.symbolsOut,
 		BytesIn:  s.bytesIn,
 		BytesOut: s.bytesOut,
@@ -497,6 +531,14 @@ func verifyLocalRecordSig(r LocalRecord) bool {
 	n := binary.PutUvarint(nonce[:], r.Pow)
 	msg = append(msg, nonce[:n]...)
 	return ed25519.Verify(ed25519.PublicKey(r.Pk[:]), msg, r.Sig[:])
+}
+
+// syncRecordWireSize is the semantic payload size of one record
+// (pk + kw + ih + t + pow + sig). Used for max_bytes accounting —
+// a deterministic, close proxy for the bencoded frame size that
+// keeps the session free of transport-framing knowledge.
+func syncRecordWireSize(r SyncRecord) int {
+	return 32 + len(r.Kw) + 20 + 8 + 8 + 64
 }
 
 // localRecordID derives the 32-byte RIBLT element ID from a

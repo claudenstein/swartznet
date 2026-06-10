@@ -27,6 +27,7 @@ func TestRouteRejectChannelFullDropped(t *testing.T) {
 	pend := &pendingQuery{
 		txid:    42,
 		results: make(chan incomingResult, 1), // capacity 1
+		asked:   map[string]struct{}{"1.2.3.4:6881": {}},
 	}
 	p.registerPending(pend)
 	defer p.releasePending(42)

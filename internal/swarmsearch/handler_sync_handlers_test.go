@@ -20,7 +20,7 @@ func TestOnSyncRecordsUnknownSession(t *testing.T) {
 		Records: []SyncRecord{
 			{Pk: make([]byte, 32), Ih: make([]byte, 20), Sig: make([]byte, 64)},
 		},
-	})
+	}, nil)
 
 	// No sink was set, so even a registered session would be a
 	// no-op for ingestion. The point is just exercising the
@@ -29,14 +29,21 @@ func TestOnSyncRecordsUnknownSession(t *testing.T) {
 
 // TestOnSyncRecordsApplyError covers the
 // `records, err := sess.ApplyRecords(m); if err != nil` arm.
-// Register a session at TxID=7, then feed onSyncRecords a
-// frame whose record has a wrong-length Pk so ApplyRecords'
-// "record[N] bad sizes" check fires; onSyncRecords must
-// log+return without invoking the sink.
+// Register a session driven to PhaseNeeded, then feed
+// onSyncRecords a frame whose record has a wrong-length Pk so
+// ApplyRecords' "record[N] bad sizes" check fires; onSyncRecords
+// must fail closed — sync_end aborted, session released, peer
+// charged — without invoking the sink.
 func TestOnSyncRecordsApplyError(t *testing.T) {
 	t.Parallel()
 	p := New(slog.Default())
-	sess := NewSyncSession(7, RoleResponder, nil)
+	sess := NewSyncSession(7, RoleInitiator, nil)
+	if _, err := sess.Begin(SyncFilter{}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := sess.NeedFrame(nil); err != nil {
+		t.Fatalf("NeedFrame: %v", err)
+	}
 	p.registerSyncSession("p:1", sess)
 	// Record with Pk of length 5 — ApplyRecords requires 32.
 	// TxID matches the session so we get past the txid guard
@@ -46,7 +53,10 @@ func TestOnSyncRecordsApplyError(t *testing.T) {
 		Records: []SyncRecord{
 			{Pk: make([]byte, 5), Ih: make([]byte, 20), Sig: make([]byte, 64)},
 		},
-	})
+	}, nil)
+	if p.lookupSyncSession("p:1", 7) != nil {
+		t.Error("session should be released after ApplyRecords violation")
+	}
 }
 
 // TestOnSyncEndUnknownSession — the handler must not panic when

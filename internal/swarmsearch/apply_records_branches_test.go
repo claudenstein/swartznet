@@ -29,7 +29,15 @@ func TestApplyRecordsRejectsBadFieldLengths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Drive the session to PhaseNeeded so the size check
+			// (not the phase guard) is what fires.
 			s := NewSyncSession(1, RoleInitiator, nil)
+			if _, err := s.Begin(SyncFilter{}); err != nil {
+				t.Fatalf("Begin: %v", err)
+			}
+			if _, err := s.NeedFrame(nil); err != nil {
+				t.Fatalf("NeedFrame: %v", err)
+			}
 			if _, err := s.ApplyRecords(SyncRecords{TxID: 1, Records: []SyncRecord{tc.rec}}); err == nil {
 				t.Errorf("ApplyRecords should reject %s", tc.name)
 			}

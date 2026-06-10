@@ -152,7 +152,10 @@ func TestSyncSessionPhaseGuards(t *testing.T) {
 	s := NewSyncSession(1, RoleInitiator, nil)
 
 	// Applying records before Begin should fail.
-	if _, err := s.ApplyRecords(SyncRecords{TxID: 1}); err != nil && s.Phase() != PhaseIdle {
+	if _, err := s.ApplyRecords(SyncRecords{TxID: 1}); err == nil {
+		t.Error("ApplyRecords in PhaseIdle should fail")
+	}
+	if s.Phase() != PhaseIdle {
 		t.Errorf("Phase drift after ApplyRecords error: %d", s.Phase())
 	}
 
