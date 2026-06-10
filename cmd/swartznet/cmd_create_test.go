@@ -306,6 +306,69 @@ func TestCmdCreateSeedThenSigint(t *testing.T) {
 	}
 }
 
+// TestCmdCreateIdentityWithoutSign covers the fail-closed guard:
+// --identity without --sign used to be silently ignored (the
+// torrent shipped unsigned while the user believed their key was
+// used); it must now be a usage error.
+func TestCmdCreateIdentityWithoutSign(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdCreate([]string{
+		"-o", filepath.Join(dir, "out.torrent"),
+		"--identity", filepath.Join(dir, "id.key"),
+		src,
+	}, &stdout, &stderr)
+	if code != exitUsage {
+		t.Errorf("--identity-without-sign exit = %d, want exitUsage", code)
+	}
+	if !strings.Contains(stderr.String(), "--sign") {
+		t.Errorf("expected --sign hint in stderr, got %q", stderr.String())
+	}
+}
+
+// TestCreateEngineConfig covers createEngineConfig: a plain
+// hashing run keeps the minimal no-DHT/no-upload shape, while
+// --seed must keep DHT enabled (trackerless seeds are otherwise
+// undiscoverable) and uploads on. Both modes use an OS-assigned
+// listen port.
+func TestCreateEngineConfig(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name           string
+		startSeed      bool
+		dataDir        string
+		wantDisableDHT bool
+		wantNoUpload   bool
+	}{
+		{name: "hash-only", startSeed: false, wantDisableDHT: true, wantNoUpload: true},
+		{name: "seeding", startSeed: true, wantDisableDHT: false, wantNoUpload: false},
+		{name: "seeding-with-data-dir", startSeed: true, dataDir: "/tmp/sn-create-test", wantDisableDHT: false, wantNoUpload: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := createEngineConfig(tc.startSeed, tc.dataDir)
+			if cfg.DisableDHT != tc.wantDisableDHT {
+				t.Errorf("DisableDHT = %v, want %v", cfg.DisableDHT, tc.wantDisableDHT)
+			}
+			if cfg.NoUpload != tc.wantNoUpload {
+				t.Errorf("NoUpload = %v, want %v", cfg.NoUpload, tc.wantNoUpload)
+			}
+			if cfg.ListenPort != 0 {
+				t.Errorf("ListenPort = %d, want 0 (OS-assigned)", cfg.ListenPort)
+			}
+			if tc.dataDir != "" && cfg.DataDir != tc.dataDir {
+				t.Errorf("DataDir = %q, want %q", cfg.DataDir, tc.dataDir)
+			}
+		})
+	}
+}
+
 // TestStringSliceFlag covers the stringSliceFlag.String + Set
 // methods used by --tracker / --webseed.
 func TestStringSliceFlag(t *testing.T) {

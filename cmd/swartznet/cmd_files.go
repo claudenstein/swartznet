@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,7 +104,15 @@ func filesSetPriority(apiAddr, ihRaw, idxRaw, priority string, stdout, stderr io
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}
-	idx := strings.TrimSpace(idxRaw)
+	// Validate the index before it is interpolated into the URL
+	// path — anything that is not a plain non-negative integer
+	// (trailing garbage, signs, path segments) is rejected here.
+	idxN, err := strconv.Atoi(strings.TrimSpace(idxRaw))
+	if err != nil || idxN < 0 {
+		fmt.Fprintln(stderr, "swartznet: file index must be a non-negative integer")
+		return exitUsage
+	}
+	idx := strconv.Itoa(idxN) // canonical form ("+07" → "7")
 	prio := strings.ToLower(strings.TrimSpace(priority))
 	switch prio {
 	case "none", "normal", "high":

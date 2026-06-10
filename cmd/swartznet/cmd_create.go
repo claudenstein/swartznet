@@ -61,6 +61,13 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "swartznet: -o <output.torrent> is required")
 		return exitUsage
 	}
+	// --identity is only consumed by the --sign path; silently
+	// ignoring it would let a user believe the torrent was signed
+	// with their chosen key. Fail closed instead.
+	if identityPath != "" && !sign {
+		fmt.Fprintln(stderr, "swartznet: --identity is only used with --sign (pass --sign to sign, or drop --identity)")
+		return exitUsage
+	}
 
 	// Build CreateTorrentOptions.
 	opts := engine.CreateTorrentOptions{
@@ -98,8 +105,10 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 
 	// We don't need a running engine for CreateTorrent, but the
 	// current API requires an *Engine receiver. Spin up a minimal
-	// one (no DHT, no index, no upload) — it's about 500 ms of
-	// overhead on my laptop, well worth the code simplicity.
+	// one — it's about 500 ms of overhead on my laptop, well worth
+	// the code simplicity. See createEngineConfig for how --seed
+	// changes the shape (DHT must stay on or a trackerless seed is
+	// undiscoverable).
 	//
 	// This deliberately bypasses daemon.New (the documented
 	// "single source of truth for startup") because Create is a
@@ -110,13 +119,7 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	// CreateTorrent path (no Engine receiver), this can collapse
 	// back into the daemon flow.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := config.Default()
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	cfg.DisableDHT = true
-	cfg.ListenPort = 0
-	cfg.NoUpload = !startSeed
+	cfg := createEngineConfig(startSeed, dataDir)
 
 	eng, err := engine.New(context.Background(), cfg, log)
 	if err != nil {
@@ -147,6 +150,26 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 		return reportRunErr(ctx.Err(), stderr)
 	}
 	return exitOK
+}
+
+// createEngineConfig builds the engine config for cmdCreate.
+//
+// Without --seed this is a pure hashing run: no DHT, no upload, no
+// fixed listen port. With --seed the node must be discoverable —
+// the project default is trackerless DHT discovery, so DHT stays
+// enabled and uploads stay on. ListenPort is left at 0 (OS-assigned)
+// in both modes: the DHT announce carries the actual bound port, so
+// an ephemeral port costs nothing, and it avoids clashing with a
+// daemon already bound to the default port on the same machine.
+func createEngineConfig(startSeed bool, dataDir string) config.Config {
+	cfg := config.Default()
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+	cfg.ListenPort = 0
+	cfg.DisableDHT = !startSeed
+	cfg.NoUpload = !startSeed
+	return cfg
 }
 
 // stringSliceFlag implements flag.Value for repeated string flags.

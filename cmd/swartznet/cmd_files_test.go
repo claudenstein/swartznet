@@ -189,6 +189,65 @@ func TestCmdFilesSetPriorityBadPriority(t *testing.T) {
 	}
 }
 
+// TestCmdFilesSetPriorityBadIndex covers filesSetPriority's index
+// validation: anything that is not a plain non-negative integer
+// must be rejected before it is interpolated into the URL path.
+func TestCmdFilesSetPriorityBadIndex(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		idx  string
+	}{
+		{name: "empty", idx: ""},
+		{name: "alpha", idx: "abc"},
+		{name: "trailing-garbage", idx: "0abc"},
+		{name: "negative", idx: "-1"},
+		{name: "float", idx: "1.5"},
+		{name: "path-segment", idx: "../0"},
+		{name: "embedded-space", idx: "1 2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr bytes.Buffer
+			code := cmdFiles([]string{validIH, tc.idx, "high"}, &stdout, &stderr)
+			if code != exitUsage {
+				t.Errorf("idx %q exit = %d, want exitUsage", tc.idx, code)
+			}
+			if !strings.Contains(stderr.String(), "non-negative integer") {
+				t.Errorf("idx %q: expected index error in stderr, got %q", tc.idx, stderr.String())
+			}
+		})
+	}
+}
+
+// TestCmdFilesSetPriorityIndexCanonicalized verifies the index is
+// sent in canonical decimal form — "+07" parses but must reach the
+// daemon as "7", never verbatim.
+func TestCmdFilesSetPriorityIndexCanonicalized(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdFiles([]string{
+		"--api-addr", addr,
+		validIH, "+07", "normal",
+	}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("canonical-index exit = %d, stderr: %s", code, stderr.String())
+	}
+	want := "/torrents/" + validIH + "/files/7/priority"
+	if gotPath != want {
+		t.Errorf("request path = %q, want %q", gotPath, want)
+	}
+}
+
 // TestCmdFilesSetPriorityUnreachable covers filesSetPriority's
 // `Do err → cannot reach the daemon` arm via the 3-arg branch.
 func TestCmdFilesSetPriorityUnreachable(t *testing.T) {
