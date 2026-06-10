@@ -69,15 +69,17 @@ func (a *AnacrolixPutter) PutPPMI(ctx context.Context, value PPMIValue) error {
 			V:    v,
 			K:    &pubArr,
 			Salt: PPMISalt,
-			Seq:  seq + 1,
+			Seq:  nextSeq(seq),
 		}
 		put.Sign(a.private)
 		return put
 	}
-	if _, err := getput.Put(ctx, target, a.server, PPMISalt, seqToPut); err != nil {
+	stats, err := getput.Put(ctx, target, a.server, PPMISalt, seqToPut)
+	if err != nil {
 		return fmt.Errorf("dhtindex: put PPMI: %w", err)
 	}
-	return nil
+	// Fail closed if the PPMI landed on zero nodes; see checkPutStats.
+	return checkPutStats(stats, "PPMI put")
 }
 
 // GetPPMI fetches the PPMI under the given publisher pubkey.

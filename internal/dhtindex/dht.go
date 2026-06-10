@@ -13,6 +13,7 @@ import (
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/bep44"
 	"github.com/anacrolix/dht/v2/exts/getput"
+	"github.com/anacrolix/dht/v2/traversal"
 	"github.com/anacrolix/torrent/bencode"
 )
 
@@ -31,6 +32,24 @@ func nextSeq(seq int64) int64 {
 		return math.MaxInt64
 	}
 	return seq + 1
+}
+
+// checkPutStats asserts a getput.Put traversal actually reached at
+// least one DHT node. getput.Put returns a nil error even when the
+// get-traversal reached zero nodes (a fresh node with a cold routing
+// table, a transient partition, or a put where every peer rejected
+// the value) — in that case the BEP-44 item never lands, so the put
+// must fail closed instead of letting the caller record success for
+// an item nobody can fetch. NumResponses counts get-traversal
+// responses; zero means the closest-node set was empty, so no s.Put
+// could have succeeded. Shared by every put path (keyword, BEP-46
+// pointer, PPMI) so the guard cannot drift between them; `what`
+// names the path for the error message.
+func checkPutStats(stats *traversal.Stats, what string) error {
+	if stats == nil || stats.NumResponses == 0 {
+		return fmt.Errorf("dhtindex: %s reached zero DHT nodes", what)
+	}
+	return nil
 }
 
 // Putter writes a KeywordValue to the DHT under the publisher's
@@ -140,10 +159,14 @@ func (a *AnacrolixPutter) PutInfohashPointer(ctx context.Context, salt []byte, i
 		put.Sign(a.private)
 		return put
 	}
-	if _, err := getput.Put(ctx, target, a.server, salt, seqToPut); err != nil {
+	stats, err := getput.Put(ctx, target, a.server, salt, seqToPut)
+	if err != nil {
 		return fmt.Errorf("dhtindex: put pointer: %w", err)
 	}
-	return nil
+	// Fail closed if the pointer landed on zero nodes — otherwise the
+	// companion publisher would record success for a pointer that
+	// subscribers cannot resolve.
+	return checkPutStats(stats, "pointer put")
 }
 
 // bep46Pointer is the typed shape of a BEP-46 mutable item value.
@@ -190,8 +213,22 @@ func (a *AnacrolixGetter) GetInfohashPointerInfo(ctx context.Context, pubkey [32
 	if err != nil {
 		return zero, fmt.Errorf("dhtindex: get pointer %x: %w", target, err)
 	}
+	return decodePointerValue([]byte(res.V))
+}
+
+// decodePointerValue validates and decodes a remote-supplied BEP-46
+// pointer value into its infohash + publisher timestamp. The value is
+// signature-verified by the get path, but it is still untrusted
+// publisher input — bound it before handing it to the bencode decoder.
+// BEP-44 caps the bencoded `v` field at MaxValueBytes, so anything
+// larger is malformed and rejected without decoding.
+func decodePointerValue(raw []byte) (PointerInfo, error) {
+	var zero PointerInfo
+	if len(raw) > MaxValueBytes {
+		return zero, fmt.Errorf("dhtindex: pointer value %d bytes exceeds BEP-44 cap of %d", len(raw), MaxValueBytes)
+	}
 	var v bep46Pointer
-	if err := bencode.Unmarshal([]byte(res.V), &v); err != nil {
+	if err := bencode.Unmarshal(raw, &v); err != nil {
 		return zero, fmt.Errorf("dhtindex: decode pointer: %w", err)
 	}
 	if len(v.IH) != 20 {
@@ -250,19 +287,11 @@ func (a *AnacrolixPutter) Put(ctx context.Context, salt []byte, value KeywordVal
 	if err != nil {
 		return fmt.Errorf("dhtindex: put traversal: %w", err)
 	}
-	// getput.Put returns a nil error even when the get-traversal
-	// reached zero nodes (a fresh node with a cold routing table, a
-	// transient partition, or a put where every peer rejected the
-	// value). In that case the BEP-44 item never lands. Treat it as
-	// failure so publishOne calls MarkFailed and does not advance
-	// LastPublished — otherwise the rate-limiter would suppress the
-	// retry for ~MinPutInterval while the keyword is undiscoverable.
-	// NumResponses counts get-traversal responses; zero means the
-	// closest-node set was empty, so no s.Put could have succeeded.
-	if stats == nil || stats.NumResponses == 0 {
-		return errors.New("dhtindex: put reached zero DHT nodes")
-	}
-	return nil
+	// Fail closed on a zero-node put so publishOne calls MarkFailed
+	// and does not advance LastPublished — otherwise the rate-limiter
+	// would suppress the retry for ~MinPutInterval while the keyword
+	// stays undiscoverable.
+	return checkPutStats(stats, "put")
 }
 
 // AnacrolixGetter is the production Getter backed by an anacrolix
