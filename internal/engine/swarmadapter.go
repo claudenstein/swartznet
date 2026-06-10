@@ -1,11 +1,44 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
+
+// errReplyOverloaded is returned by a gatedReplyWriter reply func
+// when every writer slot is busy and the reply has been dropped.
+var errReplyOverloaded = errors.New("engine: sn_search reply dropped: writer slots exhausted")
+
+// gatedReplyWriter builds the reply func handed to
+// swarmsearch.Protocol.HandleMessage for inbound sn_search frames.
+// Each accepted reply copies its body (the protocol layer may reuse
+// the buffer) and performs the write on its own goroutine so the
+// handler never blocks on the client lock — but the goroutine must
+// first take a slot on sem, so a peer provoking many replies (e.g.
+// a sync stream) cannot drive unbounded goroutine growth. When sem
+// is full the reply is dropped and errReplyOverloaded returned so
+// the caller sees the send as failed instead of silently queueing.
+// Write errors surface asynchronously through onErr.
+func gatedReplyWriter(sem chan struct{}, write func([]byte) error, onErr func(error)) func([]byte) error {
+	return func(body []byte) error {
+		select {
+		case sem <- struct{}{}:
+		default:
+			return errReplyOverloaded
+		}
+		bodyCopy := append([]byte(nil), body...)
+		go func() {
+			defer func() { <-sem }()
+			if err := write(bodyCopy); err != nil {
+				onErr(err)
+			}
+		}()
+		return nil
+	}
+}
 
 // swarmSender implements swarmsearch.Sender by looking up the target
 // *torrent.PeerConn in the engine's peerTracker and forwarding the

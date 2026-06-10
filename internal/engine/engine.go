@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,17 @@ const DefaultRecordCachePruneInterval = 1 * time.Hour
 // unbounded transient goroutine/alloc churn. 256 is generous for
 // legitimate query concurrency across all peers on a desktop node.
 const maxInboundSnSearchWorkers = 256
+
+// maxCompanionBytes caps the declared size of a companion-index
+// torrent FetchCompanionTorrent is willing to download. The
+// companion format is a single gzipped-JSON file that stays in the
+// low-MiB range even for very large catalogues, but the length in
+// the info dict is fully attacker-controlled — the BEP-46 pointer
+// resolves to an untrusted infohash, and without a cap a hostile
+// publisher serving fast pieces could fill DataDir long before the
+// subscriber's wall-clock FetchTimeout fires. Oversized metadata is
+// rejected BEFORE the first piece is ever requested.
+const maxCompanionBytes int64 = 32 << 20 // 32 MiB
 
 type Engine struct {
 	cfg      config.Config
@@ -729,6 +741,13 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	// payload copies before the per-peer protocol limiter inside
 	// HandleMessage runs. A full semaphore drops the frame.
 	snSearchSem := make(chan struct{}, maxInboundSnSearchWorkers)
+	// Separate, equally-sized semaphore for reply WRITE goroutines.
+	// A handler streaming many sync chunks calls reply() repeatedly,
+	// and each call used to spawn an ungated goroutine — remote input
+	// could again drive unbounded goroutine growth, just one hop
+	// later. A dedicated semaphore (rather than reusing snSearchSem)
+	// keeps a fully-loaded handler set from starving every reply.
+	snReplySem := make(chan struct{}, maxInboundSnSearchWorkers)
 	tc.Callbacks.PeerConnReadExtensionMessage = append(
 		tc.Callbacks.PeerConnReadExtensionMessage,
 		func(ev torrent.PeerConnReadExtensionMessageEvent) {
@@ -755,20 +774,21 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 			payload := append([]byte(nil), ev.Payload...)
 			go func() {
 				defer func() { <-snSearchSem }()
-				reply := func(body []byte) error {
-					// Spawn ANOTHER goroutine for the write so
-					// the HandleMessage code path never blocks
-					// on the client lock if multiple writes
-					// queue up.
-					bodyCopy := append([]byte(nil), body...)
-					go func() {
-						if err := pc.WriteExtendedMessage(swarmsearch.ExtensionName, bodyCopy); err != nil {
-							swarmLog.Debug("engine.swarm.reply_err",
-								"peer", peerAddr, "err", err)
-						}
-					}()
-					return nil
-				}
+				// Each reply write runs on its own goroutine so the
+				// HandleMessage code path never blocks on the client
+				// lock if multiple writes queue up — but the goroutine
+				// is gated on snReplySem so reply() cannot spawn
+				// unbounded writers. On overload the reply is dropped
+				// with an error so the protocol layer sees the send
+				// as failed.
+				reply := gatedReplyWriter(snReplySem,
+					func(body []byte) error {
+						return pc.WriteExtendedMessage(swarmsearch.ExtensionName, body)
+					},
+					func(err error) {
+						swarmLog.Debug("engine.swarm.reply_err",
+							"peer", peerAddr, "err", err)
+					})
 				swarm.HandleMessage(peerAddr, payload, reply)
 			}()
 		},
@@ -1262,6 +1282,16 @@ func (e *Engine) AddInfoHash(infoHash [20]byte) (h *Handle, err error) {
 	return h, nil
 }
 
+// unsafeCompanionName reports whether an untrusted torrent name is
+// anything other than a plain file name — empty, dot entries, or
+// carrying path separators — and therefore must not be joined into
+// DataDir. Backslash is included so a manifest written on one OS
+// cannot smuggle a separator past a Windows node.
+func unsafeCompanionName(name string) bool {
+	return name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(name, `/\`)
+}
+
 // FetchCompanionTorrent satisfies companion.CompanionFetcher. It
 // adds the torrent identified by infohash to the engine, waits
 // for metadata to arrive over the swarm, asks the engine to
@@ -1294,6 +1324,26 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infoHash [20]byte) (
 		return "", fmt.Errorf("engine: companion torrent has %d files, want exactly 1", len(files))
 	}
 	target := files[0]
+	// Fail closed BEFORE requesting any pieces: the declared length
+	// comes straight from the untrusted info dict behind the BEP-46
+	// pointer, and the only other bound on this download is the
+	// subscriber's wall-clock FetchTimeout — a hostile publisher
+	// serving fast pieces could otherwise fill DataDir.
+	if target.Length() > maxCompanionBytes {
+		return "", fmt.Errorf("engine: companion torrent declares %d bytes, exceeds cap %d", target.Length(), maxCompanionBytes)
+	}
+	info := h.T.Info()
+	if info == nil {
+		// We waited for GotInfo above, so this is paranoid.
+		return "", errors.New("engine: companion torrent has no info after GotInfo")
+	}
+	// Defence-in-depth on the untrusted name we join into DataDir
+	// below: anacrolix already constrains its own storage paths to
+	// sub-paths of the data dir, but the path we RETURN is built by
+	// hand, so reject anything that is not a plain file name.
+	if unsafeCompanionName(info.Name) {
+		return "", fmt.Errorf("engine: companion torrent has unsafe name %q", info.Name)
+	}
 	target.Download()
 	h.T.DownloadAll()
 
@@ -1320,12 +1370,8 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infoHash [20]byte) (
 	// root, so the full path is DataDir + (torrent name iff
 	// multi-file) + relative path. For our companion torrents we
 	// always have exactly one file, so the layout is:
-	// DataDir/<info.Name>.
-	info := h.T.Info()
-	if info == nil {
-		// We waited for GotInfo above, so this is paranoid.
-		return "", errors.New("engine: companion torrent has no info after GotInfo")
-	}
+	// DataDir/<info.Name>. info.Name was validated as a plain file
+	// name before the download started.
 	return filepath.Join(e.cfg.DataDir, info.Name), nil
 }
 
@@ -1587,6 +1633,10 @@ func (e *Engine) upgradeMagnetSession(h *Handle) {
 	}
 	select {
 	case <-h.T.GotInfo():
+	case <-e.bgCtx.Done():
+		// Engine shutdown: reclaim the goroutine promptly instead
+		// of lingering on the metadata timer. Mirrors verifyOnRestore.
+		return
 	case <-time.After(10 * time.Minute):
 		return
 	}
@@ -1676,6 +1726,15 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 	)
 	switch {
 	case entry.TorrentFile != "" && e.sess.torrentsDir != "":
+		// Defence-in-depth: the manifest is local trusted state, but
+		// TorrentFile is joined into torrentsDir below — reject
+		// anything that is not a plain file name so a corrupted or
+		// hand-edited manifest cannot read outside the torrents dir.
+		if entry.TorrentFile != filepath.Base(entry.TorrentFile) ||
+			entry.TorrentFile == "." || entry.TorrentFile == ".." {
+			err = fmt.Errorf("engine: session entry has unsafe torrent file name %q", entry.TorrentFile)
+			break
+		}
 		path := filepath.Join(e.sess.torrentsDir, entry.TorrentFile)
 		raw, rerr := os.ReadFile(path)
 		if rerr != nil {
@@ -1810,6 +1869,10 @@ func (e *Engine) verifyOnRestore(h *Handle) {
 func (e *Engine) autoDownload(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
+	case <-e.bgCtx.Done():
+		// Engine shutdown: reclaim the goroutine promptly instead
+		// of lingering on the metadata timer. Mirrors verifyOnRestore.
+		return
 	case <-time.After(5 * time.Minute):
 		return
 	}
@@ -1930,6 +1993,10 @@ func (e *Engine) ingestFileEvents(h *Handle) {
 func (e *Engine) autoIndex(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
+	case <-e.bgCtx.Done():
+		// Engine shutdown: reclaim the goroutine promptly instead
+		// of lingering on the metadata timer. Mirrors verifyOnRestore.
+		return
 	case <-time.After(5 * time.Minute):
 		e.log.Warn("indexer.autoindex.timeout", "info_hash", h.T.InfoHash().HexString())
 		return
