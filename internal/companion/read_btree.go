@@ -122,11 +122,21 @@ func (r *BTreeReader) Find(prefix string) ([]Record, error) {
 		return nil, fmt.Errorf("companion: piece 0 kind = 0x%02x, want root", hdr.Kind)
 	}
 
-	// depthBudget bounds recursion independently of the structural
-	// child-index checks below, so a pathological-but-in-range tree
-	// can never recurse deeper than the page count allows.
-	leafPieces, err := r.walkToLeaves(0, pLo, pHi, r.src.NumPieces())
+	// visited is shared across the entire walk so that any page —
+	// interior or leaf — is fetched at most once, bounding the walk
+	// at NumPieces page reads no matter what the (unsigned) interior
+	// structure claims.
+	visited := make(map[int]bool, r.src.NumPieces())
+	leafPieces, err := r.walkToLeaves(0, pLo, pHi, visited)
 	if err != nil {
+		return nil, err
+	}
+	// Defense-in-depth for the leaf loop below: the visited-set
+	// guarantees each leaf index appears at most once and that there
+	// are fewer leaves than pieces. Fail closed if that invariant is
+	// ever broken rather than re-verifying and re-appending the same
+	// records.
+	if err := checkLeafIndices(leafPieces, r.src.NumPieces()); err != nil {
 		return nil, err
 	}
 
@@ -158,27 +168,54 @@ func (r *BTreeReader) Find(prefix string) ([]Record, error) {
 	return out, nil
 }
 
+// checkLeafIndices fails closed when the walk's leaf list breaks
+// the visited-set invariant (a duplicate leaf, or more leaves than
+// tree pages). Either would mean re-verifying and duplicating the
+// same records in Find's output.
+func checkLeafIndices(leafPieces []int, numPieces int) error {
+	if len(leafPieces) >= numPieces {
+		return fmt.Errorf("companion: walk returned %d leaves for a %d-piece tree",
+			len(leafPieces), numPieces)
+	}
+	seen := make(map[int]bool, len(leafPieces))
+	for _, idx := range leafPieces {
+		if seen[idx] {
+			return fmt.Errorf("companion: leaf piece %d returned twice by walk", idx)
+		}
+		seen[idx] = true
+	}
+	return nil
+}
+
 // walkToLeaves does a DFS from the given interior/root page,
 // collecting leaf piece indices whose subtree overlaps [pLo, pHi).
 // A nil pHi is treated as +∞.
 //
 // The interior page structure is NOT covered by the trailer
 // signature (only the canonical leaf-record stream is), so the
-// ChildIndex bytes are attacker-controlled. To stay safe against
-// hostile trees we enforce, on every recursion, that each child
-// points strictly DOWNWARD (ChildIndex > pieceIdx), within range
-// (ChildIndex < NumPieces-1, i.e. excluding the trailer), and is
-// strictly increasing within a page. The honest top-down BFS
-// layout always satisfies this, so it costs honest builders
-// nothing. Together with depthBudget these invariants make a
-// cycle (self/back pointer) or a DAG (shared subtrees) impossible:
-// each recursion strictly increases the minimum reachable piece
-// index, so every page is visited at most once and recursion can
-// be no deeper than the page count.
-func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte, depthBudget int) ([]int, error) {
-	if depthBudget <= 0 {
-		return nil, fmt.Errorf("companion: tree too deep at piece %d (cycle or malformed interior page)", pieceIdx)
+// ChildIndex bytes are attacker-controlled. Two guards keep a
+// hostile tree from blowing up the walk:
+//
+//  1. visited is shared across the entire walk and fails closed
+//     the moment any page is reached a second time. Per-page
+//     checks alone cannot see cross-page fan-in: pages laid out
+//     i → {i+1, i+2} keep every child strictly downward and
+//     strictly increasing, yet the number of root-to-leaf paths
+//     grows Fibonacci-ally. The shared visited-set caps the whole
+//     walk at NumPieces page fetches and bounds recursion depth by
+//     the page count (every frame marks a previously-unseen page).
+//  2. Each child must point strictly downward (ChildIndex >
+//     pieceIdx), stay below the trailer piece, and be strictly
+//     increasing within its page.
+//
+// An honest top-down BFS layout consumes each child exactly once
+// and always satisfies both, so neither guard costs honest
+// builders anything.
+func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte, visited map[int]bool) ([]int, error) {
+	if visited[pieceIdx] {
+		return nil, fmt.Errorf("companion: piece %d reached twice (cycle or fan-in in interior pages)", pieceIdx)
 	}
+	visited[pieceIdx] = true
 	page, err := r.src.Piece(pieceIdx)
 	if err != nil {
 		return nil, fmt.Errorf("companion: fetch piece %d: %w", pieceIdx, err)
@@ -220,9 +257,10 @@ func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte, depthBudget in
 	for i, ch := range copied {
 		ci := int(ch.ChildIndex)
 		// Fail closed on any child that does not point strictly
-		// downward, in range, and strictly increasing. This is the
-		// load-bearing anti-cycle / anti-DAG guard: interior bytes
-		// are unsigned, so we cannot trust them past these bounds.
+		// downward, in range, and strictly increasing. Interior
+		// bytes are unsigned, so we cannot trust them past these
+		// bounds; the shared visited-set above catches whatever
+		// cross-page shape slips through them.
 		if ci <= lastChild || ci >= maxChild {
 			return nil, fmt.Errorf(
 				"companion: piece %d child %d index %d out of range (must be in (%d, %d))",
@@ -247,7 +285,7 @@ func (r *BTreeReader) walkToLeaves(pieceIdx int, pLo, pHi []byte, depthBudget in
 		if !rangeOverlapsPrefix(lower, upper, pLo, pHi) {
 			continue
 		}
-		leaves, err := r.walkToLeaves(ci, pLo, pHi, depthBudget-1)
+		leaves, err := r.walkToLeaves(ci, pLo, pHi, visited)
 		if err != nil {
 			return nil, err
 		}
