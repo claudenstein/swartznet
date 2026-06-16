@@ -46,7 +46,7 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&comment, "comment", "", "optional torrent comment")
 	fs.BoolVar(&private, "private", false, "mark as private (BEP-27: disables DHT/PEX)")
 	fs.BoolVar(&startSeed, "seed", false, "after creation, start seeding the content")
-	fs.StringVar(&dataDir, "data-dir", "", "data directory for seeding (required if --seed, must contain the root)")
+	fs.StringVar(&dataDir, "data-dir", "", "with --seed, directory for session state (content is seeded in place from <root>; default: ~/.local/share/swartznet)")
 	fs.BoolVar(&sign, "sign", false, "sign the .torrent file with our ed25519 identity so downloaders running SwartzNet can verify the publisher")
 	fs.StringVar(&identityPath, "identity", "", "path to the ed25519 identity.key file (defaults to ~/.local/share/swartznet/identity.key)")
 	if err := fs.Parse(args); err != nil {
@@ -136,7 +136,12 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  InfoHash: %s\n", ih)
 
 	if startSeed {
-		if _, err := eng.AddTorrentMetaInfo(mi); err != nil {
+		// Seed in place from the content we just hashed. Use the
+		// path-aware variant (not plain AddTorrentMetaInfo, which
+		// roots storage at cfg.DataDir): the engine keys storage on
+		// root's real basename so seeding works regardless of
+		// cfg.DataDir or a --name override, mirroring the GUI.
+		if _, err := eng.AddTorrentMetaInfoSeedFrom(mi, root); err != nil {
 			fmt.Fprintf(stderr, "warning: seed start failed: %v\n", err)
 			return exitRuntime
 		}

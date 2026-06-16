@@ -67,9 +67,9 @@ func TestAddTorrentMetaInfoSeedFromExternalPath(t *testing.T) {
 	}
 	wantIH := mi.HashInfoBytes().HexString()
 
-	// SeedFrom variant points the storage at srcParent so anacrolix
-	// finds the bytes that already live there.
-	if _, err := eng.AddTorrentMetaInfoSeedFrom(mi, srcParent); err != nil {
+	// SeedFrom variant points the storage at the real content path
+	// (srcPath) so anacrolix finds the bytes that already live there.
+	if _, err := eng.AddTorrentMetaInfoSeedFrom(mi, srcPath); err != nil {
 		t.Fatalf("AddTorrentMetaInfoSeedFrom: %v", err)
 	}
 
@@ -137,7 +137,7 @@ func TestAddTorrentMetaInfoSeedFromSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTorrent: %v", err)
 	}
-	if _, err := eng1.AddTorrentMetaInfoSeedFrom(mi, srcParent); err != nil {
+	if _, err := eng1.AddTorrentMetaInfoSeedFrom(mi, srcPath); err != nil {
 		t.Fatalf("AddTorrentMetaInfoSeedFrom: %v", err)
 	}
 	wantIH := mi.HashInfoBytes().HexString()
@@ -188,4 +188,120 @@ func TestAddTorrentMetaInfoSeedFromSurvivesRestart(t *testing.T) {
 	if !rehashed {
 		t.Fatalf("restored torrent did not rehash from external source; last snapshot: %+v", seen)
 	}
+}
+
+// newSeedTestEngine builds an engine wired for the seed-from tests:
+// no DHT, no upload, no identity/reputation/trust side files.
+func newSeedTestEngine(t *testing.T) *engine.Engine {
+	t.Helper()
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	cfg.NoUpload = true
+	cfg.IdentityPath = ""
+	cfg.ReputationPath = ""
+	cfg.SeedListPath = ""
+	cfg.BloomPath = ""
+	cfg.TrustPath = ""
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	eng, err := engine.New(ctx, cfg, log)
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	return eng
+}
+
+// waitSeeding polls TorrentSnapshots until the named infohash reports
+// zero missing bytes (fully seeding), or fails the test.
+func waitSeeding(t *testing.T, eng *engine.Engine, wantIH string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var seen engine.TorrentSnapshot
+	for time.Now().Before(deadline) {
+		for _, s := range eng.TorrentSnapshots() {
+			if s.InfoHash == wantIH {
+				seen = s
+				if s.Size > 0 && s.BytesMissing == 0 {
+					return
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("torrent never reached 0 missing bytes; last snapshot: %+v", seen)
+}
+
+// TestAddTorrentMetaInfoSeedFromRenamedSingleFile is the regression
+// guard for the "Create Torrent shows downloading 0%" bug when the
+// user renames the torrent. The GUI Create dialog auto-fills an
+// editable Name field and defaults the seed checkbox on, so a renamed
+// torrent is a common case. anacrolix's default storage resolves
+// files under <parent>/<info.Name>, which no longer points at the
+// real bytes once info.Name != basename(root); the per-torrent
+// storage must instead key on the real on-disk basename so seeding
+// works in place.
+func TestAddTorrentMetaInfoSeedFromRenamedSingleFile(t *testing.T) {
+	t.Parallel()
+	eng := newSeedTestEngine(t)
+
+	srcParent := t.TempDir()
+	srcPath := filepath.Join(srcParent, "original-name.bin")
+	payload := make([]byte, 96*1024)
+	for i := range payload {
+		payload[i] = byte((i * 13) % 251)
+	}
+	if err := os.WriteFile(srcPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Custom display name != on-disk basename — the GUI rename case.
+	mi, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: srcPath, Name: "My Renamed Torrent"})
+	if err != nil {
+		t.Fatalf("CreateTorrent: %v", err)
+	}
+	if _, err := eng.AddTorrentMetaInfoSeedFrom(mi, srcPath); err != nil {
+		t.Fatalf("AddTorrentMetaInfoSeedFrom: %v", err)
+	}
+	waitSeeding(t, eng, mi.HashInfoBytes().HexString())
+}
+
+// TestAddTorrentMetaInfoSeedFromRenamedDir covers the multi-file
+// (directory) layout of the same rename case: storage must resolve
+// files under <realFolder>/<relpath>, not <parent>/<info.Name>/<relpath>.
+func TestAddTorrentMetaInfoSeedFromRenamedDir(t *testing.T) {
+	t.Parallel()
+	eng := newSeedTestEngine(t)
+
+	srcParent := t.TempDir()
+	srcDir := filepath.Join(srcParent, "original-folder")
+	if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct {
+		rel  string
+		seed byte
+	}{{"a.bin", 3}, {"sub/b.bin", 7}} {
+		payload := make([]byte, 48*1024)
+		for i := range payload {
+			payload[i] = byte((i + int(f.seed)) % 251)
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, filepath.FromSlash(f.rel)), payload, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mi, err := eng.CreateTorrent(engine.CreateTorrentOptions{Root: srcDir, Name: "Renamed Album"})
+	if err != nil {
+		t.Fatalf("CreateTorrent: %v", err)
+	}
+	// Pass the dir with a trailing separator to exercise splitSeedRoot's trim.
+	if _, err := eng.AddTorrentMetaInfoSeedFrom(mi, srcDir+string(filepath.Separator)); err != nil {
+		t.Fatalf("AddTorrentMetaInfoSeedFrom: %v", err)
+	}
+	waitSeeding(t, eng, mi.HashInfoBytes().HexString())
 }

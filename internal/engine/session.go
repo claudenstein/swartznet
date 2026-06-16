@@ -60,6 +60,17 @@ type sessionEntry struct {
 	// 0% even though the source content is sitting on disk
 	// already. Empty means "use the engine's default storage".
 	DataPath string `json:"data_path,omitempty"`
+
+	// ContentName is the real on-disk basename of the seeded
+	// content (the file for a single-file torrent, the top folder
+	// for a multi-file one). It is decoupled from info.Name so a
+	// torrent created with a renamed/overridden display name still
+	// seeds from its real location: storage resolves files under
+	// DataPath/ContentName/... instead of DataPath/info.Name/....
+	// Empty on legacy entries (written before this field existed),
+	// where info.Name always equalled the on-disk basename, so the
+	// restore path falls back to info.Name in that case.
+	ContentName string `json:"content_name,omitempty"`
 }
 
 type sessionFile struct {

@@ -46,12 +46,35 @@ func TestRunCreateTorrentSuccessSeed(t *testing.T) {
 
 	runCreateTorrent(d, w, engine.CreateTorrentOptions{
 		Root: src,
-		Name: "test",
+		Name: "test", // rename: info.Name != basename(src) — must still seed
 	}, out, true)
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("runCreateTorrent goroutine did not complete")
+	}
+
+	// The renamed torrent must reach seeding (0 bytes missing), not
+	// sit at downloading/0%. This is the regression guard for the
+	// "Create Torrent shows 0%" bug: storage keys on the real
+	// basename (payload.bin), not the renamed info.Name ("test").
+	deadline := time.Now().Add(5 * time.Second)
+	var seen engine.TorrentSnapshot
+	seeding := false
+	for time.Now().Before(deadline) {
+		for _, s := range d.Eng.TorrentSnapshots() {
+			seen = s
+			if s.Size > 0 && s.BytesMissing == 0 {
+				seeding = true
+			}
+		}
+		if seeding {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !seeding {
+		t.Fatalf("renamed torrent did not reach seeding; last snapshot: %+v", seen)
 	}
 }

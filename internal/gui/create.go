@@ -307,12 +307,10 @@ func runCreateTorrent(d *daemon.Daemon, win fyne.Window, opts engine.CreateTorre
 				// without the per-torrent override the just-hashed
 				// content is effectively invisible — VerifyData runs
 				// against an empty directory and the row sits at 0%.
-				// filepath.Dir(opts.Root) is the layout anacrolix
-				// expects: parent dir + info.Name resolves to the
-				// real file (single-file) or the real folder
-				// (multi-file).
-				dataParent := filepath.Dir(strings.TrimRight(opts.Root, string(filepath.Separator)))
-				if _, err := d.Eng.AddTorrentMetaInfoSeedFrom(mi, dataParent); err != nil {
+				// Pass the exact hashed path: the engine keys storage
+				// on its real basename, so seeding works even when the
+				// user renamed the torrent (info.Name != basename).
+				if _, err := d.Eng.AddTorrentMetaInfoSeedFrom(mi, opts.Root); err != nil {
 					msg += "\n\nSeed start failed: " + err.Error()
 				} else {
 					msg += "\n\nSeeding started."

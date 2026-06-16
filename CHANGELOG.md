@@ -15,6 +15,41 @@ one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
 
+### Fixed — Create-and-seed shows "downloading 0%" instead of "seeding"
+
+A freshly-created torrent could sit at `downloading` / 0% instead
+of flipping to `seeding` / 100%, even though every byte was
+already on disk. Two paths were affected:
+
+- **CLI `create --seed`** called the plain `AddTorrentMetaInfo`,
+  which roots anacrolix storage at `cfg.DataDir`. Unless the user
+  passed `--data-dir <parent-of-root>` (documented but
+  unenforced), the post-add `VerifyData` rehashed an empty
+  directory and reported 0%. It now seeds **in place** from the
+  positional `<root>` via `AddTorrentMetaInfoSeedFrom`, matching
+  the GUI; `--data-dir` no longer needs to point at the content.
+
+- **Renamed torrents (GUI *and* CLI `--name`)** stayed at 0% even
+  on the seed-from path: anacrolix's default file storage resolves
+  every file under `<base>/<info.Name>/…`, so once the display
+  name differed from the on-disk basename (the GUI's Create dialog
+  auto-fills an editable name and defaults the seed checkbox on,
+  making this the common case) it looked for the bytes under the
+  wrong name and found nothing.
+
+The engine's per-torrent seed storage now keys file paths on the
+**real on-disk basename** (`storage.NewFileOpts` + a custom
+`FilePathMaker`) instead of `info.Name`, so a renamed torrent
+seeds from its real location while downloaders still see the
+chosen name. The basename is persisted in the session manifest
+(new `content_name` field) so a restart restores the correct
+storage; legacy entries fall back to `info.Name`. Regression
+tests cover single-file and multi-file renames plus the
+restart/restore path, and the GUI create-seed test now asserts the
+renamed torrent reaches 0 missing bytes. Wire-compat is untouched
+(local storage wiring only; the infohash and `.torrent` bytes are
+produced identically).
+
 ### Fixed — Second whole-codebase review pass (32 findings: 3 blocking, 11 important, 18 nits)
 
 A fresh review + regression-check against the prior 55-finding

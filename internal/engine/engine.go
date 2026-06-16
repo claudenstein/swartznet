@@ -1394,31 +1394,67 @@ func (e *Engine) AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error) {
 
 // AddTorrentMetaInfoSeedFrom is the variant of AddTorrentMetaInfo
 // used by the Create Torrent flow: it adds the torrent with a
-// per-torrent storage rooted at dataParent so anacrolix locates
-// the source content where it actually lives instead of looking
-// for it under cfg.DataDir. Without this, a freshly-created
-// torrent whose Root sat outside DataDir would always rehash
-// against an empty directory and show 0% progress, even though
-// the user's bytes were already on disk.
+// per-torrent storage rooted at the source content's real
+// location so anacrolix locates the bytes where they actually
+// live instead of looking for them under cfg.DataDir. Without
+// this, a freshly-created torrent whose content sat outside
+// DataDir would always rehash against an empty directory and show
+// 0% progress, even though the user's bytes were already on disk.
 //
-// dataParent must be the directory ABOVE info.Name on the
-// publisher's filesystem — for a single-file torrent at
-// /foo/bar/baz.txt with info.Name="baz.txt" pass "/foo/bar"; for
-// a multi-file torrent rooted at /foo/bar/album/ with
-// info.Name="album" pass "/foo/bar". Empty dataParent falls back
-// to the default DataDir storage (matches AddTorrentMetaInfo).
+// contentRoot is the EXACT path the content was hashed from — the
+// file for a single-file torrent (/foo/bar/baz.txt) or the top
+// folder for a multi-file one (/foo/bar/album). The storage is
+// keyed on filepath.Base(contentRoot) rather than info.Name, so
+// seeding works even when the torrent was given a custom/renamed
+// display name. Empty contentRoot falls back to the default
+// DataDir storage (matches AddTorrentMetaInfo).
 //
-// The dataParent is persisted in the session manifest so a
-// restart re-applies the same per-torrent storage and the
-// restored handle continues to seed from the original location.
-func (e *Engine) AddTorrentMetaInfoSeedFrom(mi *metainfo.MetaInfo, dataParent string) (any, error) {
-	return e.addTorrentMetaInfo(mi, dataParent)
+// contentRoot (split into parent dir + basename) is persisted in
+// the session manifest so a restart re-applies the same
+// per-torrent storage and the restored handle continues to seed
+// from the original location.
+func (e *Engine) AddTorrentMetaInfoSeedFrom(mi *metainfo.MetaInfo, contentRoot string) (any, error) {
+	return e.addTorrentMetaInfo(mi, contentRoot)
+}
+
+// splitSeedRoot splits a content root path into its parent
+// directory and on-disk basename, trimming any trailing separator
+// first so "foo/bar/" yields ("foo", "bar") rather than
+// ("foo/bar", ".").
+func splitSeedRoot(root string) (baseDir, contentName string) {
+	root = strings.TrimRight(root, string(filepath.Separator))
+	return filepath.Dir(root), filepath.Base(root)
+}
+
+// seedStorage builds a per-torrent file storage that reads content
+// from its real on-disk location, decoupled from the torrent's
+// display name. anacrolix's default file storage resolves every
+// file under <baseDir>/<info.Name>/..., so a torrent created with
+// a renamed/overridden info.Name would look for its bytes under
+// the new name and find nothing — the post-add VerifyData then
+// reports 0% even though the data is sitting on disk. Keying the
+// file path on the real basename (contentName) instead lets a
+// renamed torrent seed in place.
+//
+// Completion is kept in memory: the create and restore paths both
+// run VerifyData right after adding, which repopulates it from the
+// real files, and an in-memory map avoids dropping a piece-
+// completion DB into the user's source directory.
+func seedStorage(baseDir, contentName string) storage.ClientImplCloser {
+	return storage.NewFileOpts(storage.NewFileClientOpts{
+		ClientBaseDir: baseDir,
+		FilePathMaker: func(o storage.FilePathMakerOpts) string {
+			return filepath.Join(append([]string{contentName}, o.File.BestPath()...)...)
+		},
+		PieceCompletion: storage.NewMapPieceCompletion(),
+	})
 }
 
 // addTorrentMetaInfo is the shared implementation behind
-// AddTorrentMetaInfo and AddTorrentMetaInfoSeedFrom. dataParent
-// empty means "use the engine's default storage (cfg.DataDir)".
-func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, dataParent string) (any, error) {
+// AddTorrentMetaInfo and AddTorrentMetaInfoSeedFrom. contentRoot
+// empty means "use the engine's default storage (cfg.DataDir)";
+// otherwise it is the real on-disk path of the content to seed.
+func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, contentRoot string) (any, error) {
 	if mi == nil {
 		return nil, errors.New("engine: nil metainfo")
 	}
@@ -1431,7 +1467,7 @@ func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, dataParent string) (a
 		t   *torrent.Torrent
 		err error
 	)
-	if dataParent == "" {
+	if contentRoot == "" {
 		t, err = e.client.AddTorrent(mi)
 	} else {
 		spec, serr := torrent.TorrentSpecFromMetaInfoErr(mi)
@@ -1439,7 +1475,8 @@ func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, dataParent string) (a
 			e.mu.Unlock()
 			return nil, fmt.Errorf("engine: build torrent spec: %w", serr)
 		}
-		spec.Storage = storage.NewFile(dataParent)
+		base, name := splitSeedRoot(contentRoot)
+		spec.Storage = seedStorage(base, name)
 		t, _, err = e.client.AddTorrentSpec(spec)
 	}
 	if err != nil {
@@ -1482,9 +1519,11 @@ func (e *Engine) addTorrentMetaInfo(mi *metainfo.MetaInfo, dataParent string) (a
 	if miBytes, merr := bencode.Marshal(*mi); merr == nil {
 		if tname, werr := e.sess.writeTorrentCopy(ihHex, miBytes); werr == nil {
 			e.persistAdd(h, "metainfo", "", tname)
-			if dataParent != "" {
+			if contentRoot != "" {
+				base, name := splitSeedRoot(contentRoot)
 				if uerr := e.sess.update(ihHex, func(entry *sessionEntry) {
-					entry.DataPath = dataParent
+					entry.DataPath = base
+					entry.ContentName = name
 				}); uerr != nil {
 					e.log.Warn("engine.session_update_err", "info_hash", ihHex, "err", uerr)
 				}
@@ -1759,7 +1798,18 @@ func (e *Engine) restoreEntry(entry sessionEntry) error {
 				err = serr
 				break
 			}
-			spec.Storage = storage.NewFile(entry.DataPath)
+			name := entry.ContentName
+			if name == "" {
+				// Legacy entries (written before ContentName
+				// existed) stored DataPath as the content's parent
+				// and were always created with info.Name == the
+				// on-disk basename, so recover the name from the
+				// metainfo to reproduce the original layout.
+				if info, ierr := mi.UnmarshalInfo(); ierr == nil {
+					name = info.Name
+				}
+			}
+			spec.Storage = seedStorage(entry.DataPath, name)
 			t, _, err = e.client.AddTorrentSpec(spec)
 		} else {
 			t, err = e.client.AddTorrent(mi)
