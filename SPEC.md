@@ -4,26 +4,40 @@
 >
 > **Status: awaiting Phase 2 (human gate).** §0 below is deliberately a stub. Edit it — correct the reconstruction, or paste your real vision at the top and let the extracted behaviors serve as the detail beneath it. §7 lists the questions only you can answer.
 
-## 0. Original vision (EDIT ME — this is your Phase 2 section)
+## 0. Original vision
 
-<!--
-  This section is intentionally left for the author. Things worth stating here
-  that no amount of code-reading can recover:
+> **PROVISIONAL — reconstructed by Claude from the project name, README, and design docs; not yet confirmed by the author.** This is the one section code-reading cannot recover, so it is written from the strongest available intent signals and takes explicit positions on the questions in §7 that the Phase-3 architecture depends on. **Author: correct anything wrong here before Phase 4 (implementation); the checklist at the end of this section flags the load-bearing calls I made on your behalf.**
 
-  - Why does SwartzNet exist? What itch does it scratch that Tribler/aMule/plain
-    BitTorrent don't? (The name suggests an Aaron Swartz open-access motive —
-    is that the mission, or just a tribute?)
-  - Who is the intended user — archivists, researchers, casual seeders, or
-    "anyone with a magnet link"?
-  - What is the endgame for the distributed layer: the v0.5 "Aggregate"
-    redesign is partially built — is it the future, or an experiment?
-  - What must NEVER change (candidates found in the code: mainline wire
-    compatibility, identity persistence, localhost-only unauthenticated API)?
-  - What is explicitly out of scope (anonymity? NAT traversal beyond what
-    anacrolix provides? mobile)?
--->
+**Mission.** SwartzNet exists to make the material people already share *findable by what it contains*, without asking anyone to adopt a new network, run new infrastructure, or trust a central index. Plain BitTorrent can only find content you already know the infohash of; SwartzNet lets you search inside the files you've downloaded and discover torrents by topic — riding the exact same mainline DHT and peer wire that every existing client already speaks. The name reads as a tribute to Aaron Swartz and an alignment with open access to information: knowledge should be discoverable and preservable by the people holding it, not gated behind silos or takedown-prone central search. *(Inference — confirm or replace with your own framing.)*
 
-*(unwritten — the extracted behaviors in §§1–6 are the detail beneath whatever goes here)*
+**Who it's for.** The design center is people who build and share durable collections — archivists, researchers, librarians, and technically-comfortable seeders — for whom "I have the files but no one can find them" is the real problem. "Anyone with a magnet link" is the floor the client must still serve, not the design target.
+
+**The three-layer bet.** The whole architecture is one wager: you can add real search to BitTorrent *without breaking mainline compatibility* by stratifying it. Layer L (local full-text index) is private and always works. Layer S (`sn_search`, a hidden LTEP extension) shares search with peers you're already connected to, invisible to vanilla clients. Layer D (BEP-44 mutable items on the mainline DHT) makes keyword→infohash pointers globally discoverable using only standard DHT storage. Each layer degrades independently; none requires anyone else to upgrade.
+
+**Trust is local and social, never global.** No token, no blockchain, no consensus, no global ranking authority. Discovery is defended with local, individually-owned mechanisms: a persistent ed25519 identity, publisher-signed torrents, user-curated allowlists, per-publisher Bayesian reputation, and a known-good Bloom filter. A node's view of "who to trust" is its own. *(This is a deliberate rejection of Tribler's flood-query model and of any global-ledger approach — see docs 02/03/10.)*
+
+**Invariants — what must never change** (evidenced by CLAUDE.md and the code, not just inferred):
+- **Mainline wire compatibility is absolute.** No new reserved bit, no new DHT verb, no new UDP port. A vanilla peer must observe only BEP-3/5/9/10/44/46/51 traffic. Any change that would break this is a defect, full stop.
+- **Identity is persistent and load-bearing.** `identity.key` (mode 0600) backs publisher reputation and signing; losing it loses standing. Never regenerate implicitly.
+- **The control plane is localhost-only and unauthenticated by construction.** The HTTP API's security model *is* the loopback bind. It must never become network-reachable without an explicit, separate auth design.
+- **One daemon, three coequal frontends.** CLI (with embedded web UI), native GUI, and any future frontend obtain a fully-wired node from a single constructor. Subsystem lifecycle lives in exactly one place.
+
+**The distributed-layer endgame ("Aggregate").** The v0.5 "Aggregate" redesign (per-publisher PPMI pointers + a signed, PoW-gated B-tree index format + RIBLT set reconciliation) is the *intended future* of Layer D — an approved design with a byte-level spec, not a discarded experiment. **Provisional position for the rebuild:** treat the legacy per-keyword BEP-44 path as the shipping baseline that must keep working, and the Aggregate format as a cleanly-separated migration target that is *not yet load-bearing*. The rebuild should make the Layer-D record format and publish/lookup path a swappable seam so the migration questions in §7-C can be answered without re-architecting. *(This is a significant call — see checklist.)*
+
+**Explicitly out of scope** (provisional — these bound the rebuild):
+- **Anonymity.** SwartzNet is not Tor/I2P. It rides the clear mainline DHT and reveals the same metadata any BitTorrent client does. Privacy knobs (`--no-dht-publish`, per-torrent indexing opt-out) reduce *what you publish*, not *who can see you*.
+- **NAT traversal** beyond what `anacrolix/torrent` already provides.
+- **Mobile / embedded** frontends.
+- **Any global consensus, ledger, token, or currency.**
+
+---
+
+**Checklist of provisional calls the author should confirm** (each poisons Phase 3/4 downstream if wrong):
+1. **Mission framing** — is the Aaron-Swartz / open-access reading right, or is the name just a tribute with a different actual motive?
+2. **Aggregate endgame** — agree it's the future-but-not-yet-load-bearing migration target (baseline = legacy BEP-44)? Or should the rebuild target Aggregate as the *primary* Layer-D from day one, or drop it?
+3. **Scope exclusions** — is anonymity genuinely out, or a someday-goal that should shape the architecture now (it would)?
+4. **The four invariants** — all four truly immutable, or is any negotiable (esp. localhost-only API — is a future authenticated remote mode wanted)?
+5. **Design center user** — "durable-collection builders" vs. "anyone with a magnet link": which drives UX priority when they conflict?
 
 ## 1. Core purpose
 
