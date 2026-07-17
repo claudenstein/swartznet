@@ -74,8 +74,29 @@ Each maps a SPEC §7 question to the default the architecture adopts. Full conte
 - **G43** — PeerBook persistence (intentional v1 scope).
 - The long tail of §7 (ops/docs/CI questions, §7-K/L/M) — resolved during Slice 13 or as encountered; every resolution gets appended here.
 
+## Slice 0 decisions (2026-07-17)
+
+| # | Decision | Rationale |
+|---|---|---|
+| S0-1 | §7-Q48 resolved: `Validate()` runs every pure rejection (empty DataDir, port range, unsafe gate) **before** either `MkdirAll` | A rejected config must leave the filesystem untouched (fail-closed ethos); error strings and the create-set are unchanged; pinned by test |
+| S0-2 | `GET /healthz` ships in Slice 0 with an **instance-scoped** version (field on `httpapi.Options`), not the legacy process-global atomic | SPEC §5.9 flags the global as a wart; observable JSON is identical; deliberate §5 deviation, recorded |
+| S0-3 | Middleware order is the legacy `bodylimit ⊃ CSRF ⊃ mux`; ARCHITECTURE.md's reversed prose corrected | SPEC §5.9 and the legacy code agree; the cap only swaps `r.Body`, so a CSRF-403 never reads the body |
+| S0-4 | `serve --api-addr ""` runs an API-less daemon (empty-path = feature-off); a *failed* bind exits 1 (`swartznet: http api did not start`) after the daemon's degraded-start warning | Distinguishes "requested none" from "requested but failed"; `daemon.New` itself stays degrade-not-abort per SPEC §2.1 |
+| S0-5 | `status` unreachable-daemon hint says `start it with: swartznet serve` until Slice 2 restores the legacy `swartznet add <magnet>` | The hinted command must exist; first line stays byte-identical to legacy |
+| S0-6 | Version placeholder is `v0.9.0-dev`; release stamping stays `-ldflags "-X main.Version=..."` | Rebuild binaries must be distinguishable from the legacy v0.8.0 line |
+| S0-7 | `newLogger`/`signalContext`/`reportRunErr` stay in `package main` until the GUI slice needs to share them | No new module outside the ARCHITECTURE map; sharing lands with its second consumer |
+| S0-8 | `SWARTZNET_LOG` gains an explicit `"info"` case and a Warn on unrecognized non-empty values (§7-Q50: yes, warn); unknown values still run at Info | Behavior-compatible with legacy's silent fall-through, but observable; values remain case-sensitive |
+| S0-9 | `config` has no `NoIndex` field yet; the daemon's NoIndex→Cfg mirroring line (SPEC §5.8) lands in Slice 2 with the engine that consumes it | Dead fields invite drift; the rule is pinned by SPEC/PLAN and gets its regression test with a consumer |
+| S0-10 | `status --json` keeps the legacy `{"status":...}` envelope but skips the best-effort `/aggregate` fetch until that slice | Output is byte-identical to legacy-against-an-aggregate-less daemon; one less dead request |
+| S0-11 | `httpapi.NewWithOptions` keeps the legacy empty-addr → `localhost:7654` constructor fallback even though the daemon treats empty as disabled | Legacy-pinned constructor contract; the daemon-level empty=off semantics are what users observe |
+| S0-12 | Teardown log vocabulary frozen: `daemon.close_begin` → `daemon.bg_joined` → `httpapi.stopped` → `daemon.close_done` (new surface — legacy logged no teardown) | PLAN DoD requires reverse-order teardown observable in logs; later slices extend the same dotted style |
+| S0-13 | SPEC §2.1's `./swartznet-data` fallback corrected to the code-true `./swartznet-state` (was §6.3-flagged drift) | Code behavior is the spec of record for the share-root fallback |
+| S0-14 | The GUI binary is deliberately not rebuilt until the GUI slice; `dist/swartznet-gui-dev-linux-amd64` still contains the **legacy** build (as does `dist/swartznet-legacy-v0.8.0`, kept on purpose) | The rebuilt tree has no GUI source yet; the per-change both-binaries rule resumes at Slice 11 |
+| S0-15 | Adversarial-review fixes: `goBG` registration is teardown-aware (no Add/Wait race, no-op after Close); double `Start` errors instead of orphaning the first listener; `cmd_status` non-200/decode output restored to byte-identical legacy shape; legacy `//go:embed index.html static/*` pattern kept; the per-keyword status table ported now (renders against a legacy daemon); a real-signal-path test (`syscall.Kill` SIGINT/SIGTERM → 130) guards the DoD; `scripts/dod-slice0.sh` checked in so the binary DoD run is reproducible | Each was a review finding with a concrete failure scenario; fixes verified by new pinning tests |
+
 ## Log
 
 - **2026-07-09** — Phases 0–3 executed and committed (`8e687ab` SPEC §1–7, `96b109c` provisional §0, `ee54afb` ARCHITECTURE+PLAN, `26a897e` provenance records). Paused at the Phase-3/4 human gate.
 - **2026-07-17** — State re-verified (working tree clean, `legacy-snapshot` intact, no code drift since the spec snapshot); this consolidated decision log created; gate re-presented to the author.
 - **2026-07-17** — **Gate cleared.** Author confirmed SPEC §0 (all five items) and approved ARCHITECTURE.md + PLAN.md. Phase 4 begins: the legacy Go tree is removed from the rebuild branch (preserved on `legacy-snapshot`), and Slice 0 implementation starts.
+- **2026-07-17** — **Slice 0 built.** Contracts extracted from legacy by a 4-agent workflow (exact strings ledger in `docs/rebuild/` provenance); implementation + full test suite landed; 37/37 binary DoD checks pass; `go test -race` clean; adversarially reviewed before commit. Slice decisions S0-1…S0-13 above.

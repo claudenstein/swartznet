@@ -7,6 +7,34 @@ format follows [Keep a Changelog][kac]; the project follows
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 
+## Rebuild (in progress — Phase 4)
+
+The tree is being rebuilt from scratch against `SPEC.md` /
+`ARCHITECTURE.md` / `PLAN.md`; the legacy implementation lives on the
+`legacy-snapshot` branch. Entries here track rebuild slices; everything
+below "Unreleased" describes the legacy line.
+
+### Slice 0 — walking skeleton (2026-07-17)
+
+- New `internal/config`, `internal/daemon`, `internal/httpapi` (+ embedded
+  web stub) and `cmd/swartznet` with `serve` (temporary scaffold, folds
+  into `add` in Slice 2), thin-HTTP-client `status`, `version`, `help`.
+- `GET /status` (frozen full JSON shape, honestly degraded) and
+  `GET /healthz`; CSRF/DNS-rebind guard and 1 MiB body cap preserved
+  byte-for-byte from legacy; non-loopback binds warn loudly
+  ("API is UNAUTHENTICATED") but are honored.
+- Reverse-order teardown is now observable in logs
+  (`daemon.close_begin` → `daemon.bg_joined` → `httpapi.stopped` →
+  `daemon.close_done`); SIGINT/SIGTERM exit 130; `Daemon.Close` is
+  idempotent.
+- §6 defect fixes shipped from day one: **one** unsafe gate
+  (`SWARTZNET_UNSAFE=1` or a test binary; `SWARTZNET_ALLOW_REGTEST` is
+  gone), and `SWARTZNET_LOG` (`debug|info|warn|error`, default info) is
+  documented in `swartznet help`, with a warning on unrecognized values.
+- `Validate()` now runs all rejections before creating any directory
+  (SPEC §7-Q48 resolved; create-set unchanged: DataDir 0755 +
+  IndexDir's parent only).
+
 ## Unreleased
 
 Targeting **v1.0.0** — first GA release. v1.0.0 still wants
