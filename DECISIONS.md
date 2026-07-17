@@ -11,9 +11,9 @@
 
 ## Phase state
 
-Phases 0–3 complete (artifacts committed 2026-07-09). **Phase 4 (implementation) is
-gated** on the author decisions under *Open — blocks Phase 4* below. Do not write rebuild
-code until that gate clears.
+Phases 0–3 complete (artifacts committed 2026-07-09). **The Phase-3/4 gate CLEARED on
+2026-07-17**: the author confirmed all five SPEC §0 checklist items unamended and approved
+`ARCHITECTURE.md` + `PLAN.md`. Phase 4 is in progress, starting at Slice 0.
 
 ## Process decisions
 
@@ -56,12 +56,13 @@ Each maps a SPEC §7 question to the default the architecture adopts. Full conte
 | J60 | User-facing license string: **Apache-2.0** (single build-stamped source) | `LICENSE`, README, and `THIRD_PARTY_LICENSES` all say Apache-2.0; the GUI About string was drift |
 | §2.9/§5.9 | Non-loopback API bind **warns loudly and binds** (one-time "API is UNAUTHENTICATED" warning), not a hard refusal | Matches the spec's warn-and-bind; invariant #3's guarantee is *no auth concept in httpapi*, not a bind restriction |
 
-## Open — blocks Phase 4 (the author gate)
+## Resolved — the author gate (2026-07-17)
 
-1. **Confirm or correct `SPEC.md` §0** — the reconstructed vision, specifically its 5-item
-   checklist: mission framing, Aggregate endgame, scope exclusions, the four invariants,
-   design-center user. This is the one section code-reading cannot recover.
-2. **Approve `ARCHITECTURE.md` + `PLAN.md`** (or request changes).
+1. **`SPEC.md` §0 confirmed** — all five checklist items (mission framing, Aggregate
+   endgame, scope exclusions, the four invariants, design-center user), unamended. §0 is
+   now the normative statement of intent.
+2. **`ARCHITECTURE.md` + `PLAN.md` approved** — implementation authorized, starting at
+   Slice 0 (walking skeleton).
 
 ## Open — deliberately deferred (does not block Phase 4)
 
@@ -77,3 +78,4 @@ Each maps a SPEC §7 question to the default the architecture adopts. Full conte
 
 - **2026-07-09** — Phases 0–3 executed and committed (`8e687ab` SPEC §1–7, `96b109c` provisional §0, `ee54afb` ARCHITECTURE+PLAN, `26a897e` provenance records). Paused at the Phase-3/4 human gate.
 - **2026-07-17** — State re-verified (working tree clean, `legacy-snapshot` intact, no code drift since the spec snapshot); this consolidated decision log created; gate re-presented to the author.
+- **2026-07-17** — **Gate cleared.** Author confirmed SPEC §0 (all five items) and approved ARCHITECTURE.md + PLAN.md. Phase 4 begins: the legacy Go tree is removed from the rebuild branch (preserved on `legacy-snapshot`), and Slice 0 implementation starts.

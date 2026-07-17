@@ -2,13 +2,13 @@
 
 > **What this document is.** A behavioral specification of SwartzNet reverse-engineered from the working tree (snapshot preserved as the `legacy-snapshot` branch). It describes what the software *does and is meant to do* — not how the current code is structured — so it can serve as the source of truth for a from-scratch rebuild per the rebuild playbook (Phase 1 output). It was produced by 16 parallel subsystem readers plus docs-drift / TODO / surface-audit cross-checks; every claim in §6 survived an adversarial verification pass (135 of 148 claims confirmed, 13 refuted and dropped). Evidence anchors are `file:line` references into the legacy tree.
 >
-> **Status: awaiting Phase 2 (human gate).** §0 below is deliberately a stub. Edit it — correct the reconstruction, or paste your real vision at the top and let the extracted behaviors serve as the detail beneath it. §7 lists the questions only you can answer.
+> **Status: Phase 2 closed.** §0 below was confirmed by the author on 2026-07-17 (all five checklist items, unamended). §7 remains the ledger of open questions; the load-bearing ones carry recorded defaults in `DECISIONS.md`.
 
 ## 0. Original vision
 
-> **PROVISIONAL — reconstructed by Claude from the project name, README, and design docs; not yet confirmed by the author.** This is the one section code-reading cannot recover, so it is written from the strongest available intent signals and takes explicit positions on the questions in §7 that the Phase-3 architecture depends on. **Author: correct anything wrong here before Phase 4 (implementation); the checklist at the end of this section flags the load-bearing calls I made on your behalf.**
+> **CONFIRMED by the author, 2026-07-17.** This section was reconstructed by Claude from the project name, README, and design docs (the one section code-reading cannot recover), and the author confirmed all five load-bearing calls in the checklist at the end of this section, unamended. It is now the normative statement of intent for the rebuild.
 
-**Mission.** SwartzNet exists to make the material people already share *findable by what it contains*, without asking anyone to adopt a new network, run new infrastructure, or trust a central index. Plain BitTorrent can only find content you already know the infohash of; SwartzNet lets you search inside the files you've downloaded and discover torrents by topic — riding the exact same mainline DHT and peer wire that every existing client already speaks. The name reads as a tribute to Aaron Swartz and an alignment with open access to information: knowledge should be discoverable and preservable by the people holding it, not gated behind silos or takedown-prone central search. *(Inference — confirm or replace with your own framing.)*
+**Mission.** SwartzNet exists to make the material people already share *findable by what it contains*, without asking anyone to adopt a new network, run new infrastructure, or trust a central index. Plain BitTorrent can only find content you already know the infohash of; SwartzNet lets you search inside the files you've downloaded and discover torrents by topic — riding the exact same mainline DHT and peer wire that every existing client already speaks. The name reads as a tribute to Aaron Swartz and an alignment with open access to information: knowledge should be discoverable and preservable by the people holding it, not gated behind silos or takedown-prone central search.
 
 **Who it's for.** The design center is people who build and share durable collections — archivists, researchers, librarians, and technically-comfortable seeders — for whom "I have the files but no one can find them" is the real problem. "Anyone with a magnet link" is the floor the client must still serve, not the design target.
 
@@ -22,9 +22,9 @@
 - **The control plane is localhost-only and unauthenticated by construction.** The HTTP API's security model *is* the loopback bind. It must never become network-reachable without an explicit, separate auth design.
 - **One daemon, three coequal frontends.** CLI (with embedded web UI), native GUI, and any future frontend obtain a fully-wired node from a single constructor. Subsystem lifecycle lives in exactly one place.
 
-**The distributed-layer endgame ("Aggregate").** The v0.5 "Aggregate" redesign (per-publisher PPMI pointers + a signed, PoW-gated B-tree index format + RIBLT set reconciliation) is the *intended future* of Layer D — an approved design with a byte-level spec, not a discarded experiment. **Provisional position for the rebuild:** treat the legacy per-keyword BEP-44 path as the shipping baseline that must keep working, and the Aggregate format as a cleanly-separated migration target that is *not yet load-bearing*. The rebuild should make the Layer-D record format and publish/lookup path a swappable seam so the migration questions in §7-C can be answered without re-architecting. *(This is a significant call — see checklist.)*
+**The distributed-layer endgame ("Aggregate").** The v0.5 "Aggregate" redesign (per-publisher PPMI pointers + a signed, PoW-gated B-tree index format + RIBLT set reconciliation) is the *intended future* of Layer D — an approved design with a byte-level spec, not a discarded experiment. **Position for the rebuild (confirmed):** treat the legacy per-keyword BEP-44 path as the shipping baseline that must keep working, and the Aggregate format as a cleanly-separated migration target that is *not yet load-bearing*. The rebuild should make the Layer-D record format and publish/lookup path a swappable seam so the migration questions in §7-C can be answered without re-architecting.
 
-**Explicitly out of scope** (provisional — these bound the rebuild):
+**Explicitly out of scope** (confirmed — these bound the rebuild):
 - **Anonymity.** SwartzNet is not Tor/I2P. It rides the clear mainline DHT and reveals the same metadata any BitTorrent client does. Privacy knobs (`--no-dht-publish`, per-torrent indexing opt-out) reduce *what you publish*, not *who can see you*.
 - **NAT traversal** beyond what `anacrolix/torrent` already provides.
 - **Mobile / embedded** frontends.
@@ -32,7 +32,7 @@
 
 ---
 
-**Checklist of provisional calls the author should confirm** (each poisons Phase 3/4 downstream if wrong):
+**Checklist of load-bearing calls — all five CONFIRMED by the author 2026-07-17** (kept for the record; each would have poisoned Phase 3/4 downstream if wrong):
 1. **Mission framing** — is the Aaron-Swartz / open-access reading right, or is the name just a tribute with a different actual motive?
 2. **Aggregate endgame** — agree it's the future-but-not-yet-load-bearing migration target (baseline = legacy BEP-44)? Or should the rebuild target Aggregate as the *primary* Layer-D from day one, or drop it?
 3. **Scope exclusions** — is anonymity genuinely out, or a someday-goal that should shape the architecture now (it would)?

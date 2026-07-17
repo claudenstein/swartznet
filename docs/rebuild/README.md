@@ -10,7 +10,7 @@ branch and is used only as a *behavioral* reference, never copied structurally.
 | Document | Phase | Status |
 |---|---|---|
 | [`SPEC.md`](../../SPEC.md) | 1 — extracted spec | Done; §6 defects each adversarially verified |
-| [`SPEC.md` §0](../../SPEC.md) | 2 — original vision | **Provisional** — reconstructed by Claude, awaiting author confirmation |
+| [`SPEC.md` §0](../../SPEC.md) | 2 — original vision | **Confirmed by the author 2026-07-17** (all five checklist items) |
 | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) | 3 — fresh architecture | Done; critic's required fixes applied |
 | [`PLAN.md`](../../PLAN.md) | 3 — vertical-slice build order | Done (14 slices) |
 | [`DECISIONS.md`](../../DECISIONS.md) | cross-phase decision log | Live; consolidated 2026-07-17 |
@@ -30,11 +30,11 @@ branch and is used only as a *behavioral* reference, never copied structurally.
 
 - [x] **Phase 0 — Preserve.** `legacy-snapshot` branch created and pushed.
 - [x] **Phase 1 — Extract the spec.** `SPEC.md` §1–7.
-- [~] **Phase 2 — Inject the original idea (human gate).** `SPEC.md` §0 drafted
-  **provisionally**; the author must confirm/correct the 5-item checklist at the end of §0
-  (mission framing, Aggregate endgame, scope exclusions, the four invariants, design-center user).
-- [x] **Phase 3 — Fresh architecture.** `ARCHITECTURE.md` + `PLAN.md`.
-- [ ] **Phase 4 — Rebuild slice by slice.** NOT STARTED. Gated on author review of Phases 2 and 3.
+- [x] **Phase 2 — Inject the original idea (human gate).** `SPEC.md` §0 **confirmed by the
+  author 2026-07-17** — all five checklist items (mission framing, Aggregate endgame, scope
+  exclusions, the four invariants, design-center user), unamended.
+- [x] **Phase 3 — Fresh architecture.** `ARCHITECTURE.md` + `PLAN.md`. Approved by the author 2026-07-17.
+- [~] **Phase 4 — Rebuild slice by slice.** IN PROGRESS since 2026-07-17, starting at Slice 0.
 
 ## Chosen architecture (one line)
 
@@ -45,10 +45,9 @@ mistakes that are *unrepresentable by construction*; grafted with the hexagonal 
 swappable Layer-D port (legacy BEP-44 ↔ Aggregate behind one seam) and the vertical
 proposal's frozen `contracts/*` golden-vector tier.
 
-## Before Phase 4 — what the author needs to decide
+## Phase 4 gate — CLEARED 2026-07-17
 
-1. Confirm or correct `SPEC.md` §0 (the vision is genuinely the author's, not derivable from code).
-2. Review `ARCHITECTURE.md` and `PLAN.md`.
-
-Then Phase 4 proceeds one slice at a time (Slice 0 = walking skeleton), tests first, stopping
-for review between big slices, per `PLAN.md` § "How to use this plan".
+The author confirmed `SPEC.md` §0 (all five checklist items) and approved
+`ARCHITECTURE.md` + `PLAN.md`. Phase 4 proceeds one slice at a time (Slice 0 = walking
+skeleton), tests first, stopping for review between big slices, per `PLAN.md`
+§ "How to use this plan". Running decisions land in `DECISIONS.md`.
