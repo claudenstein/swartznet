@@ -13,6 +13,7 @@ branch and is used only as a *behavioral* reference, never copied structurally.
 | [`SPEC.md` §0](../../SPEC.md) | 2 — original vision | **Provisional** — reconstructed by Claude, awaiting author confirmation |
 | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) | 3 — fresh architecture | Done; critic's required fixes applied |
 | [`PLAN.md`](../../PLAN.md) | 3 — vertical-slice build order | Done (14 slices) |
+| [`DECISIONS.md`](../../DECISIONS.md) | cross-phase decision log | Live; consolidated 2026-07-17 |
 
 ## Provenance kept here
 
