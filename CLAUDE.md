@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Rebuild status (Phase 4, since 2026-07-17)
+
+This tree is mid-way through a from-scratch rebuild (`SPEC.md` → `ARCHITECTURE.md` →
+`PLAN.md`, gate cleared by the author 2026-07-17). The legacy implementation lives
+untouched on the **`legacy-snapshot`** branch as a read-only behavioral reference; the
+working tree grows slice by slice per `PLAN.md`. Until Slice 11 lands there is **no GUI
+binary** — only `dist/swartznet` is rebuilt per change. Sections below describing the
+repository layout refer to the target state; packages appear as their slice lands.
+Running decisions go in `DECISIONS.md`.
+
 ## What this is
 
 SwartzNet is a Go BitTorrent client that embeds [`anacrolix/torrent`](https://github.com/anacrolix/torrent) and layers full-text search on top. The load-bearing constraint is **mainline compatibility**: no new reserved bit, no new DHT verb, no new UDP port. A vanilla client must see nothing but BEP-3/5/9/10/44 traffic. Any change that would break this must be called out.
