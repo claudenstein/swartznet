@@ -27,6 +27,12 @@ import (
 type Options struct {
 	// Version is reported by GET /healthz; empty omits the field.
 	Version string
+	// PublisherPubKey reports the node's publisher public key as 64
+	// lowercase hex characters; the daemon wires identity.PublicKeyHex
+	// here. Nil-safe: nil (or an empty return) omits the /status field.
+	// Deliberately independent of any publisher collaborator — the pubkey
+	// renders whenever an identity is loaded.
+	PublisherPubKey func() string
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -157,8 +163,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 // block renders its honest degraded state while a subsystem is unwired.
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	var out StatusResponse
-	// No collaborators exist yet at this slice; every optional block stays
-	// nil and the value blocks render zero state.
+	if s.opts.PublisherPubKey != nil {
+		out.Publisher.PubKey = s.opts.PublisherPubKey()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

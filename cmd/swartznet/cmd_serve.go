@@ -27,6 +27,7 @@ func serveWithContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	apiAddr := fs.String("api-addr", "localhost:7654", `HTTP API listen address ("" to disable)`)
 	dataDir := fs.String("data-dir", "", "download/data directory (default: XDG data dir)")
 	indexDir := fs.String("index-dir", "", "search index directory (default: XDG data dir)")
+	identityPath := fs.String("identity", "", "path to the ed25519 identity.key file (load-only unless it is the default path, which is auto-created)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -37,6 +38,9 @@ func serveWithContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 	if *indexDir != "" {
 		cfg.IndexDir = *indexDir
+	}
+	if *identityPath != "" {
+		cfg.IdentityPath = *identityPath
 	}
 
 	log := newLogger(stderr)
@@ -52,6 +56,13 @@ func serveWithContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 	defer d.Close()
 
+	if *identityPath != "" && d.Identity == nil {
+		// The user explicitly named a key and it did not load (daemon.New
+		// already warned on stderr); running publisher-less would contradict
+		// their intent. Default-path identity failures degrade instead.
+		fmt.Fprintln(stderr, "swartznet: identity did not load")
+		return exitRuntime
+	}
 	if *apiAddr != "" && d.API == nil {
 		// The bind failed (daemon.New already warned on stderr). A scaffold
 		// serve with no API serves nothing, so fail loudly; the future 'add'

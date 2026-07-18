@@ -23,6 +23,11 @@ type Config struct {
 	// IndexDir holds the Bleve search index. Empty disables indexing.
 	// Validate creates only its parent: Bleve insists on creating the leaf.
 	IndexDir string
+	// IdentityPath locates the persistent ed25519 node identity (a raw
+	// 64-byte key file, mode exactly 0600). Empty disables identity
+	// entirely. Validate never touches it — the identity loader owns its
+	// own parent-dir creation.
+	IdentityPath string
 	// ListenPort is the BitTorrent listen port (0 = OS-assigned).
 	ListenPort int
 
@@ -36,9 +41,10 @@ type Config struct {
 func Default() Config {
 	root := ResolveShareRoot()
 	return Config{
-		DataDir:    filepath.Join(root, "data"),
-		IndexDir:   filepath.Join(root, "index"),
-		ListenPort: 42069,
+		DataDir:      filepath.Join(root, "data"),
+		IndexDir:     filepath.Join(root, "index"),
+		IdentityPath: filepath.Join(root, "identity.key"),
+		ListenPort:   42069,
 	}
 }
 

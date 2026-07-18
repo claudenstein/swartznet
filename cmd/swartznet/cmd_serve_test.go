@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/swartznet/swartznet/internal/identity"
 )
 
 // syncBuffer is a race-safe bytes.Buffer for goroutine-crossing writers.
@@ -35,6 +38,9 @@ func (b *syncBuffer) String() string {
 func serveArgs(t *testing.T, extra ...string) []string {
 	t.Helper()
 	tmp := t.TempDir()
+	// Hermetic XDG root: identity auto-creation follows the default path and
+	// must never touch the operator's real ~/.local/share/swartznet.
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "xdg"))
 	args := []string{
 		"--data-dir", filepath.Join(tmp, "data"),
 		"--index-dir", filepath.Join(tmp, "index"),
@@ -178,6 +184,61 @@ func TestServeBindFailure(t *testing.T) {
 	}
 }
 
+// TestServeIdentityFlagLoadOnly: an explicit --identity pointing nowhere is
+// fatal (exit 1) and must not mint a key there.
+func TestServeIdentityFlagLoadOnly(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope.key")
+	var stdout, stderr syncBuffer
+	code := serveWithContext(context.Background(), serveArgs(t,
+		"--api-addr", "localhost:0",
+		"--identity", missing,
+	), &stdout, &stderr)
+	if code != exitRuntime {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "swartznet: identity did not load") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "load-only") {
+		t.Fatalf("stderr %q lacks the load-only cause", stderr.String())
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatal("--identity minted a key at an explicit path")
+	}
+}
+
+// TestServeIdentityFlagValid: a valid key created elsewhere loads and its
+// pubkey is served on /status.
+func TestServeIdentityFlagValid(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "elsewhere.key")
+	id, err := identity.Load(keyFile, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, _, _, cancel, codeCh := startServe(t, serveArgs(t,
+		"--api-addr", "localhost:0",
+		"--identity", keyFile,
+	))
+	defer func() { cancel(); <-codeCh }()
+
+	resp, err := http.Get("http://" + addr + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var st struct {
+		Publisher struct {
+			PubKey string `json:"pubkey"`
+		} `json:"publisher"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Publisher.PubKey != id.PublicKeyHex() {
+		t.Fatalf("/status pubkey = %q, want %q", st.Publisher.PubKey, id.PublicKeyHex())
+	}
+}
+
 // TestCmdServeRealSignalPath drives cmdServe itself — signalContext included —
 // by delivering real signals to the test process. This is the only automated
 // guard on the DoD's headline exit-130 contract; the other lifecycle tests
@@ -227,6 +288,9 @@ func TestCmdServeRealSignalPath(t *testing.T) {
 }
 
 func TestServeBadConfig(t *testing.T) {
+	// Hermetic even though Validate fails before identity: the guard must not
+	// depend on daemon.New's internal ordering.
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "xdg"))
 	tmp := t.TempDir()
 	blocker := filepath.Join(tmp, "file")
 	if err := os.WriteFile(blocker, nil, 0o644); err != nil {

@@ -9,21 +9,40 @@ import (
 
 func TestDefaultNonEmpty(t *testing.T) {
 	c := Default()
-	if c.DataDir == "" || c.IndexDir == "" {
+	if c.DataDir == "" || c.IndexDir == "" || c.IdentityPath == "" {
 		t.Fatalf("Default() has empty paths: %+v", c)
 	}
 	if c.ListenPort != 42069 {
 		t.Fatalf("ListenPort = %d, want 42069", c.ListenPort)
+	}
+	if filepath.Base(c.IdentityPath) != "identity.key" {
+		t.Fatalf("IdentityPath leaf = %q, want identity.key", c.IdentityPath)
 	}
 }
 
 func TestDefaultPathsShareRoot(t *testing.T) {
 	c := Default()
 	root := ResolveShareRoot()
-	for _, p := range []string{c.DataDir, c.IndexDir} {
+	for _, p := range []string{c.DataDir, c.IndexDir, c.IdentityPath} {
 		if !strings.HasPrefix(p, root) {
 			t.Errorf("path %q does not share root %q", p, root)
 		}
+	}
+}
+
+// TestValidateNeverTouchesIdentity pins the Slice-0 §5 rule after the
+// IdentityPath field landed: Validate's create-set stays exactly two dirs.
+func TestValidateNeverTouchesIdentity(t *testing.T) {
+	tmp := t.TempDir()
+	c := Config{
+		DataDir:      filepath.Join(tmp, "data"),
+		IdentityPath: filepath.Join(tmp, "id", "identity.key"),
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "id")); !os.IsNotExist(err) {
+		t.Fatal("Validate created the identity parent dir; the loader owns it")
 	}
 }
 

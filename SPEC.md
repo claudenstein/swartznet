@@ -1089,7 +1089,7 @@ All items below survived adversarial verification (CONFIRMED). Refuted claims �
 22. Was automatic `RecordConfirmed` on download completion (per the M5d comment) dropped deliberately (e.g., to avoid self-reinforcing reputation) or is it just unwired? Relatedly, HTTP `/confirm` is bloom-only while the GUI confirm path also records attributed sources — should they match?
 23. Bloom filter and reputation tracker persist only on clean engine Close, so crashes lose the session's spam-resistance signal — is periodic checkpointing planned?
 24. Bloom file format v1 freezes the FNV-64a double-hash construction — is a version bump planned before the format is declared stable in the white paper?
-25. The identity.key permission gate requires exactly 0600 and rejects even stricter 0400 — intentional, or should the rule be "no group/other bits"?
+25. The identity.key permission gate requires exactly 0600 and rejects even stricter 0400 — intentional, or should the rule be "no group/other bits"? *(Rebuild note, 2026-07-18: exact-0600 kept per DECISIONS D25. A discovered corollary: on Windows, Go stats files as 0666/0444, so the gate makes identity.key unloadable there — legacy shipped this breakage silently; windows-amd64 is a release target. Needs an author decision before any Windows release: ACL-aware carve-out vs documented fail-closed.)*
 26. Is the "heavy-tail seeded rule" documented on `dhtindex.Lookup.AnySeeded` still planned, or abandoned in favor of the seed score bonus?
 
 **E. Engine and daemon lifecycle intent**

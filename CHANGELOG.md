@@ -14,6 +14,29 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 1 — persistent identity (2026-07-18)
+
+- New `internal/identity`: raw 64-byte ed25519 `identity.key` (frozen legacy
+  format), created at mode exactly 0600 with the legacy validation gates and
+  error strings preserved byte-for-byte (exact-0600 — 0400 rejected too;
+  size; seed→pubkey re-derivation; directory-at-path). A present-but-invalid
+  key is never overwritten or regenerated (invariant #2).
+- Auto-create happens **only at the default XDG path**: the daemon compares
+  the configured path against `config.Default().IdentityPath` and
+  `identity.Load`'s create branch is the single enforcement site (also
+  closing the legacy stat-then-create TOCTOU). Parent-dir creation moved to
+  the create arm, so a refused load has no side effects.
+- `daemon.New` loads identity before all subsystems and — fixing the §6
+  defect — wires `httpapi.Options.PublisherPubKey` from
+  `identity.PublicKeyHex`, un-nested from any publisher collaborator:
+  `/status` now reports `publisher.pubkey` in every real daemon.
+- `serve --identity <path>`: explicit paths are load-only; a failed explicit
+  load exits 1, while a default-path failure degrades per SPEC §2.8 (warn +
+  publisher-less). New log events `daemon.identity_loaded` /
+  `daemon.identity_load_err` (attrs `pubkey`/`err` kept from legacy).
+- `scripts/dod-slice1.sh` (19 checks) covers the whole DoD against the real
+  binary; `dod-slice0.sh` gained hermetic `XDG_DATA_HOME` isolation.
+
 ### Slice 0 — walking skeleton (2026-07-17)
 
 - New `internal/config`, `internal/daemon`, `internal/httpapi` (+ embedded

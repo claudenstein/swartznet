@@ -3,11 +3,14 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -16,13 +19,13 @@ import (
 	"github.com/swartznet/swartznet/internal/config"
 )
 
+// testConfig returns a fully-defaulted config rooted under a temp XDG data
+// home, so identity auto-creation (which requires the DEFAULT path) stays
+// hermetic and never touches the operator's real ~/.local/share/swartznet.
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
-	tmp := t.TempDir()
-	return config.Config{
-		DataDir:  filepath.Join(tmp, "data"),
-		IndexDir: filepath.Join(tmp, "index"),
-	}
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "xdg"))
+	return config.Default()
 }
 
 // eventLog collects ordered events from both code and slog, race-safely.
@@ -141,6 +144,209 @@ func TestNilStderrDoesNotPanic(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
+}
+
+// TestStatusReportsPubkey is THE §6 defect-absence test: a real daemon (not
+// a hand-wired test server) must surface its publisher pubkey on /status.
+func TestStatusReportsPubkey(t *testing.T) {
+	cfg := testConfig(t)
+	d, err := New(context.Background(), Options{
+		Cfg:     cfg,
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		APIAddr: "localhost:0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.Identity == nil {
+		t.Fatal("identity not loaded from defaulted config")
+	}
+	resp, err := http.Get("http://" + d.API.Addr() + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var st struct {
+		Publisher struct {
+			PubKey string `json:"pubkey"`
+		} `json:"publisher"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Publisher.PubKey != d.Identity.PublicKeyHex() {
+		t.Fatalf("/status pubkey = %q, want %q", st.Publisher.PubKey, d.Identity.PublicKeyHex())
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(st.Publisher.PubKey) {
+		t.Fatalf("pubkey %q is not 64 lowercase hex chars", st.Publisher.PubKey)
+	}
+}
+
+func TestIdentityPersistsAcrossRestart(t *testing.T) {
+	cfg := testConfig(t)
+	newDaemon := func() *Daemon {
+		d, err := New(context.Background(), Options{
+			Cfg: cfg,
+			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	d1 := newDaemon()
+	pk1 := d1.Identity.PublicKeyHex()
+	if err := d1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d2 := newDaemon()
+	pk2 := d2.Identity.PublicKeyHex()
+	if err := d2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if pk1 != pk2 {
+		t.Fatalf("pubkey changed across restart: %s vs %s", pk1, pk2)
+	}
+
+	// Deleting the key at the default path mints a NEW identity.
+	if err := os.Remove(cfg.IdentityPath); err != nil {
+		t.Fatal(err)
+	}
+	d3 := newDaemon()
+	pk3 := d3.Identity.PublicKeyHex()
+	if err := d3.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if pk3 == pk1 {
+		t.Fatal("deleting the key did not mint a new identity")
+	}
+}
+
+// TestIdentityLoadFailureDegrades pins SPEC §2.8: a bad key file is rejected
+// (never regenerated) but the daemon still starts, publisher-less.
+func TestIdentityLoadFailureDegrades(t *testing.T) {
+	cfg := testConfig(t)
+	// Create the identity, then break its permissions.
+	d1, err := New(context.Background(), Options{Cfg: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := d1.Identity.PublicKeyHex()
+	_ = d1.Close()
+	before, err := os.ReadFile(cfg.IdentityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.IdentityPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	d2, err := New(context.Background(), Options{
+		Cfg:     cfg,
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		APIAddr: "localhost:0",
+		Stderr:  &stderr,
+	})
+	if err != nil {
+		t.Fatalf("identity failure must degrade, not abort: %v", err)
+	}
+	defer d2.Close()
+	if d2.Identity != nil {
+		t.Fatal("bad key file must not load")
+	}
+	if !strings.Contains(stderr.String(), "warning: identity load failed:") ||
+		!strings.Contains(stderr.String(), "insecure permissions") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	// The rejected file is untouched — never regenerated.
+	after, _ := os.ReadFile(cfg.IdentityPath)
+	if string(before) != string(after) {
+		t.Fatal("rejected key file was modified")
+	}
+	// /status omits the pubkey.
+	resp, err := http.Get("http://" + d2.API.Addr() + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), "pubkey") {
+		t.Fatalf("degraded /status must omit pubkey: %s", body)
+	}
+	// Restoring the mode restores the ORIGINAL identity (proves no mint).
+	if err := os.Chmod(cfg.IdentityPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d3, err := New(context.Background(), Options{Cfg: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d3.Close()
+	if d3.Identity == nil || d3.Identity.PublicKeyHex() != pk {
+		t.Fatal("original identity not recovered after chmod 0600")
+	}
+}
+
+func TestEmptyIdentityPathDisables(t *testing.T) {
+	cfg := testConfig(t)
+	path := cfg.IdentityPath
+	cfg.IdentityPath = ""
+	d, err := New(context.Background(), Options{Cfg: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.Identity != nil {
+		t.Fatal("empty IdentityPath must disable identity")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("disabled identity must not create a key file")
+	}
+}
+
+// TestNonDefaultIdentityPathIsLoadOnly pins the single enforcement site:
+// a configured non-default path never auto-creates.
+func TestNonDefaultIdentityPathIsLoadOnly(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.IdentityPath = filepath.Join(t.TempDir(), "elsewhere.key")
+	var stderr bytes.Buffer
+	d, err := New(context.Background(), Options{
+		Cfg:    cfg,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.Identity != nil {
+		t.Fatal("non-default path must not auto-create")
+	}
+	if _, err := os.Stat(cfg.IdentityPath); !os.IsNotExist(err) {
+		t.Fatal("key file was created at a non-default path")
+	}
+	if !strings.Contains(stderr.String(), "load-only") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestUncleanDefaultPathStillAutoCreates pins the path-based rule under
+// non-canonical spellings: a /./-spelled default path must count as default.
+func TestUncleanDefaultPathStillAutoCreates(t *testing.T) {
+	cfg := testConfig(t)
+	dir := filepath.Dir(cfg.IdentityPath)
+	cfg.IdentityPath = dir + string(filepath.Separator) + "." + string(filepath.Separator) + "identity.key"
+	d, err := New(context.Background(), Options{Cfg: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.Identity == nil {
+		t.Fatal("unclean spelling of the default path must still auto-create")
+	}
 }
 
 // TestCloseOrder pins the load-bearing teardown contract: the daemon-owned

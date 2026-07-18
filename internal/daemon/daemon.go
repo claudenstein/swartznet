@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/httpapi"
+	"github.com/swartznet/swartznet/internal/identity"
 )
 
 // Options configures New. It grows slice by slice.
@@ -43,6 +45,9 @@ type Daemon struct {
 	Cfg config.Config
 	Log *slog.Logger
 	API *httpapi.Server // nil when APIAddr was empty or the bind failed
+	// Identity is the loaded node identity; nil when IdentityPath is empty
+	// or the load failed (degraded start — the node runs publisher-less).
+	Identity *identity.Identity
 
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
@@ -78,11 +83,33 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	}
 	log.Debug("daemon.new", "data_dir", opts.Cfg.DataDir, "index_dir", opts.Cfg.IndexDir, "api_addr", opts.APIAddr)
 
+	// Identity precedes every subsystem: the engine and publishers consume
+	// its Signer. Auto-create is allowed only when the configured path IS the
+	// default XDG path — Load's create branch enforces it. Failure degrades
+	// (SPEC §2.8: the node still downloads and searches, it cannot publish).
+	if opts.Cfg.IdentityPath != "" {
+		// Clean the configured side: Default()'s value is already Join-cleaned,
+		// and a `/./`- or `//`-spelled default path must still count as default.
+		allowCreate := filepath.Clean(opts.Cfg.IdentityPath) == config.Default().IdentityPath
+		id, err := identity.Load(opts.Cfg.IdentityPath, allowCreate)
+		if err != nil {
+			log.Warn("daemon.identity_load_err", "err", err)
+			fmt.Fprintf(opts.stderr(), "warning: identity load failed: %v\n", err)
+		} else {
+			d.Identity = id
+			log.Info("daemon.identity_loaded", "pubkey", id.PublicKeyHex())
+		}
+	}
+
 	// (engine, indexer, companion, bootstrap, session restore land here,
 	// in that order, as their slices arrive.)
 
 	if opts.APIAddr != "" {
-		api := httpapi.NewWithOptions(opts.APIAddr, log, httpapi.Options{Version: opts.Version})
+		apiOpts := httpapi.Options{Version: opts.Version}
+		if d.Identity != nil {
+			apiOpts.PublisherPubKey = d.Identity.PublicKeyHex
+		}
+		api := httpapi.NewWithOptions(opts.APIAddr, log, apiOpts)
 		if err := api.Start(); err != nil {
 			fmt.Fprintf(opts.stderr(), "warning: httpapi start failed: %v\n", err)
 		} else {

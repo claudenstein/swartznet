@@ -44,7 +44,7 @@ Legend for **Behavioral references**: SPEC §§ are the source of truth; `legacy
 - **Behavioral references:** SPEC §2.8 (identity persistence), §5.6 (exact-0600, seed→pubkey re-derivation), §0 invariant #2. `legacy: internal/identity/`.
 - **Definition of done:** first `serve` creates `~/.local/share/swartznet/identity.key` at mode **exactly 0600**; a file at 0400 is **rejected** (not silently accepted); `chmod 0644` then restart is rejected; passing `--identity /path` load-only refuses to create; `/status` shows the same pubkey across restarts; deleting the key and restarting creates a *new* pubkey only at the default path.
 - **§6 defects it must NOT reproduce:** `/status` publisher.pubkey never populated — set `Options.PublisherPubKey` from `identity.PublicKeyHex()`.
-- **§5 rules it must preserve:** never regenerate implicitly; auto-create **only** at the default XDG path (guarded by the `IsDefaultPath` flag from `Load`); public half re-derived from seed and checked on load.
+- **§5 rules it must preserve:** never regenerate implicitly; auto-create **only** at the default XDG path (enforced in `Load`'s create branch via the caller-computed `allowCreate` — see DECISIONS S1-1/S1-2); public half re-derived from seed and checked on load.
 
 ---
 

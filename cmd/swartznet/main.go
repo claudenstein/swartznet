@@ -74,6 +74,9 @@ Flags for 'serve':
   --api-addr <addr>    HTTP API listen address (default: localhost:7654, "" to disable).
   --data-dir <path>    Download/data directory (default: XDG data dir).
   --index-dir <path>   Search index directory (default: XDG data dir).
+  --identity <path>    ed25519 identity.key file. Load-only unless it names the
+                       default XDG path, which is auto-created on first run;
+                       any other missing path is an error.
 
 Flags for 'status':
 

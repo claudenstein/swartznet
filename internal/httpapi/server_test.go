@@ -87,6 +87,30 @@ func TestStatusGoldenJSON(t *testing.T) {
 	}
 }
 
+// TestStatusWithPubkeyGolden freezes the wired-probe /status body: pubkey
+// renders first in the publisher block, independent of any publisher
+// collaborator (the legacy nested it under an active publisher — a defect).
+func TestStatusWithPubkeyGolden(t *testing.T) {
+	pk := strings.Repeat("ab", 32)
+	s := NewWithOptions("localhost:0", slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
+		PublisherPubKey: func() string { return pk },
+	})
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Stop(context.Background()) }()
+	resp, err := http.Get("http://" + s.Addr() + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	golden := `{"local":{"indexed":false,"doc_count":0},"swarm":{"known_peers":0,"capable_peers":0},"publisher":{"pubkey":"` + pk + `","total_keywords":0,"total_hits":0}}`
+	if strings.TrimSpace(string(body)) != golden {
+		t.Fatalf("body = %s\nwant  %s", body, golden)
+	}
+}
+
 func TestStatusMethodScoped(t *testing.T) {
 	_, addr := startTestServer(t)
 	req, _ := http.NewRequest("POST", "http://"+addr+"/status", nil)

@@ -3,6 +3,9 @@
 set -u
 BIN=/home/kartofel/Claude/swartznet/dist/swartznet
 WORK=$(mktemp -d)
+# Hermetic XDG root: identity auto-creation (Slice 1+) follows the default
+# path and must never touch the operator's real ~/.local/share/swartznet.
+export XDG_DATA_HOME="$WORK/xdg"
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "ok   - $1"; }
 fail() { FAIL=$((FAIL+1)); echo "FAIL - $1"; }
@@ -34,8 +37,14 @@ done
 # /status JSON validity
 BODY=$(curl -s "http://$ADDR/status")
 echo "$BODY" | python3 -m json.tool >/dev/null 2>&1 && ok "curl /status parses as JSON" || fail "curl /status parses as JSON"
-[ "$BODY" = '{"local":{"indexed":false,"doc_count":0},"swarm":{"known_peers":0,"capable_peers":0},"publisher":{"total_keywords":0,"total_hits":0}}' ] \
-  && ok "/status golden body" || fail "/status golden body: $BODY"
+# Structural golden: since Slice 1 a real daemon also carries publisher.pubkey.
+echo "$BODY" | python3 -c '
+import json,re,sys
+d=json.load(sys.stdin)
+pk=d["publisher"].pop("pubkey","")
+assert re.fullmatch(r"[0-9a-f]{64}", pk), f"bad pubkey {pk!r}"
+assert d=={"local":{"indexed":False,"doc_count":0},"swarm":{"known_peers":0,"capable_peers":0},"publisher":{"total_keywords":0,"total_hits":0}}, d
+' && ok "/status golden body (+pubkey)" || fail "/status golden body: $BODY"
 CT=$(curl -s -o /dev/null -w '%{content_type}' "http://$ADDR/status")
 [ "$CT" = "application/json" ] && ok "/status content-type" || fail "/status content-type: $CT"
 
