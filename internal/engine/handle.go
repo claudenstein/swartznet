@@ -45,6 +45,25 @@ func (h *Handle) SignedBy() string {
 	return h.signedBy
 }
 
+func (h *Handle) setSignedBy(v string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.signedBy = v
+}
+
+// setSignedByIfEmpty is the compare-and-set behind the sticky upgrade: only
+// the first non-empty attribution wins, so concurrent signed adds cannot
+// leave the handle and session disagreeing.
+func (h *Handle) setSignedByIfEmpty(v string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.signedBy != "" {
+		return false
+	}
+	h.signedBy = v
+	return true
+}
+
 func (h *Handle) isPaused() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

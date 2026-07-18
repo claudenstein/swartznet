@@ -46,6 +46,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "add":
 		return cmdAdd(args[1:], os.Stdin, stdout, stderr)
+	case "create":
+		return cmdCreate(args[1:], stdout, stderr)
 	case "status":
 		return cmdStatus(args[1:], stdout, stderr)
 	case "files":
@@ -69,6 +71,9 @@ Commands:
   add <target>         Add a torrent and run the node (Ctrl-C to stop). The
                        target is a magnet URI, a .torrent path, a bare 40-hex
                        infohash, or - for .torrent bytes on stdin.
+  create <path> -o <t> Create a .torrent from a file or folder. --sign adds a
+                       publisher signature (infohash unchanged); --seed then
+                       seeds the content in place.
   status               Show a running daemon's status over its HTTP API.
   files <infohash> [<idx> <prio>]
                        List a torrent's files, or set one file's priority
@@ -90,6 +95,21 @@ Flags for 'add':
   --dht-insecure       Disable BEP-42 node-ID security (testing only; gated).
   --leech-only         Disable uploading (debug).
   --no-index           Don't index downloaded content at all.
+
+Flags for 'create':
+
+  -o <path>            Output .torrent path (required).
+  --name <s>           Override info.name (default: basename of root).
+  --piece-kib <n>      Piece length in KiB (0 = auto; else power of two ≥ 16).
+  --tracker <url>      Tracker announce URL (repeatable; default trackerless).
+  --webseed <url>      Webseed URL (repeatable).
+  --comment <s>        Optional torrent comment.
+  --private            Mark as private (BEP-27: disables DHT/PEX).
+  --sign               Sign with the node identity (snet.* top-level fields).
+  --identity <path>    Identity key for --sign (same load-only rule as 'add').
+  --seed               Seed the content in place after creation.
+  --data-dir <path>    With --seed, session-state directory.
+  --no-dht             With --seed, disable DHT + port mapping (direct peers).
 
 Flags for 'status' and 'files':
 

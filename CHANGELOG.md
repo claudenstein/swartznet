@@ -14,6 +14,33 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 3 — create + infohash-preserving signing (2026-07-18)
+
+- New `contracts/sign`: the frozen 34-byte signing payload
+  (`"SN-TORRENT-V1|" ‖ SHA1(info)`), the ed25519 primitives, the
+  `Signature` type, and the three-way verification taxonomy —
+  `ErrNotSigned` (benign), `ErrBadSignature` (tamper, Signature still
+  populated), and plain errors for bad lengths that are neither sentinel.
+  A deterministic golden vector pins the derivation byte-for-byte.
+- New `internal/signing`: `Sign`/`Verify` over raw .torrent bytes via the
+  contracts codecs — the info dict never round-trips a typed struct, so
+  signed and unsigned twins share one infohash. Re-signing replaces.
+- `swartznet create <path> -o <out>` with `--sign`, `--seed`, `--name`,
+  `--piece-kib` (now genuinely validated: power of two ≥ 16 KiB — the
+  legacy documented but never enforced it), trackers/webseeds/private/
+  comment. A no-seed create builds no engine at all; `--seed` seeds in
+  place daemonlessly.
+- Verify-at-add: signed torrents populate `SignedBy` end to end (handle →
+  session → `/torrents` → status), bad signatures add anyway with empty
+  `SignedBy` and a logged rejection (D20), and a verified duplicate add
+  upgrades an unsigned handle stickily (§7-Q37).
+- Fixed the legacy defect where `create --sign --seed` never showed the
+  creator's own signature: the signed bytes now flow to the engine via
+  `AddTorrentBytesSeedFrom`, so the publisher's own node badges itself.
+- `scripts/dod-slice3.sh`: 17 checks — twin infohash equality at the byte
+  level, taxonomy over the wire, D20 add-anyway, the J1 fix, and the
+  fail-closed identity paths.
+
 ### Slice 2 — add + download + seed (2026-07-18)
 
 The first slice that is a usable BitTorrent client.

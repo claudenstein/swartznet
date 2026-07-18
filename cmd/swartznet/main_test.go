@@ -24,6 +24,7 @@ func TestRunDispatch(t *testing.T) {
 		{"-v", []string{"-v"}, exitOK, "swartznet " + Version + "\n", ""},
 		{"--version", []string{"--version"}, exitOK, "swartznet " + Version + "\n", ""},
 		{"unknown", []string{"wat"}, exitUsage, "", "swartznet: unknown command \"wat\"\n\n"},
+		{"create without args", []string{"create"}, exitUsage, "", "usage: swartznet create <file-or-folder> -o <output.torrent>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -47,6 +48,18 @@ func TestUsageDocumentsEnvVars(t *testing.T) {
 	var out bytes.Buffer
 	printUsage(&out)
 	for _, want := range []string{"SWARTZNET_LOG", "SWARTZNET_UNSAFE", "debug|info|warn|error"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("usage text lacks %q", want)
+		}
+	}
+}
+
+// TestUsageDocumentsCreate pins the fixed legacy defect: create and its core
+// flags are discoverable from the built-in help.
+func TestUsageDocumentsCreate(t *testing.T) {
+	var out bytes.Buffer
+	printUsage(&out)
+	for _, want := range []string{"create <path> -o <t>", "-o <path>", "--sign", "--piece-kib", "--seed"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("usage text lacks %q", want)
 		}
