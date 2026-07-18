@@ -30,6 +30,37 @@ type Config struct {
 	IdentityPath string
 	// ListenPort is the BitTorrent listen port (0 = OS-assigned).
 	ListenPort int
+	// ListenHost, when non-empty, pins the BitTorrent/DHT bind host. An
+	// isolated regtest DHT cluster needs 127.0.0.1 here — a 0.0.0.0 bind
+	// lets the kernel flap the source IP per send, silently breaking the
+	// BEP-44 write-token check.
+	ListenHost string
+
+	// Seed keeps completed torrents uploading (default true).
+	Seed bool
+	// NoUpload disables uploading entirely (leech-only debugging).
+	NoUpload bool
+	// DisableDHT turns the mainline DHT off.
+	DisableDHT bool
+	// DisableDHTPublish stays on the DHT but suppresses BEP-44 publication
+	// (privacy knob; consumed by the Layer-D slice).
+	DisableDHTPublish bool
+	// NoIndex prevents the Bleve index from opening at all (consumed by the
+	// indexer slice; the daemon mirrors its Options.NoIndex here before
+	// engine construction).
+	NoIndex bool
+	// DHTBootstrapAddrs overrides the DHT bootstrap nodes (host:port).
+	// Empty falls through to anacrolix's public routers — an isolated
+	// cluster must seed a placeholder instead.
+	DHTBootstrapAddrs []string
+	// DisableIPv6 restricts networking to IPv4. Dual-stack spawns two DHT
+	// servers but the publisher drives only one.
+	DisableIPv6 bool
+	// DisablePortForwarding turns off UPnP/NAT-PMP gateway calls. Hermetic
+	// tests need it; operators behind hostile gateways may want it.
+	DisablePortForwarding bool
+	// HTTPUserAgent overrides the tracker/webseed user agent when non-empty.
+	HTTPUserAgent string
 
 	// Regtest and DHTInsecure are test-only knobs, refused outside test
 	// binaries unless SWARTZNET_UNSAFE=1 (the single unsafe gate).
@@ -45,6 +76,7 @@ func Default() Config {
 		IndexDir:     filepath.Join(root, "index"),
 		IdentityPath: filepath.Join(root, "identity.key"),
 		ListenPort:   42069,
+		Seed:         true,
 	}
 }
 

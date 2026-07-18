@@ -23,7 +23,7 @@ grep -q 'unknown command "wat"' "$WORK/unk.err" && ok "unknown command message" 
 "$BIN" >/dev/null 2>&1; [ $? -eq 2 ] && ok "no-args exit 2" || fail "no-args exit 2"
 
 # --- serve lifecycle --------------------------------------------------------
-"$BIN" serve --api-addr localhost:0 --data-dir "$WORK/data" --index-dir "$WORK/index" \
+"$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/data" --index-dir "$WORK/index" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/serve.out" 2>"$WORK/serve.err" &
 SPID=$!
 ADDR=""
@@ -32,7 +32,7 @@ for i in $(seq 1 100); do
   [ -n "$ADDR" ] && break
   sleep 0.05
 done
-[ -n "$ADDR" ] && ok "serve reports listening address ($ADDR)" || fail "serve reports listening address"
+[ -n "$ADDR" ] && ok "add reports listening address ($ADDR)" || fail "add reports listening address"
 
 # /status JSON validity
 BODY=$(curl -s "http://$ADDR/status")
@@ -81,11 +81,13 @@ curl -s -o /dev/null -w '%{http_code}' "http://$ADDR/static/style.css" | grep -q
 kill -INT $SPID
 wait $SPID; RC=$?
 [ "$RC" = "130" ] && ok "SIGINT exit 130" || fail "SIGINT exit 130 (got $RC)"
-grep -q "Shutting down..." "$WORK/serve.out" && ok "shutdown line on stdout" || fail "shutdown line on stdout"
+# Ctrl-C during the metadata wait is silent on stdout (legacy contract);
+# "Shutting down..." prints only from the post-metadata progress loop.
+grep -q "Shutting down..." "$WORK/serve.out" && fail "unexpected shutdown line in metadata-wait phase" || ok "metadata-wait interrupt is silent"
 python3 - "$WORK/serve.err" <<'EOF' && ok "teardown log order" || fail "teardown log order"
 import sys
 log = open(sys.argv[1]).read()
-names = ["daemon.close_begin", "daemon.bg_joined", "httpapi.stopped", "daemon.close_done"]
+names = ["daemon.close_begin", "daemon.bg_joined", "httpapi.stopped", "engine.stopped", "daemon.close_done"]
 idx = [log.find(n) for n in names]
 assert all(i >= 0 for i in idx), f"missing lines: {idx}"
 assert idx == sorted(idx), f"out of order: {idx}"
@@ -94,26 +96,26 @@ EOF
 # status against a dead daemon
 "$BIN" status --api-addr "$ADDR" >/dev/null 2>"$WORK/dead.err"; RC=$?
 [ "$RC" = "1" ] && ok "status vs dead daemon exit 1" || fail "status vs dead daemon exit 1 (got $RC)"
-grep -q "start it with: swartznet serve" "$WORK/dead.err" && ok "dead-daemon hint" || fail "dead-daemon hint"
+grep -q "start it with: swartznet add <magnet>" "$WORK/dead.err" && ok "dead-daemon hint" || fail "dead-daemon hint"
 
 # SWARTZNET_LOG=debug changes verbosity
-SWARTZNET_LOG=debug "$BIN" serve --api-addr localhost:0 --data-dir "$WORK/d2" --index-dir "$WORK/i2" \
+SWARTZNET_LOG=debug "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/d2" --index-dir "$WORK/i2" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/dbg.out" 2>"$WORK/dbg.err" &
 DPID=$!; sleep 0.7; kill -INT $DPID; wait $DPID
 grep -q "level=INFO" "$WORK/dbg.err" && ok "SWARTZNET_LOG=debug still logs info" || fail "debug run has info lines"
 # default run must not show DEBUG; debug run is allowed to (none exist yet at slice 0) — assert level plumbed via a warn check instead
-SWARTZNET_LOG=bogus "$BIN" serve --api-addr localhost:0 --data-dir "$WORK/d3" --index-dir "$WORK/i3" \
+SWARTZNET_LOG=bogus "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/d3" --index-dir "$WORK/i3" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/bogus.out" 2>"$WORK/bogus.err" &
 BPID=$!; sleep 0.7; kill -INT $BPID; wait $BPID
 grep -q "unrecognized SWARTZNET_LOG value" "$WORK/bogus.err" && ok "bogus SWARTZNET_LOG warns" || fail "bogus SWARTZNET_LOG warns"
 
 # SIGTERM also exits 130
-"$BIN" serve --api-addr localhost:0 --data-dir "$WORK/d4" --index-dir "$WORK/i4" >"$WORK/t.out" 2>/dev/null &
+"$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/d4" --index-dir "$WORK/i4" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/t.out" 2>/dev/null &
 TPID=$!; sleep 0.7; kill -TERM $TPID; wait $TPID; RC=$?
 [ "$RC" = "130" ] && ok "SIGTERM exit 130" || fail "SIGTERM exit 130 (got $RC)"
 
 # non-loopback bind: binds + warns UNAUTHENTICATED exactly once
-"$BIN" serve --api-addr 0.0.0.0:0 --data-dir "$WORK/d5" --index-dir "$WORK/i5" \
+"$BIN" add --no-dht --port 0 --api-addr 0.0.0.0:0 --data-dir "$WORK/d5" --index-dir "$WORK/i5" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/nl.out" 2>"$WORK/nl.err" &
 NPID=$!; sleep 0.7
 N=$(grep -c "API is UNAUTHENTICATED" "$WORK/nl.err")
@@ -122,12 +124,12 @@ grep -q "HTTP API listening on " "$WORK/nl.out" && ok "non-loopback bind still b
 kill -INT $NPID; wait $NPID
 
 # --api-addr "" disables the API but daemon runs
-"$BIN" serve --api-addr "" --data-dir "$WORK/d6" --index-dir "$WORK/i6" >"$WORK/off.out" 2>"$WORK/off.err" &
+"$BIN" add --no-dht --port 0 --api-addr "" --data-dir "$WORK/d6" --index-dir "$WORK/i6" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/off.out" 2>"$WORK/off.err" &
 OPID=$!; sleep 0.7
-kill -0 $OPID 2>/dev/null && ok "api-less serve stays up" || fail "api-less serve stays up"
-grep -q "httpapi.listening" "$WORK/off.err" && fail "api-less serve must not listen" || ok "api-less serve has no listener log"
+kill -0 $OPID 2>/dev/null && ok "api-less add stays up" || fail "api-less add stays up"
+grep -q "httpapi.listening" "$WORK/off.err" && fail "api-less add must not listen" || ok "api-less add has no listener log"
 kill -INT $OPID; wait $OPID; RC=$?
-[ "$RC" = "130" ] && ok "api-less serve exit 130" || fail "api-less serve exit 130 (got $RC)"
+[ "$RC" = "130" ] && ok "api-less add exit 130" || fail "api-less add exit 130 (got $RC)"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

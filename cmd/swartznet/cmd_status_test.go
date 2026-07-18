@@ -35,7 +35,7 @@ func TestStatusUnreachable(t *testing.T) {
 	if !strings.Contains(errOut, "swartznet: cannot reach the daemon at 127.0.0.1:1") {
 		t.Fatalf("stderr = %q", errOut)
 	}
-	if !strings.Contains(errOut, "start it with: swartznet serve") {
+	if !strings.Contains(errOut, "start it with: swartznet add <magnet>") {
 		t.Fatalf("stderr %q lacks the start hint", errOut)
 	}
 }

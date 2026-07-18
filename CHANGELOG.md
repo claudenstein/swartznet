@@ -14,6 +14,41 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 2 — add + download + seed (2026-07-18)
+
+The first slice that is a usable BitTorrent client.
+
+- New `internal/engine`: the anacrolix wrapper (v1.61.0, extension APIs
+  only) with the full SPEC §5.4 quirk catalog honored — positive
+  rate-limiter burst floor, shared `PeerStore` for BEP-5 write tokens,
+  `Exp=2h` BEP-44 pin, per-file Normal-priority activation (never
+  `DownloadAll`), seed-in-place `FilePathMaker` on the real basename,
+  background `VerifyData` on metainfo add and restore, and the
+  magnet→metainfo upgrade guard. Frozen `session.json` v1 format with
+  byte-exact `.torrent` copies; per-entry restore that survives corrupt
+  rows; exactly-once file-complete events with a 64-slot replay buffer.
+- Three §6 defects fixed by construction: queue promotion on completion
+  is unconditional (never Bloom-gated); `countActiveDownloads` inspects
+  file priorities so an all-`none` torrent frees its slot;
+  `/config/rate-limit` uses pointer-field merge semantics (PATCH+POST) so
+  a partial update can't zero the other cap.
+- New `contracts/bencode`: raw-bytes-preserving metainfo codec — the
+  infohash is always SHA1 of the original info bytes, never a typed
+  round-trip; signed/unsigned twins share one infohash (golden-pinned).
+- `swartznet add <magnet|.torrent|40-hex|->` IS the daemon (the Slice-0
+  `serve` scaffold is deleted); bare 40-hex is an infohash add; `-` reads
+  .torrent bytes from stdin. New `swartznet files` command; `status`
+  gains a Downloads section with real percentages.
+- HTTP API: `POST /torrent`, `GET /torrents`, files listing/priority,
+  pause/resume/remove, `/config/rate-limit`, `/config/queue` — all via
+  locally-declared interfaces (httpapi still imports zero subsystems).
+- New `internal/wirecompat` in-process multi-engine harness; the
+  timing-sensitive two-engine transfer lives in `wirecompat/scenarios`,
+  excluded from CI by a non-end-anchored grep (fixing the legacy footgun).
+- `scripts/dod-slice2.sh`: 15 checks driving TWO real binaries through a
+  loopback magnet transfer, session restore percentages, and the
+  rate-limit merge.
+
 ### Slice 1 — persistent identity (2026-07-18)
 
 - New `internal/identity`: raw 64-byte ed25519 `identity.key` (frozen legacy

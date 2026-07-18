@@ -83,3 +83,89 @@ type healthzResponse struct {
 	OK      bool   `json:"ok"`
 	Version string `json:"version,omitempty"`
 }
+
+// TorrentSnapshot is one torrent's state in GET /torrents. The status
+// vocabulary is a cross-layer enum: metadata|downloading|seeding|paused|
+// queued — exactly five values; "complete" is never emitted.
+type TorrentSnapshot struct {
+	InfoHash       string  `json:"infohash"`
+	Name           string  `json:"name"`
+	Size           int64   `json:"size"`
+	BytesCompleted int64   `json:"bytes_completed"`
+	BytesMissing   int64   `json:"bytes_missing"`
+	Progress       float64 `json:"progress"`
+	Files          int     `json:"files"`
+	ActivePeers    int     `json:"active_peers"`
+	HalfOpenPeers  int     `json:"half_open_peers"`
+	PendingPeers   int     `json:"pending_peers"`
+	TotalPeers     int     `json:"total_peers"`
+	Seeders        int     `json:"seeders"`
+	Paused         bool    `json:"paused"`
+	Status         string  `json:"status"`
+	Indexing       bool    `json:"indexing"`
+	IndexedFiles   int     `json:"indexed_files,omitempty"`
+	IndexExtracted int     `json:"index_extracted,omitempty"`
+	Queued         bool    `json:"queued"`
+	DownloadRate   int64   `json:"download_rate"`
+	UploadRate     int64   `json:"upload_rate"`
+	SignedBy       string  `json:"signed_by,omitempty"`
+	TrustedPub     bool    `json:"trusted_publisher,omitempty"`
+}
+
+// TorrentFile is one file in GET /torrents/{ih}/files.
+type TorrentFile struct {
+	Index          int     `json:"index"`
+	Path           string  `json:"path"`
+	DisplayPath    string  `json:"display_path"`
+	Length         int64   `json:"length"`
+	BytesCompleted int64   `json:"bytes_completed"`
+	Progress       float64 `json:"progress"`
+	Priority       string  `json:"priority"` // none | normal | high
+}
+
+// TorrentsResponse is the GET /torrents document.
+type TorrentsResponse struct {
+	Torrents []TorrentSnapshot `json:"torrents"` // [] never null
+}
+
+// FilesListResponse is the GET /torrents/{ih}/files document. The CLI's
+// files command decodes it.
+type FilesListResponse struct {
+	InfoHash string        `json:"infohash"`
+	Files    []TorrentFile `json:"files"`
+}
+
+// AddTorrentRequest is the POST /torrent body (magnet URIs only over HTTP).
+type AddTorrentRequest struct {
+	URI string `json:"uri"`
+}
+
+// AddTorrentResponse acknowledges an add; metadata fetch is async.
+type AddTorrentResponse struct {
+	OK       bool   `json:"ok"`
+	InfoHash string `json:"infohash"`
+}
+
+// RateLimitRequest is the PATCH/POST /config/rate-limit body. Pointer
+// fields carry merge semantics: absent = unchanged, present ≤0 = unlimited —
+// the legacy zeroed whatever was omitted (§6).
+type RateLimitRequest struct {
+	UploadBps   *int64 `json:"upload_bps"`
+	DownloadBps *int64 `json:"download_bps"`
+}
+
+// RateLimitResponse is the GET /config/rate-limit document (0 = unlimited).
+type RateLimitResponse struct {
+	UploadBps   int64 `json:"upload_bps"`
+	DownloadBps int64 `json:"download_bps"`
+}
+
+// QueueConfigRequest is the PATCH/POST /config/queue body (merge semantics).
+type QueueConfigRequest struct {
+	MaxActiveDownloads *int `json:"max_active_downloads"`
+}
+
+// QueueConfigResponse is the GET /config/queue document (0 = unlimited).
+type QueueConfigResponse struct {
+	MaxActiveDownloads int `json:"max_active_downloads"`
+}

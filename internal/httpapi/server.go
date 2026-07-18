@@ -33,6 +33,15 @@ type Options struct {
 	// Deliberately independent of any publisher collaborator — the pubkey
 	// renders whenever an identity is loaded.
 	PublisherPubKey func() string
+	// Adder accepts magnet adds; nil ⇒ POST /torrent answers 503.
+	Adder TorrentAdder
+	// Control is the torrent control surface; nil ⇒ its endpoints answer
+	// 503.
+	Control TorrentController
+	// DHTStats reports (good, total) routing-table nodes. Nil means the DHT
+	// is disabled and the /status dht block is omitted entirely — which is
+	// deliberately distinct from a present block with zero nodes.
+	DHTStats func() (good, total int)
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -146,6 +155,7 @@ func (s *Server) Stop(ctx context.Context) error {
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /status", s.handleStatus)
+	s.torrentRoutes(mux)
 
 	if assetsFS, err := fs.Sub(web.Assets(), "."); err == nil {
 		mux.Handle("GET /static/", http.FileServer(http.FS(assetsFS)))
@@ -165,6 +175,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	var out StatusResponse
 	if s.opts.PublisherPubKey != nil {
 		out.Publisher.PubKey = s.opts.PublisherPubKey()
+	}
+	if s.opts.DHTStats != nil {
+		good, total := s.opts.DHTStats()
+		out.DHT = &DHTStatus{GoodNodes: good, Nodes: total}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

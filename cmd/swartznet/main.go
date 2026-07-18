@@ -44,10 +44,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "version", "-v", "--version":
 		fmt.Fprintln(stdout, "swartznet", Version)
 		return exitOK
-	case "serve":
-		return cmdServe(args[1:], stdout, stderr)
+	case "add":
+		return cmdAdd(args[1:], os.Stdin, stdout, stderr)
 	case "status":
 		return cmdStatus(args[1:], stdout, stderr)
+	case "files":
+		return cmdFiles(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -64,12 +66,17 @@ Usage:
 
 Commands:
 
-  serve                Run the daemon (temporary scaffold; folds into 'add' in a later slice).
+  add <target>         Add a torrent and run the node (Ctrl-C to stop). The
+                       target is a magnet URI, a .torrent path, a bare 40-hex
+                       infohash, or - for .torrent bytes on stdin.
   status               Show a running daemon's status over its HTTP API.
+  files <infohash> [<idx> <prio>]
+                       List a torrent's files, or set one file's priority
+                       (none/normal/high).
   version              Print the version.
   help                 Show this help.
 
-Flags for 'serve':
+Flags for 'add':
 
   --api-addr <addr>    HTTP API listen address (default: localhost:7654, "" to disable).
   --data-dir <path>    Download/data directory (default: XDG data dir).
@@ -77,8 +84,14 @@ Flags for 'serve':
   --identity <path>    ed25519 identity.key file. Load-only unless it names the
                        default XDG path, which is auto-created on first run;
                        any other missing path is an error.
+  --port <n>           BitTorrent listen port (default: 42069, 0 = OS-assigned).
+  --no-dht             Disable the mainline DHT entirely.
+  --dht-bootstrap <hp> DHT bootstrap node host:port (repeatable).
+  --dht-insecure       Disable BEP-42 node-ID security (testing only; gated).
+  --leech-only         Disable uploading (debug).
+  --no-index           Don't index downloaded content at all.
 
-Flags for 'status':
+Flags for 'status' and 'files':
 
   --api-addr <addr>    Address of the running swartznet HTTP API (default: localhost:7654).
   --json               Emit JSON instead of text.

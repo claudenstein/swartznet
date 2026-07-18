@@ -22,10 +22,14 @@ import (
 // testConfig returns a fully-defaulted config rooted under a temp XDG data
 // home, so identity auto-creation (which requires the DEFAULT path) stays
 // hermetic and never touches the operator's real ~/.local/share/swartznet.
+// The engine is hermetic too: OS-assigned listen port, DHT off.
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "xdg"))
-	return config.Default()
+	cfg := config.Default()
+	cfg.ListenPort = 0
+	cfg.DisableDHT = true
+	return cfg
 }
 
 // eventLog collects ordered events from both code and slog, race-safely.
@@ -394,8 +398,9 @@ func TestCloseOrder(t *testing.T) {
 	bgExited := idx("bg-exited")
 	joined := idx("log:daemon.bg_joined")
 	apiStopped := idx("log:httpapi.stopped")
+	engStopped := idx("log:engine.stopped")
 	done := idx("log:daemon.close_done")
-	if !(begin < bgExited && bgExited < joined && joined < apiStopped && apiStopped < done) {
+	if !(begin < bgExited && bgExited < joined && joined < apiStopped && apiStopped < engStopped && engStopped < done) {
 		t.Fatalf("teardown order wrong: %v", events)
 	}
 

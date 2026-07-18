@@ -32,8 +32,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "swartznet: cannot reach the daemon at %s (%v)\n", *apiAddr, err)
-		// The hint flips to "swartznet add <magnet>" once 'add' exists.
-		fmt.Fprintln(stderr, "start it with: swartznet serve")
+		fmt.Fprintln(stderr, "start it with: swartznet add <magnet>")
 		return exitRuntime
 	}
 	defer resp.Body.Close()
@@ -48,22 +47,74 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return reportRunErr(err, stderr)
 	}
 
+	// Best-effort downloads fetch: any error silently omits the section, so
+	// the thin client stays compatible with a controller-less daemon.
+	downloads := fetchDownloads(*apiAddr)
+
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		// The envelope keeps the legacy CLI shape: {"status": ..., "aggregate":
 		// ...} with aggregate omitted; the /aggregate fetch arrives with its slice.
-		if err := enc.Encode(statusEnvelope{Status: st}); err != nil {
+		if err := enc.Encode(statusEnvelope{Status: st, Downloads: downloads}); err != nil {
 			return reportRunErr(err, stderr)
 		}
 		return exitOK
 	}
 	emitStatusText(stdout, st)
+	if downloads != nil {
+		emitDownloadsText(stdout, downloads)
+	}
 	return exitOK
 }
 
 type statusEnvelope struct {
-	Status httpapi.StatusResponse `json:"status"`
+	Status    httpapi.StatusResponse    `json:"status"`
+	Downloads *httpapi.TorrentsResponse `json:"downloads,omitempty"`
+}
+
+func fetchDownloads(apiAddr string) *httpapi.TorrentsResponse {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+apiAddr+"/torrents", nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var out httpapi.TorrentsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil
+	}
+	return &out
+}
+
+func emitDownloadsText(w io.Writer, d *httpapi.TorrentsResponse) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Downloads:")
+	if len(d.Torrents) == 0 {
+		fmt.Fprintln(w, "  (no torrents)")
+		return
+	}
+	for _, t := range d.Torrents {
+		name := t.Name
+		if name == "" {
+			// Defensive: the JSON comes from whatever --api-addr points at.
+			if len(t.InfoHash) >= 16 {
+				name = t.InfoHash[:16] + "…"
+			} else {
+				name = t.InfoHash
+			}
+		}
+		fmt.Fprintf(w, "  %-12s %6.1f%%  %9s  %3d/%-3d  %s\n",
+			t.Status, t.Progress*100, humanBytes(t.Size), t.ActivePeers, t.TotalPeers, name)
+	}
 }
 
 // emitStatusText renders the human status view. Sections grow as their

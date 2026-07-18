@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
 	"github.com/swartznet/swartznet/internal/identity"
 )
@@ -22,6 +23,11 @@ import (
 type Options struct {
 	Cfg config.Config
 	Log *slog.Logger // nil ⇒ slog.Default()
+
+	// NoIndex prevents the Bleve index from ever opening. Mirrored into
+	// Cfg.NoIndex BEFORE engine construction (SPEC §5.8 — the cascade also
+	// disables Layer-D publishing when those slices land).
+	NoIndex bool
 
 	// APIAddr is the HTTP API listen address; "" disables the API entirely
 	// (empty-path = feature-off).
@@ -48,6 +54,8 @@ type Daemon struct {
 	// Identity is the loaded node identity; nil when IdentityPath is empty
 	// or the load failed (degraded start — the node runs publisher-less).
 	Identity *identity.Identity
+	// Eng is the BitTorrent engine. Engine construction failure aborts New.
+	Eng *engine.Engine
 
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
@@ -69,6 +77,11 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
+	}
+	// Mirror NoIndex into the config BEFORE engine construction: the engine
+	// (and later the indexer + Layer-D publisher) read the config copy.
+	if opts.NoIndex {
+		opts.Cfg.NoIndex = true
 	}
 	if err := opts.Cfg.Validate(); err != nil {
 		return nil, err
@@ -101,13 +114,31 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		}
 	}
 
-	// (engine, indexer, companion, bootstrap, session restore land here,
-	// in that order, as their slices arrive.)
+	// Engine construction is one of the two fatal startup steps (the other
+	// is the indexer, next slice).
+	eng, err := engine.New(ctx, opts.Cfg, log)
+	if err != nil {
+		bgCancel()
+		return nil, err
+	}
+	d.Eng = eng
+
+	// (indexer, companion, bootstrap land here, in that order.)
+
+	// Session restore runs before the HTTP API so restored torrents are
+	// visible to the first request. Per-entry failures only warn.
+	_ = eng.RestoreSession()
 
 	if opts.APIAddr != "" {
 		apiOpts := httpapi.Options{Version: opts.Version}
 		if d.Identity != nil {
 			apiOpts.PublisherPubKey = d.Identity.PublicKeyHex
+		}
+		adapter := &controllerAdapter{eng: eng}
+		apiOpts.Adder = adapter
+		apiOpts.Control = adapter
+		if !opts.Cfg.DisableDHT {
+			apiOpts.DHTStats = eng.DHTRoutingTableSize
 		}
 		api := httpapi.NewWithOptions(opts.APIAddr, log, apiOpts)
 		if err := api.Start(); err != nil {
@@ -157,8 +188,14 @@ func (d *Daemon) Close() error {
 			_ = d.API.Stop(shutdown)
 			d.Log.Info("httpapi.stopped")
 		}
-		// (companion subscriber → companion publisher → indexer → engine
-		// teardown lands here, each with its own log line.)
+		// (companion subscriber → companion publisher → indexer teardown
+		// lands here, each with its own log line.)
+		if d.Eng != nil {
+			if err := d.Eng.Close(); err != nil {
+				d.closeErr = err
+			}
+			d.Log.Info("engine.stopped")
+		}
 		d.Log.Info("daemon.close_done")
 	})
 	return d.closeErr

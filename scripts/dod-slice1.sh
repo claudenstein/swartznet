@@ -10,10 +10,11 @@ PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "ok   - $1"; }
 fail() { FAIL=$((FAIL+1)); echo "FAIL - $1"; }
 
-# serve_bg <name> [extra args...] — starts serve, sets ADDR + SPID.
+# serve_bg <name> [extra args...] — starts an idling add daemon (dummy infohash,
+# DHT off: metadata never arrives, the node just serves its API).
 serve_bg() {
   local name="$1"; shift
-  "$BIN" serve --api-addr localhost:0 --data-dir "$WORK/$name/data" --index-dir "$WORK/$name/index" "$@" \
+  "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/$name/data" --index-dir "$WORK/$name/index" "$@" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     >"$WORK/$name.out" 2>"$WORK/$name.err" &
   SPID=$!
   ADDR=""
@@ -82,8 +83,8 @@ kill -INT $SPID; wait $SPID
 # --- --identity nonexistent → fatal, nothing minted -------------------------
 # timeout guards the exact regression this checks: if the fatal-exit contract
 # breaks, serve would block forever instead of recording a FAIL.
-timeout 15 "$BIN" serve --api-addr localhost:0 --data-dir "$WORK/li/data" --index-dir "$WORK/li/index" \
-  --identity "$WORK/nope.key" >"$WORK/li.out" 2>"$WORK/li.err"
+timeout 15 "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/li/data" --index-dir "$WORK/li/index" \
+  --identity "$WORK/nope.key" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/li.out" 2>"$WORK/li.err"
 RC=$?
 [ "$RC" = "1" ] && ok "--identity nonexistent exits 1" || fail "--identity nonexistent exit = $RC"
 grep -q "load-only" "$WORK/li.err" && ok "load-only cause on stderr" || fail "load-only cause on stderr"
@@ -92,8 +93,8 @@ grep -q "load-only" "$WORK/li.err" && ok "load-only cause on stderr" || fail "lo
 # --- --identity valid key created elsewhere → served ------------------------
 ELSE_XDG="$WORK/xdg2"
 ELSEKEY="$ELSE_XDG/swartznet/identity.key"
-XDG_DATA_HOME="$ELSE_XDG" "$BIN" serve --api-addr localhost:0 \
-  --data-dir "$WORK/mk/data" --index-dir "$WORK/mk/index" >"$WORK/mk.out" 2>/dev/null &
+XDG_DATA_HOME="$ELSE_XDG" "$BIN" add --no-dht --port 0 --api-addr localhost:0 \
+  --data-dir "$WORK/mk/data" --index-dir "$WORK/mk/index" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/mk.out" 2>/dev/null &
 MPID=$!
 for i in $(seq 1 100); do [ -f "$ELSEKEY" ] && break; sleep 0.05; done
 kill -INT $MPID; wait $MPID

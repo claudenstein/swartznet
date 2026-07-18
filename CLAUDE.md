@@ -7,10 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This tree is mid-way through a from-scratch rebuild (`SPEC.md` → `ARCHITECTURE.md` →
 `PLAN.md`, gate cleared by the author 2026-07-17). The legacy implementation lives
 untouched on the **`legacy-snapshot`** branch as a read-only behavioral reference; the
-working tree grows slice by slice per `PLAN.md`. Until Slice 11 lands there is **no GUI
-binary** — only `dist/swartznet` is rebuilt per change. Sections below describing the
-repository layout refer to the target state; packages appear as their slice lands.
-Running decisions go in `DECISIONS.md`.
+working tree grows slice by slice per `PLAN.md`. Slices 0–2 have landed: config,
+identity, daemon, httpapi, `contracts/bencode`, the anacrolix engine, and the
+`add`/`status`/`files` CLI (`add` IS the daemon — there is no `serve`). Until Slice 11
+lands there is **no GUI binary** — only `dist/swartznet` is rebuilt per change. Sections
+below describing the repository layout refer to the target state; packages appear as
+their slice lands. Per-slice binary DoD scripts live in `scripts/dod-slice*.sh`; the
+timing-sensitive multi-client tests live in `internal/wirecompat/scenarios` (excluded
+from CI, run locally via `go test -race ./...`). Running decisions go in `DECISIONS.md`.
 
 ## What this is
 

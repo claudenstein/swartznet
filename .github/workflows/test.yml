@@ -34,7 +34,7 @@ jobs:
           # research/ holds vendored upstream clones (libtorrent,
           # transmission, anacrolix/torrent, etc.) — not our code.
           # Only check our own directories.
-          gofmt_out=$(gofmt -l -s cmd/ internal/)
+          gofmt_out=$(gofmt -l -s cmd/ internal/ contracts/)
           if [ -n "$gofmt_out" ]; then
             echo "::error::gofmt would reformat the following files:"
             echo "$gofmt_out"
@@ -46,13 +46,12 @@ jobs:
 
       - name: go test -race
         run: |
-          # Exclude internal/testlab — those are integration
-          # scenarios that spin up multiple anacrolix clients on
-          # loopback with real piece-verify logic. They work in
-          # isolation but are unreliable under the compute and
-          # network constraints of a shared CI runner. Run them
+          # Exclude internal/wirecompat/scenarios — timing-sensitive
+          # multi-client transfers between real anacrolix clients on
+          # loopback, unreliable on shared CI runners. The grep is NOT
+          # end-anchored so future subpackages stay excluded too. Run
           # locally with:
-          #   go test -race ./internal/testlab/...
-          pkgs=$(go list ./... | grep -v '/internal/testlab$')
+          #   go test -race ./internal/wirecompat/...
+          pkgs=$(go list ./... | grep -Ev '/internal/wirecompat/scenarios(/|$)')
           go test -race -count=1 $pkgs
         timeout-minutes: 15
