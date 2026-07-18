@@ -39,7 +39,9 @@ func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
 	handles := e.Torrents()
 	out := make([]TorrentSnapshot, 0, len(handles))
 	for _, h := range handles {
-		out = append(out, h.snapshot())
+		s := h.snapshot()
+		s.IndexedFiles, s.IndexExtracted = e.IndexStats(s.InfoHash)
+		out = append(out, s)
 	}
 	return out
 }

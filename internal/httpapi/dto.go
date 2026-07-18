@@ -169,3 +169,72 @@ type QueueConfigRequest struct {
 type QueueConfigResponse struct {
 	MaxActiveDownloads int `json:"max_active_downloads"`
 }
+
+// SearchRequestBody is the POST /search body. Swarm/DHT fields are frozen
+// now though ignored until their layers land.
+type SearchRequestBody struct {
+	Q            string `json:"q"`
+	Limit        int    `json:"limit,omitempty"`
+	Swarm        bool   `json:"swarm,omitempty"`
+	DHT          bool   `json:"dht,omitempty"`
+	SwarmTimeout int    `json:"swarm_timeout_ms,omitempty"`
+	DHTTimeout   int    `json:"dht_timeout_ms,omitempty"`
+	SignedBy     string `json:"signed_by,omitempty"`
+	Highlight    bool   `json:"highlight,omitempty"`
+}
+
+// SearchParams is what the daemon adapter receives (httpapi owns it, so the
+// package imports no searchmux/indexer types).
+type SearchParams struct {
+	Query     string
+	Limit     int
+	SignedBy  string
+	Highlight bool
+	Swarm     bool
+	DHT       bool
+}
+
+// LocalHit is one Layer-L result. file_index is omitempty so a content hit
+// in file 0 omits it (frozen legacy quirk).
+type LocalHit struct {
+	DocType   string              `json:"doc_type"`
+	InfoHash  string              `json:"infohash"`
+	Name      string              `json:"name,omitempty"`
+	SizeBytes int64               `json:"size_bytes,omitempty"`
+	FileIndex int                 `json:"file_index,omitempty"`
+	FilePath  string              `json:"file_path,omitempty"`
+	Mime      string              `json:"mime,omitempty"`
+	Extractor string              `json:"extractor,omitempty"`
+	Score     float64             `json:"score"`
+	SignedBy  string              `json:"signed_by,omitempty"`
+	Fragments map[string][]string `json:"fragments,omitempty"`
+}
+
+// LocalBlock is the Layer-L portion of a search response.
+type LocalBlock struct {
+	Total uint64     `json:"total"`
+	Hits  []LocalHit `json:"hits"` // never null
+}
+
+// SearchResult is the adapter's return: the local block plus an error the
+// handler maps to 500 (Layer-L failure is fatal to the whole request).
+type SearchResult struct {
+	Local    LocalBlock
+	LocalErr error
+}
+
+// SearchResponse is the POST /search document.
+type SearchResponse struct {
+	Local LocalBlock `json:"local"`
+	// swarm / dht blocks land with their slices.
+}
+
+// IndexStats is the GET /index/stats document.
+type IndexStats struct {
+	DirBytes        int64   `json:"dir_bytes"`
+	DocCount        uint64  `json:"doc_count"`
+	TorrentCount    uint64  `json:"torrent_count"`
+	ContentCount    uint64  `json:"content_count"`
+	CorpusTextBytes int64   `json:"corpus_text_bytes"`
+	InflationRatio  float64 `json:"inflation_ratio"`
+}

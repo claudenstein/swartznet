@@ -17,6 +17,8 @@ import (
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
 	"github.com/swartznet/swartznet/internal/identity"
+	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/searchmux"
 )
 
 // Options configures New. It grows slice by slice.
@@ -56,6 +58,9 @@ type Daemon struct {
 	Identity *identity.Identity
 	// Eng is the BitTorrent engine. Engine construction failure aborts New.
 	Eng *engine.Engine
+	// Idx is the Layer-L index; nil when NoIndex or IndexDir is empty.
+	// Indexer open failure aborts New (the second fatal subsystem).
+	Idx *indexer.Index
 
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
@@ -123,10 +128,25 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	}
 	d.Eng = eng
 
-	// (indexer, companion, bootstrap land here, in that order.)
+	// Layer L: open the index and attach it to the engine, unless disabled.
+	// Open failure aborts New (the second fatal subsystem); NoIndex or an
+	// empty IndexDir skips cleanly (nil index, degraded API).
+	if !opts.Cfg.NoIndex && opts.Cfg.IndexDir != "" {
+		idx, err := indexer.OpenWithLogger(opts.Cfg.IndexDir, log)
+		if err != nil {
+			bgCancel()
+			_ = eng.Close()
+			return nil, fmt.Errorf("open index: %w", err)
+		}
+		d.Idx = idx
+		eng.SetIndex(idx)
+	}
+
+	// (companion, bootstrap land here, in that order.)
 
 	// Session restore runs before the HTTP API so restored torrents are
-	// visible to the first request. Per-entry failures only warn.
+	// visible to the first request (and their autoIndex finds the index).
+	// Per-entry failures only warn.
 	_ = eng.RestoreSession()
 
 	if opts.APIAddr != "" {
@@ -135,6 +155,12 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			apiOpts.PublisherPubKey = d.Identity.PublicKeyHex
 		}
 		adapter := &controllerAdapter{eng: eng}
+		if d.Idx != nil {
+			mux := &searchmux.Mux{Local: eng.Index()}
+			apiOpts.Search = adapter.search(mux)
+			apiOpts.IndexStats = adapter.indexStats
+			apiOpts.LocalDocCount = adapter.localDocCount
+		}
 		apiOpts.Adder = adapter
 		apiOpts.Control = adapter
 		if !opts.Cfg.DisableDHT {
@@ -195,6 +221,14 @@ func (d *Daemon) Close() error {
 				d.closeErr = err
 			}
 			d.Log.Info("engine.stopped")
+		}
+		// Engine.Close stopped the pipeline; now close the index the daemon
+		// opened.
+		if d.Idx != nil {
+			if err := d.Idx.Close(); err != nil {
+				d.closeErr = err
+			}
+			d.Log.Info("indexer.stopped")
 		}
 		d.Log.Info("daemon.close_done")
 	})

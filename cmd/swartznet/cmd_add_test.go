@@ -50,6 +50,7 @@ func addArgs(t *testing.T, extra ...string) []string {
 		"--index-dir", filepath.Join(tmp, "index"),
 		"--port", "0",
 		"--no-dht",
+		"--no-index", // lifecycle tests don't exercise Layer L; skip Bleve open
 	}
 	return append(args, extra...)
 }

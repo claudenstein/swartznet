@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Config is the SwartzNet node configuration shared by every frontend.
@@ -61,6 +62,10 @@ type Config struct {
 	DisablePortForwarding bool
 	// HTTPUserAgent overrides the tracker/webseed user agent when non-empty.
 	HTTPUserAgent string
+
+	// IndexRescanInterval overrides the Layer-L rescan cadence (0 = the
+	// default hour). Tests shrink it; operators need not set it.
+	IndexRescanInterval time.Duration
 
 	// Regtest and DHTInsecure are test-only knobs, refused outside test
 	// binaries unless SWARTZNET_UNSAFE=1 (the single unsafe gate).

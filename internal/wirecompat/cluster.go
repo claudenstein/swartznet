@@ -76,7 +76,34 @@ func DeterministicPayload(size int) []byte {
 // programmatic metainfo only.
 func BuildFixture(t *testing.T, dir, name string, size int) (*metainfo.MetaInfo, []byte) {
 	t.Helper()
-	payload := DeterministicPayload(size)
+	return BuildFixtureBytes(t, dir, name, DeterministicPayload(size))
+}
+
+// BuildMultiFileTorrent writes a set of named files under dir and returns a
+// metainfo for the whole directory — a multi-file torrent whose files share
+// pieces, exercising per-file reader bounding.
+func BuildMultiFileTorrent(t *testing.T, dir string, files map[string]string) *metainfo.MetaInfo {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info := metainfo.Info{PieceLength: 32 * 1024}
+	if err := info.BuildFromFilePath(dir); err != nil {
+		t.Fatal(err)
+	}
+	return &metainfo.MetaInfo{InfoBytes: bencode.MustMarshal(info)}
+}
+
+// BuildFixtureBytes writes the given bytes as a single-file torrent under dir
+// and returns its metainfo — used to seed extractable content (a .zim, a
+// .txt) rather than a random payload.
+func BuildFixtureBytes(t *testing.T, dir, name string, payload []byte) (*metainfo.MetaInfo, []byte) {
+	t.Helper()
 	path := filepath.Join(dir, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

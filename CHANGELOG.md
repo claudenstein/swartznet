@@ -14,6 +14,42 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 4 — Layer L: local full-text search (2026-07-18)
+
+- New `internal/indexer`: the Bleve (scorch) schema v3, the single-worker
+  extraction pipeline with a 60 s watchdog + panic-recover, the 2 KiB
+  chunker (paragraph→line→hard-split), `t:`/`c:` doc IDs, exact-match
+  `TermQuery` for `signed_by`/`infohash`, the `<mark>` HTML highlighter,
+  and the schema-sentinel rebuild. `IndexTorrent` honors the §7-Q37
+  sticky-SignedBy rule.
+- New `internal/indexer/extractors`: the first-claim-wins MIME registry
+  (full `extTypes` override table) with plaintext (tags-in `.html`),
+  subtitle, PDF, EPUB, DOCX, ODT, and ZIM extractors, all hardening
+  bounds preserved.
+- New `contracts/token`: frozen `Tokenize` + `MostDistinctive` (the only
+  lookup-token chooser — the §6 first-token defect is unrepresentable);
+  golden vectors.
+- New `internal/searchmux`: the local-only fan-out (native response
+  types, no merged hit type), shared by the HTTP adapter and (later) GUI.
+- Engine wiring: `SetIndex`, `autoIndex`, `ingestFileEvents`, per-torrent
+  indexing toggle, snapshot index counters, a reachable **Forget** (docs
+  deleted, files kept — §6/F36), and an **hourly rescan** that recovers
+  dropped file-complete events (rebuild-only; the legacy had none).
+- **ZIM works against the live pipeline** (the §6 defect): the engine
+  wraps its torrent reader in a size-bounded `ReadSeekerAt` shim so
+  `io.ReaderAt`-requiring extractors work — and the size bound fixes a
+  real over-read where anacrolix's `File.NewReader` read a large buffer
+  past the file into the next file's bytes, mis-indexing every earlier
+  file in a multi-file torrent.
+- HTTP: `POST /search` (Layer-L block; nil index = 200-empty, not 503),
+  `GET /index/stats`, `POST /torrents/{ih}/indexing`, `DELETE
+  /torrents/{ih}?forget=1`, `/status local.doc_count`. CLI: `swartznet
+  search` (direct-Bleve or daemon-routed) and `swartznet index`
+  (stats / per-torrent toggle).
+- `scripts/dod-slice4.sh`: 18 checks — PDF+ZIM+plaintext indexed through
+  the live pipeline, `<mark>` highlights, exact-TermQuery `--signed-by`,
+  Forget, and the NoIndex degraded surface.
+
 ### Slice 3 — create + infohash-preserving signing (2026-07-18)
 
 - New `contracts/sign`: the frozen 34-byte signing payload

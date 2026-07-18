@@ -23,7 +23,7 @@ grep -q 'unknown command "wat"' "$WORK/unk.err" && ok "unknown command message" 
 "$BIN" >/dev/null 2>&1; [ $? -eq 2 ] && ok "no-args exit 2" || fail "no-args exit 2"
 
 # --- serve lifecycle --------------------------------------------------------
-"$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/data" --index-dir "$WORK/index" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+"$BIN" add --no-dht --no-index --port 0 --api-addr localhost:0 --data-dir "$WORK/data" --index-dir "$WORK/index" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/serve.out" 2>"$WORK/serve.err" &
 SPID=$!
 ADDR=""
@@ -99,23 +99,23 @@ EOF
 grep -q "start it with: swartznet add <magnet>" "$WORK/dead.err" && ok "dead-daemon hint" || fail "dead-daemon hint"
 
 # SWARTZNET_LOG=debug changes verbosity
-SWARTZNET_LOG=debug "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/d2" --index-dir "$WORK/i2" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+SWARTZNET_LOG=debug "$BIN" add --no-dht --no-index --port 0 --api-addr localhost:0 --data-dir "$WORK/d2" --index-dir "$WORK/i2" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/dbg.out" 2>"$WORK/dbg.err" &
 DPID=$!; sleep 0.7; kill -INT $DPID; wait $DPID
 grep -q "level=INFO" "$WORK/dbg.err" && ok "SWARTZNET_LOG=debug still logs info" || fail "debug run has info lines"
 # default run must not show DEBUG; debug run is allowed to (none exist yet at slice 0) — assert level plumbed via a warn check instead
-SWARTZNET_LOG=bogus "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/d3" --index-dir "$WORK/i3" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+SWARTZNET_LOG=bogus "$BIN" add --no-dht --no-index --port 0 --api-addr localhost:0 --data-dir "$WORK/d3" --index-dir "$WORK/i3" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/bogus.out" 2>"$WORK/bogus.err" &
 BPID=$!; sleep 0.7; kill -INT $BPID; wait $BPID
 grep -q "unrecognized SWARTZNET_LOG value" "$WORK/bogus.err" && ok "bogus SWARTZNET_LOG warns" || fail "bogus SWARTZNET_LOG warns"
 
 # SIGTERM also exits 130
-"$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/d4" --index-dir "$WORK/i4" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/t.out" 2>/dev/null &
+"$BIN" add --no-dht --no-index --port 0 --api-addr localhost:0 --data-dir "$WORK/d4" --index-dir "$WORK/i4" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/t.out" 2>/dev/null &
 TPID=$!; sleep 0.7; kill -TERM $TPID; wait $TPID; RC=$?
 [ "$RC" = "130" ] && ok "SIGTERM exit 130" || fail "SIGTERM exit 130 (got $RC)"
 
 # non-loopback bind: binds + warns UNAUTHENTICATED exactly once
-"$BIN" add --no-dht --port 0 --api-addr 0.0.0.0:0 --data-dir "$WORK/d5" --index-dir "$WORK/i5" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+"$BIN" add --no-dht --no-index --port 0 --api-addr 0.0.0.0:0 --data-dir "$WORK/d5" --index-dir "$WORK/i5" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   >"$WORK/nl.out" 2>"$WORK/nl.err" &
 NPID=$!; sleep 0.7
 N=$(grep -c "API is UNAUTHENTICATED" "$WORK/nl.err")
@@ -124,7 +124,7 @@ grep -q "HTTP API listening on " "$WORK/nl.out" && ok "non-loopback bind still b
 kill -INT $NPID; wait $NPID
 
 # --api-addr "" disables the API but daemon runs
-"$BIN" add --no-dht --port 0 --api-addr "" --data-dir "$WORK/d6" --index-dir "$WORK/i6" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/off.out" 2>"$WORK/off.err" &
+"$BIN" add --no-dht --no-index --port 0 --api-addr "" --data-dir "$WORK/d6" --index-dir "$WORK/i6" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/off.out" 2>"$WORK/off.err" &
 OPID=$!; sleep 0.7
 kill -0 $OPID 2>/dev/null && ok "api-less add stays up" || fail "api-less add stays up"
 grep -q "httpapi.listening" "$WORK/off.err" && fail "api-less add must not listen" || ok "api-less add has no listener log"

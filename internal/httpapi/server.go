@@ -42,6 +42,17 @@ type Options struct {
 	// is disabled and the /status dht block is omitted entirely — which is
 	// deliberately distinct from a present block with zero nodes.
 	DHTStats func() (good, total int)
+	// Search runs a search across the wired layers. Nil ⇒ POST /search
+	// still answers 200 with an empty local block (Layer L simply off) —
+	// the "always run Layer L when wired" contract deliberately overrides
+	// the nil⇒503 law for this endpoint. /status local.indexed follows it.
+	Search func(SearchParams) SearchResult
+	// IndexStats reports Bleve index statistics. Nil ⇒ GET /index/stats
+	// answers 503 (the index IS the endpoint's whole purpose).
+	IndexStats func() (IndexStats, error)
+	// LocalDocCount reports the index document count for /status; nil ⇒
+	// local.indexed=false.
+	LocalDocCount func() (uint64, error)
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -156,6 +167,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	s.torrentRoutes(mux)
+	s.searchRoutes(mux)
 
 	if assetsFS, err := fs.Sub(web.Assets(), "."); err == nil {
 		mux.Handle("GET /static/", http.FileServer(http.FS(assetsFS)))
@@ -175,6 +187,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	var out StatusResponse
 	if s.opts.PublisherPubKey != nil {
 		out.Publisher.PubKey = s.opts.PublisherPubKey()
+	}
+	if s.opts.LocalDocCount != nil {
+		out.Local.Indexed = true
+		if n, err := s.opts.LocalDocCount(); err == nil {
+			out.Local.DocCount = n
+		}
 	}
 	if s.opts.DHTStats != nil {
 		good, total := s.opts.DHTStats()

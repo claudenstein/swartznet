@@ -99,6 +99,12 @@ func (h *Handle) isIndexing() bool {
 	return h.indexing
 }
 
+func (h *Handle) setIndexing(v bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.indexing = v
+}
+
 func (h *Handle) getQueueOrder() int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -133,26 +139,43 @@ func (h *Handle) FileEvents() <-chan FileCompleteEvent { return h.SubscribeFileE
 
 // registerLocked registers t (caller holds e.mu). Duplicate adds of the same
 // infohash return the existing handle with existed=true — callers skip their
-// side effects. paused is applied before any goroutine spawns, so a
-// restored-paused torrent can never race into Normal priority.
+// side effects. All persisted state (paused, indexing, signedBy, queueOrder)
+// is applied to the handle BEFORE any goroutine spawns, so a restored torrent
+// can never race its index/download goroutines with the restore overrides —
+// pass restore for a session restore, nil for a fresh add.
 func (e *Engine) registerLocked(t *torrent.Torrent, paused bool) (h *Handle, existed bool) {
+	return e.registerLockedRestore(t, paused, nil)
+}
+
+func (e *Engine) registerLockedRestore(t *torrent.Torrent, paused bool, restore *sessionEntry) (h *Handle, existed bool) {
 	if h, ok := e.handles[t.InfoHash()]; ok {
 		return h, true
 	}
-	e.nextQueueOrder++
 	h = &Handle{
-		T:          t,
-		eng:        e,
-		paused:     paused,
-		indexing:   true,
-		queueOrder: e.nextQueueOrder,
-		removed:    make(chan struct{}),
-		pieceSub:   startPieceSubscription(t, e.log),
-		fileSub:    startFileTracker(t, e.bgCtx, e.log),
+		T:        t,
+		eng:      e,
+		paused:   paused,
+		indexing: true,
+		removed:  make(chan struct{}),
+		pieceSub: startPieceSubscription(t, e.log),
+		fileSub:  startFileTracker(t, e.bgCtx, e.log),
+	}
+	if restore != nil {
+		h.indexing = restore.Indexing
+		h.signedBy = restore.SignedBy
+		h.queueOrder = restore.QueueOrder
+		if e.nextQueueOrder < restore.QueueOrder {
+			e.nextQueueOrder = restore.QueueOrder
+		}
+	} else {
+		e.nextQueueOrder++
+		h.queueOrder = e.nextQueueOrder
 	}
 	e.handles[t.InfoHash()] = h
 	go e.autoDownload(h)
 	go e.watchCompletion(h)
+	go e.autoIndex(h)
+	go e.ingestFileEvents(h)
 	return h, false
 }
 

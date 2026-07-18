@@ -47,8 +47,12 @@ func (f *fakeControl) ResumeTorrent(ih string) error {
 	f.actions = append(f.actions, "resume:"+ih)
 	return nil
 }
-func (f *fakeControl) RemoveTorrent(ih string) error {
-	f.actions = append(f.actions, "remove:"+ih)
+func (f *fakeControl) RemoveTorrent(ih string, forget bool) error {
+	f.actions = append(f.actions, fmt.Sprintf("remove:%s:%v", ih, forget))
+	return nil
+}
+func (f *fakeControl) SetTorrentIndexing(ih string, enabled bool) error {
+	f.actions = append(f.actions, fmt.Sprintf("indexing:%s:%v", ih, enabled))
 	return nil
 }
 func (f *fakeControl) UploadLimitBytesPerSec() int64       { return f.upBps }
@@ -182,8 +186,27 @@ func TestTorrentActions(t *testing.T) {
 	if resp.StatusCode != 200 || !strings.Contains(body, `"action":"remove"`) {
 		t.Fatalf("remove = %d %s", resp.StatusCode, body)
 	}
-	want := []string{"pause:" + ih, "resume:" + ih, "remove:" + ih}
+	want := []string{"pause:" + ih, "resume:" + ih, "remove:" + ih + ":false"}
 	if len(ctl.actions) != 3 || ctl.actions[0] != want[0] || ctl.actions[1] != want[1] || ctl.actions[2] != want[2] {
+		t.Fatalf("actions = %v", ctl.actions)
+	}
+	// ?forget=1 threads the forget flag through.
+	ctl.actions = nil
+	doJSON(t, "DELETE", "http://"+addr+"/torrents/"+ih+"?forget=1", "")
+	if len(ctl.actions) != 1 || ctl.actions[0] != "remove:"+ih+":true" {
+		t.Fatalf("forget actions = %v", ctl.actions)
+	}
+}
+
+func TestSetIndexingEndpoint(t *testing.T) {
+	ctl := &fakeControl{}
+	addr := startControlServer(t, ctl)
+	ih := strings.Repeat("ab", 20)
+	resp, body := doJSON(t, "POST", "http://"+addr+"/torrents/"+ih+"/indexing", `{"enabled":false}`)
+	if resp.StatusCode != 200 || !strings.Contains(body, `"enabled":false`) {
+		t.Fatalf("indexing = %d %s", resp.StatusCode, body)
+	}
+	if len(ctl.actions) != 1 || ctl.actions[0] != "indexing:"+ih+":false" {
 		t.Fatalf("actions = %v", ctl.actions)
 	}
 }

@@ -52,6 +52,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdStatus(args[1:], stdout, stderr)
 	case "files":
 		return cmdFiles(args[1:], stdout, stderr)
+	case "search":
+		return cmdSearch(args[1:], stdout, stderr)
+	case "index":
+		return cmdIndex(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -78,6 +82,9 @@ Commands:
   files <infohash> [<idx> <prio>]
                        List a torrent's files, or set one file's priority
                        (none/normal/high).
+  search <query...>    Full-text search the local index (Layer L). --signed-by,
+                       --swarm, --dht route through the daemon.
+  index [<ih> on|off]  Show index stats, or toggle a torrent's indexing.
   version              Print the version.
   help                 Show this help.
 

@@ -74,7 +74,22 @@ func (a *controllerAdapter) SetFilePriority(ihHex string, idx int, priority stri
 
 func (a *controllerAdapter) PauseTorrent(ihHex string) error  { return a.eng.PauseTorrent(ihHex) }
 func (a *controllerAdapter) ResumeTorrent(ihHex string) error { return a.eng.ResumeTorrent(ihHex) }
-func (a *controllerAdapter) RemoveTorrent(ihHex string) error { return a.eng.RemoveTorrent(ihHex) }
+func (a *controllerAdapter) RemoveTorrent(ihHex string, forget bool) error {
+	if err := a.eng.RemoveTorrent(ihHex); err != nil {
+		return err
+	}
+	if forget {
+		// Deleting index docs after the engine drop keeps deletion off the
+		// hot engine path; a nil index makes ForgetIndex a no-op, so Forget
+		// still succeeds when Layer L is disabled.
+		a.eng.ForgetIndex(ihHex)
+	}
+	return nil
+}
+
+func (a *controllerAdapter) SetTorrentIndexing(ihHex string, enabled bool) error {
+	return a.eng.SetTorrentIndexing(ihHex, enabled)
+}
 
 func (a *controllerAdapter) UploadLimitBytesPerSec() int64   { return a.eng.UploadLimitBytesPerSec() }
 func (a *controllerAdapter) DownloadLimitBytesPerSec() int64 { return a.eng.DownloadLimitBytesPerSec() }

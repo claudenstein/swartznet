@@ -21,6 +21,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/internal/indexer"
 )
 
 // unlimitedBurst keeps the rate limiters' burst positive even in unlimited
@@ -57,7 +58,23 @@ type Engine struct {
 	maxActiveDownloads int // 0 = unlimited; runtime-only, resets on restart
 
 	sess *session
+
+	// idxMu guards the Layer-L index + pipeline attachment (SetIndex may
+	// race the per-torrent index goroutines).
+	idxMu    sync.Mutex
+	idx      *indexer.Index
+	pipeline *indexer.Pipeline
+
+	// rescanInterval is this engine's hourly-rescan cadence, an instance
+	// field (not a shared global) so tests can shrink it without racing
+	// other engines' rescan goroutines. Each tick re-submits completed
+	// files whose file-complete event was dropped by the fan-out
+	// (SPEC §5.5); deterministic doc IDs make the re-submit idempotent.
+	rescanInterval time.Duration
 }
+
+// defaultRescanInterval is the production hourly cadence.
+const defaultRescanInterval = time.Hour
 
 // New constructs the engine. cfg must already be Validate()d by the caller
 // (the daemon); Validate is re-run here as a safety net since it is
@@ -132,15 +149,19 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	e := &Engine{
-		cfg:       cfg,
-		log:       log,
-		client:    cl,
-		ulLimiter: ul,
-		dlLimiter: dl,
-		bgCtx:     bgCtx,
-		bgCancel:  bgCancel,
-		handles:   make(map[metainfo.Hash]*Handle),
-		closeDone: make(chan struct{}),
+		cfg:            cfg,
+		log:            log,
+		client:         cl,
+		ulLimiter:      ul,
+		dlLimiter:      dl,
+		bgCtx:          bgCtx,
+		bgCancel:       bgCancel,
+		handles:        make(map[metainfo.Hash]*Handle),
+		closeDone:      make(chan struct{}),
+		rescanInterval: cfg.IndexRescanInterval,
+	}
+	if e.rescanInterval <= 0 {
+		e.rescanInterval = defaultRescanInterval
 	}
 
 	log.Info("engine.started",
@@ -170,6 +191,8 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		log.Info("engine.session_loaded", "path", sess.path, "entries", n)
 	}
 
+	go e.runIndexRescan()
+
 	return e, nil
 }
 
@@ -194,8 +217,15 @@ func (e *Engine) Close() error {
 	}
 	e.mu.Unlock()
 
-	// (pipeline / publisher / bloom+reputation teardown land here with
-	// their slices, in that order.)
+	// Stop the extraction pipeline before storage teardown. The index
+	// itself is closed by the daemon (it owns the handle it opened).
+	e.idxMu.Lock()
+	if e.pipeline != nil {
+		e.pipeline.Stop()
+		e.pipeline = nil
+	}
+	e.idxMu.Unlock()
+	// (publisher / bloom+reputation teardown land here with their slices.)
 	for _, h := range handles {
 		h.pieceSub.Close()
 		h.fileSub.Close()
@@ -336,6 +366,9 @@ func (e *Engine) RemoveTorrent(ihHex string) error {
 	e.mu.Lock()
 	delete(e.handles, h.T.InfoHash())
 	e.mu.Unlock()
+	if _, pipeline := e.index(); pipeline != nil {
+		pipeline.ForgetSubmitted(h.InfoHashHex())
+	}
 	e.sess.remove(h.InfoHashHex())
 	e.log.Info("engine.torrent_removed", "info_hash", h.InfoHashHex())
 	go e.promoteQueued()

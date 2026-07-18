@@ -29,6 +29,9 @@ func testConfig(t *testing.T) config.Config {
 	cfg := config.Default()
 	cfg.ListenPort = 0
 	cfg.DisableDHT = true
+	// Most daemon tests don't exercise Layer L; opening Bleve per test is
+	// slow. The dedicated indexer-wiring test re-enables it.
+	cfg.NoIndex = true
 	return cfg
 }
 
@@ -148,6 +151,106 @@ func TestNilStderrDoesNotPanic(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
+}
+
+// TestIndexerWiring exercises the Layer-L slot: a daemon with indexing on
+// opens the index, /status reports it, /index/stats answers, teardown emits
+// indexer.stopped in order, and a --no-index daemon leaves search 503.
+func TestIndexerWiring(t *testing.T) {
+	ev := &eventLog{}
+	cfg := testConfig(t)
+	cfg.NoIndex = false // this test wants Layer L on
+	d, err := New(context.Background(), Options{
+		Cfg:     cfg,
+		Log:     slog.New(ev),
+		APIAddr: "localhost:0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Idx == nil {
+		t.Fatal("index not opened")
+	}
+	addr := d.API.Addr()
+
+	resp, err := http.Get("http://" + addr + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st struct {
+		Local struct {
+			Indexed bool `json:"indexed"`
+		} `json:"local"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&st)
+	resp.Body.Close()
+	if !st.Local.Indexed {
+		t.Fatal("/status local.indexed=false with index wired")
+	}
+
+	resp, err = http.Get("http://" + addr + "/index/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statsCode := resp.StatusCode
+	resp.Body.Close()
+	if statsCode != 200 {
+		t.Fatalf("/index/stats = %d, want 200", statsCode)
+	}
+
+	// Search with no docs: 200, empty local block.
+	sresp, err := http.Post("http://"+addr+"/search", "application/json", strings.NewReader(`{"q":"anything"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sbody, _ := io.ReadAll(sresp.Body)
+	sresp.Body.Close()
+	if sresp.StatusCode != 200 || !strings.Contains(string(sbody), `"hits":[]`) {
+		t.Fatalf("/search = %d %s", sresp.StatusCode, sbody)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := ev.list()
+	engIdx, idxIdx := -1, -1
+	for i, e := range events {
+		switch e {
+		case "log:engine.stopped":
+			engIdx = i
+		case "log:indexer.stopped":
+			idxIdx = i
+		}
+	}
+	if engIdx < 0 || idxIdx < 0 || engIdx > idxIdx {
+		t.Fatalf("teardown order: engine.stopped=%d indexer.stopped=%d", engIdx, idxIdx)
+	}
+}
+
+func TestNoIndexStats503ButSearch200(t *testing.T) {
+	d, err := New(context.Background(), Options{
+		Cfg:     testConfig(t), // NoIndex true
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		APIAddr: "localhost:0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.Idx != nil {
+		t.Fatal("NoIndex must not open an index")
+	}
+	// /index/stats is 503 (index IS the endpoint); /search is 200-empty.
+	resp, _ := http.Get("http://" + d.API.Addr() + "/index/stats")
+	if resp.StatusCode != 503 {
+		t.Fatalf("/index/stats = %d, want 503", resp.StatusCode)
+	}
+	resp.Body.Close()
+	sresp, _ := http.Post("http://"+d.API.Addr()+"/search", "application/json", strings.NewReader(`{"q":"x"}`))
+	if sresp.StatusCode != 200 {
+		t.Fatalf("/search = %d, want 200 (Layer L off, not 503)", sresp.StatusCode)
+	}
+	sresp.Body.Close()
 }
 
 // TestStatusReportsPubkey is THE §6 defect-absence test: a real daemon (not

@@ -97,18 +97,12 @@ func (e *Engine) restoreEntry(ent sessionEntry) error {
 		return fmt.Errorf("engine: nil torrent after add")
 	}
 
+	// Persisted indexing/signedBy/queueOrder are applied inside
+	// registerLockedRestore BEFORE the index/download goroutines spawn, so a
+	// cached-metainfo restore (GotInfo already closed) can't race autoIndex
+	// into indexing an OFF torrent or writing a blank signed_by.
 	e.mu.Lock()
-	h, existed := e.registerLocked(t, ent.Paused)
-	if !existed {
-		h.mu.Lock()
-		h.signedBy = ent.SignedBy
-		h.indexing = ent.Indexing
-		h.queueOrder = ent.QueueOrder
-		h.mu.Unlock()
-		if e.nextQueueOrder < ent.QueueOrder {
-			e.nextQueueOrder = ent.QueueOrder
-		}
-	}
+	h, existed := e.registerLockedRestore(t, ent.Paused, &ent)
 	e.mu.Unlock()
 	if existed {
 		return nil

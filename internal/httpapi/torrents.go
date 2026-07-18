@@ -23,7 +23,10 @@ type TorrentController interface {
 	SetFilePriority(infohash string, index int, priority string) error
 	PauseTorrent(infohash string) error
 	ResumeTorrent(infohash string) error
-	RemoveTorrent(infohash string) error
+	// RemoveTorrent drops the torrent (files kept). When forget is true it
+	// also deletes the torrent's index documents — the reachable "Forget".
+	RemoveTorrent(infohash string, forget bool) error
+	SetTorrentIndexing(infohash string, enabled bool) error
 	UploadLimitBytesPerSec() int64
 	DownloadLimitBytesPerSec() int64
 	SetUploadLimitBytesPerSec(bps int64)
@@ -39,7 +42,8 @@ func (s *Server) torrentRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /torrents/{infohash}/files/{index}/priority", s.handleSetFilePriority)
 	mux.HandleFunc("POST /torrents/{infohash}/pause", s.torrentAction("pause"))
 	mux.HandleFunc("POST /torrents/{infohash}/resume", s.torrentAction("resume"))
-	mux.HandleFunc("DELETE /torrents/{infohash}", s.torrentAction("remove"))
+	mux.HandleFunc("DELETE /torrents/{infohash}", s.handleRemove)
+	mux.HandleFunc("POST /torrents/{infohash}/indexing", s.handleSetIndexing)
 	mux.HandleFunc("GET /config/rate-limit", s.handleGetRateLimit)
 	mux.HandleFunc("POST /config/rate-limit", s.handleSetRateLimit)
 	mux.HandleFunc("PATCH /config/rate-limit", s.handleSetRateLimit)
@@ -163,8 +167,6 @@ func (s *Server) torrentAction(action string) http.HandlerFunc {
 			err = s.opts.Control.PauseTorrent(ih)
 		case "resume":
 			err = s.opts.Control.ResumeTorrent(ih)
-		case "remove":
-			err = s.opts.Control.RemoveTorrent(ih)
 		}
 		if err != nil {
 			http.Error(w, fmt.Sprintf("%s: %v", action, err), http.StatusBadRequest)
@@ -173,6 +175,50 @@ func (s *Server) torrentAction(action string) http.HandlerFunc {
 		s.log.Info("httpapi.torrent_control", "action", action, "infohash", ih)
 		writeJSON(w, map[string]any{"ok": true, "action": action, "infohash": ih})
 	}
+}
+
+// handleRemove drops a torrent, optionally forgetting its index docs
+// (?forget=1). Files are always kept on disk.
+func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ih, ok := pathInfohash(w, r)
+	if !ok {
+		return
+	}
+	forget := r.URL.Query().Get("forget") == "1"
+	if err := s.opts.Control.RemoveTorrent(ih, forget); err != nil {
+		http.Error(w, "remove: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.log.Info("httpapi.torrent_control", "action", "remove", "infohash", ih, "forget", forget)
+	writeJSON(w, map[string]any{"ok": true, "action": "remove", "infohash": ih, "forgot": forget})
+}
+
+// handleSetIndexing toggles per-torrent indexing.
+func (s *Server) handleSetIndexing(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Control == nil {
+		http.Error(w, "torrent controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ih, ok := pathInfohash(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.opts.Control.SetTorrentIndexing(ih, req.Enabled); err != nil {
+		http.Error(w, "indexing: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "infohash": ih, "enabled": req.Enabled})
 }
 
 func (s *Server) handleGetRateLimit(w http.ResponseWriter, _ *http.Request) {

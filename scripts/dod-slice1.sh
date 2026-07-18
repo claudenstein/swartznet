@@ -14,7 +14,7 @@ fail() { FAIL=$((FAIL+1)); echo "FAIL - $1"; }
 # DHT off: metadata never arrives, the node just serves its API).
 serve_bg() {
   local name="$1"; shift
-  "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/$name/data" --index-dir "$WORK/$name/index" "$@" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  "$BIN" add --no-dht --no-index --port 0 --api-addr localhost:0 --data-dir "$WORK/$name/data" --index-dir "$WORK/$name/index" "$@" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     >"$WORK/$name.out" 2>"$WORK/$name.err" &
   SPID=$!
   ADDR=""
@@ -83,7 +83,7 @@ kill -INT $SPID; wait $SPID
 # --- --identity nonexistent → fatal, nothing minted -------------------------
 # timeout guards the exact regression this checks: if the fatal-exit contract
 # breaks, serve would block forever instead of recording a FAIL.
-timeout 15 "$BIN" add --no-dht --port 0 --api-addr localhost:0 --data-dir "$WORK/li/data" --index-dir "$WORK/li/index" \
+timeout 15 "$BIN" add --no-dht --no-index --port 0 --api-addr localhost:0 --data-dir "$WORK/li/data" --index-dir "$WORK/li/index" \
   --identity "$WORK/nope.key" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/li.out" 2>"$WORK/li.err"
 RC=$?
 [ "$RC" = "1" ] && ok "--identity nonexistent exits 1" || fail "--identity nonexistent exit = $RC"
@@ -93,7 +93,7 @@ grep -q "load-only" "$WORK/li.err" && ok "load-only cause on stderr" || fail "lo
 # --- --identity valid key created elsewhere → served ------------------------
 ELSE_XDG="$WORK/xdg2"
 ELSEKEY="$ELSE_XDG/swartznet/identity.key"
-XDG_DATA_HOME="$ELSE_XDG" "$BIN" add --no-dht --port 0 --api-addr localhost:0 \
+XDG_DATA_HOME="$ELSE_XDG" "$BIN" add --no-dht --no-index --port 0 --api-addr localhost:0 \
   --data-dir "$WORK/mk/data" --index-dir "$WORK/mk/index" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$WORK/mk.out" 2>/dev/null &
 MPID=$!
 for i in $(seq 1 100); do [ -f "$ELSEKEY" ] && break; sleep 0.05; done
