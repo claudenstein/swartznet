@@ -54,12 +54,9 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 		p.handlePeerAnnounce(peerAddr, pa)
 	case ltepwire.MsgTypeSyncBegin, ltepwire.MsgTypeSyncSymbols, ltepwire.MsgTypeSyncNeed,
 		ltepwire.MsgTypeSyncRecords, ltepwire.MsgTypeSyncEnd:
-		// Slice 7 does NOT advertise BitSetReconciliation (RuntimeFacts.
-		// Reconciliation is false until the RIBLT sync bodies land in Slice 8),
-		// so a well-behaved peer never sends a sync frame. One that does is
-		// misbehaving: charge + reject with the echoed txid.
-		p.ban.Add(peerAddr, ScoreUnexpectedMessage)
-		p.sendReject(reply, ltepwire.PeekTxID(payload), ltepwire.RejectUnsupportedScope, "reconciliation_unsupported")
+		// RIBLT Aggregate set-reconciliation (Slice 8). Gated on the peer
+		// having advertised BitSetReconciliation.
+		p.handleSyncFrame(peerAddr, payload, reply)
 	default:
 		p.ban.Add(peerAddr, ScoreUnexpectedMessage)
 	}

@@ -29,17 +29,14 @@ func (e *Engine) SetSharing(s ltepwire.Sharing) {
 
 // RuntimeFacts builds the daemon-owned half of the capability set from LIVE
 // node state each call (never cached), so toggles like --no-index are honored
-// immediately. Build-feature bits are advertised only when Slice 7 actually
-// honors them: Reconciliation (bit 9) is FALSE until the RIBLT sync bodies land
-// in Slice 8 — advertising it now would invite sync frames we answer with a
-// misbehavior-charging reject, arming a ban trap for a future Slice-8 peer
-// (DECISIONS S7, the S6-5 "re-gate per slice" promise). CompanionPub/Sub and
-// SnippetHighlight stay advertised (snippet highlighting already works; the
-// companion bits are re-gated when Slice 10 lands).
+// immediately. Reconciliation (bit 9) is advertised now that the RIBLT sync
+// bodies land in Slice 8 — the node both answers and initiates set-recon.
+// CompanionPub/Sub stay advertised as build-feature bits (re-gated when the
+// companion subsystem lands in Slice 10); SnippetHighlight already works.
 func (e *Engine) RuntimeFacts() ltepwire.RuntimeFacts {
 	return ltepwire.RuntimeFacts{
 		Publishing:       e.publishingActive(),
-		Reconciliation:   false,
+		Reconciliation:   true,
 		Regtest:          e.cfg.Regtest,
 		CompanionPub:     true,
 		CompanionSub:     true,

@@ -72,6 +72,11 @@ func (e *Engine) autoIndex(h *Handle) {
 		e.log.Warn("indexer.autoindex.timeout", "info_hash", h.InfoHashHex())
 		return
 	}
+	// Mint Aggregate records from the torrent name-keywords BEFORE the Layer-L
+	// gate: a signing node contributes to reconciliation even with --no-index
+	// (gated on the signer + cache, not on per-torrent indexing).
+	e.mintAggregateRecords(h)
+
 	idx, _ := e.index()
 	if idx == nil || !h.isIndexing() {
 		return

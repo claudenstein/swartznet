@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -110,6 +111,14 @@ type Engine struct {
 	// tracks addr→conn for the token-gated sender.
 	swarm      *swarmsearch.Protocol
 	swarmPeers *peerTracker
+
+	// recCache holds signed keyword records for Aggregate reconciliation
+	// (Slice 8); the signer mints one per torrent name-keyword on GotInfo.
+	recCache  *swarmsearch.RecordCache
+	recMu     sync.Mutex
+	signer    ed25519.PrivateKey
+	signerPub [32]byte
+	hasSigner bool
 }
 
 // defaultRescanInterval is the production hourly cadence.
@@ -192,6 +201,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	snSearchSem := make(chan struct{}, maxInboundSnSearchWorkers)
 	snReplySem := make(chan struct{}, maxInboundSnSearchWorkers)
 	swarm.SetTransport(&swarmSender{peers: peers})
+	// Aggregate record substrate (Slice 8): the cache is both the source (for
+	// sync responders) and the sink (for records absorbed from peers).
+	recCache := swarmsearch.NewRecordCache()
+	recCache.SetMaxRecords(DefaultRecordCacheMax)
+	swarm.SetRecordSource(recCache)
+	swarm.SetRecordSink(recCache)
 
 	// PeerConnAdded: advertise sn_search in OUR outbound m dict + record the
 	// conn. A vanilla peer just sees an ignorable name it does not list back.
@@ -266,6 +281,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		},
 		swarm:      swarm,
 		swarmPeers: peers,
+		recCache:   recCache,
 	}
 	// Feed the single mask producer to the outbound peer_announce + inbound
 	// scope decisions (Slice 6's Announced, live).
@@ -310,6 +326,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	go e.runIndexRescan()
 	e.ckptWG.Add(1)
 	go e.runReputationCheckpoint()
+	go e.runRecordPrune()
 
 	return e, nil
 }

@@ -14,6 +14,42 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 8 — RIBLT sync + Aggregate record substrate (2026-07-19)
+
+Two peers now reconcile their signed keyword→infohash record sets over
+multi-batch Rateless-IBLT set reconciliation (the `sn_search` msg_types 4–8),
+so differences larger than 100 symbols converge.
+
+- New `contracts/riblt`: the frozen RIBLT math — FNV-1a-64 element key (over all
+  32 bytes), the SplitMix64 12-step membership cycle, the streaming encoder, and
+  the peel decoder with a self-consistency gate. Golden-vector pinned.
+- New `contracts/record`: the signed keyword record. Its RIBLT `ElementID`
+  (`SHA-256(pk‖kw‖ih‖LE64(t))`) **excludes** the proof-of-work and signature, so
+  two valid signings of one semantic record dedupe; the signature message
+  **includes** the PoW nonce. Golden-vector pinned.
+- Extended `contracts/ltepwire`: the `sync_begin`/`symbols`/`need`/`records`/
+  `end` codec with its per-message caps and `element_size == 32` / `kw ≤ 64`
+  invariants. Golden-vector pinned.
+- New `internal/swarmsearch` reconciliation: a FIFO-capped, filter-matched
+  `RecordCache` (source + sink), the `SyncSession` state machine (budgets
+  negotiate downward, byte accounting on the semantic record size, a
+  symbol-budget overrun ends the session `limit_exceeded` penalty-free while
+  other violations `aborted` + charge), the multi-batch responder pump, and the
+  `StartSync`/`SendSyncNeed`/`CloseSync`/`WaitSyncConverged` initiator. It
+  tolerates the reordering + timing of the async peer-wire dispatch (an
+  out-of-order symbol batch is buffered; the initiator finalizes only past a
+  symbol floor and exactly once).
+- Engine: mints one signed record per torrent name-keyword on metadata arrival
+  (even with `--no-index`, so a leech-only node still reconciles), wires the
+  record cache with an age-prune loop, and takes the node identity via
+  `SetSigner`. The `sn_search` reconciliation capability (services bit 9) is
+  advertised again now that the sync bodies exist.
+- `GET /aggregate` gains `cache_size` (records held) and `reconciliation`.
+- `scripts/dod-slice8.sh`: 11 checks — the frozen golden vectors, a 250-record
+  symmetric-difference converging to the union multi-batch, the budget /
+  index-desync / capability guards, record minting per name-keyword, and the
+  live `/aggregate` readout.
+
 ### Slice 7 — Layer S: `sn_search` peer-wire extension (2026-07-19)
 
 The first wire slice. Two SwartzNet peers negotiate `sn_search` in the LTEP

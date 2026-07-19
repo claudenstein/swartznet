@@ -201,5 +201,7 @@ func (a *controllerAdapter) aggregate() httpapi.AggregateStatusResponse {
 			Pending:  a.adm.PendingCount(),
 		}
 	}
+	resp.CacheSize = a.eng.RecordCache().Len()
+	resp.Reconciliation = a.eng.RuntimeFacts().Reconciliation
 	return resp
 }

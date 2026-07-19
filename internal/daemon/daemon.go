@@ -160,6 +160,14 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 
 	// (companion, bootstrap land here, in that order.)
 
+	// The signer mints Aggregate records on GotInfo; wire it BEFORE restore so
+	// restored torrents mint too. The daemon owns identity (not engine.New).
+	if d.Identity != nil {
+		var pub [32]byte
+		copy(pub[:], d.Identity.PublicKey)
+		eng.SetSigner(d.Identity.PrivateKey, pub)
+	}
+
 	// Session restore runs before the HTTP API so restored torrents are
 	// visible to the first request (and their autoIndex finds the index).
 	// Per-entry failures only warn.

@@ -56,6 +56,13 @@ type Protocol struct {
 	idxSink IndexerSink
 	endSink EndorsementSink
 
+	// Sync (Slice 8): record substrate + reconciliation session registry.
+	recordSource RecordSource
+	recordSink   RecordSink
+	pubObserver  PublisherObserver
+	syncMu       sync.Mutex
+	syncSessions map[string]map[uint32]*SyncSession // (peerAddr, txid)
+
 	limiter *rateLimiter
 	ban     *banman
 
@@ -76,13 +83,14 @@ func New(log *slog.Logger) *Protocol {
 		log = slog.Default()
 	}
 	p := &Protocol{
-		log:        log,
-		peers:      make(map[string]*PeerState),
-		pending:    make(map[uint32]*pendingQuery),
-		limiter:    newRateLimiter(DefaultRateLimit()),
-		ban:        newBanman(),
-		announceCh: make(chan announceReq, announceQueueDepth),
-		done:       make(chan struct{}),
+		log:          log,
+		peers:        make(map[string]*PeerState),
+		pending:      make(map[uint32]*pendingQuery),
+		limiter:      newRateLimiter(DefaultRateLimit()),
+		ban:          newBanman(),
+		announceCh:   make(chan announceReq, announceQueueDepth),
+		done:         make(chan struct{}),
+		syncSessions: make(map[string]map[uint32]*SyncSession),
 	}
 	go p.announceWorker()
 	return p

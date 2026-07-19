@@ -302,9 +302,11 @@ type AggregateBootstrap struct {
 // filled by the server from ServicesReporter — never a static constant (the
 // §6 static-0x2ED fix).
 type AggregateStatusResponse struct {
-	KnownIndexers int                `json:"known_indexers"`
-	Services      string             `json:"services"`
-	Bootstrap     AggregateBootstrap `json:"bootstrap"`
+	KnownIndexers  int                `json:"known_indexers"`
+	Services       string             `json:"services"`
+	Bootstrap      AggregateBootstrap `json:"bootstrap"`
+	CacheSize      int                `json:"cache_size"`     // signed records held for reconciliation
+	Reconciliation bool               `json:"reconciliation"` // whether Aggregate sync is advertised
 }
 
 // SharingPrefs is the operator-controlled half of the sn_search capability
