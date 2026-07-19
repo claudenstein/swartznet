@@ -319,18 +319,49 @@ func (p *Protocol) onSyncNeed(peerAddr string, payload []byte, reply ReplyFunc) 
 	if err != nil {
 		return
 	}
-	frame, err := sess.BuildRecordsFrame(found, missing)
-	if err != nil {
-		return
+	send := func(wire []byte) {
+		if reply != nil {
+			_ = reply(wire)
+		} else if tok, ok := p.peerToken(peerAddr); ok {
+			p.sendVia(tok, wire)
+		}
 	}
-	wire, err := ltepwire.EncodeSyncRecords(frame)
-	if err != nil {
-		return
-	}
-	if reply != nil {
-		_ = reply(wire)
-	} else if tok, ok := p.peerToken(peerAddr); ok {
-		p.sendVia(tok, wire)
+	// CHUNK: a one-directional difference can need more than MaxRecordsPerMessage
+	// records. A single BuildRecordsFrame(>cap) returns ErrSyncTooLarge and the
+	// old code silently sent NOTHING — reconciling zero records while still
+	// reporting convergence. Split into ≤cap-record frames so all records ship.
+	p.sendRecordsChunked(sess, found, missing, send)
+}
+
+// sendRecordsChunked builds + sends `found` as one or more sync_records frames,
+// each ≤ MaxRecordsPerMessage, so an over-cap one-directional difference
+// transfers ALL records instead of none. `missing` rides the final frame; at
+// least one frame is always sent (so `missing` and the phase transition ship
+// even with zero records). Each frame is ingested independently by the receiver.
+func (p *Protocol) sendRecordsChunked(sess *SyncSession, found []LocalRecord, missing [][32]byte, send func([]byte)) {
+	chunkMax := ltepwire.MaxRecordsPerMessage
+	n := len(found)
+	for start := 0; start == 0 || start < n; start += chunkMax {
+		end := start + chunkMax
+		if end > n {
+			end = n
+		}
+		var miss [][32]byte
+		if end >= n { // the last (or only) frame carries `missing`
+			miss = missing
+		}
+		frame, err := sess.BuildRecordsFrame(found[start:end], miss)
+		if err != nil {
+			return
+		}
+		wire, err := ltepwire.EncodeSyncRecords(frame)
+		if err != nil {
+			return
+		}
+		send(wire)
+		if n == 0 {
+			return
+		}
 	}
 }
 
@@ -383,11 +414,9 @@ func (p *Protocol) initiatorConverge(peerAddr string, sess *SyncSession) {
 		}
 	}
 	if push := sess.RemovedRecords(); len(push) > 0 {
-		if frame, err := sess.BuildRecordsFrame(push, nil); err == nil {
-			if wire, e := ltepwire.EncodeSyncRecords(frame); e == nil {
-				p.sendVia(tok, wire)
-			}
-		}
+		// Chunk the proactive push too — the same >MaxRecordsPerMessage silent
+		// drop applied here (initiatorConverge line dropped the whole push).
+		p.sendRecordsChunked(sess, push, nil, func(wire []byte) { p.sendVia(tok, wire) })
 	}
 }
 

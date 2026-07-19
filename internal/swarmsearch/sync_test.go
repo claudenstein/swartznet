@@ -164,6 +164,55 @@ func TestSyncReconcileLargeMultiBatch(t *testing.T) {
 	}
 }
 
+// TestSyncReconcileOneDirectionalOverCap is the regression for the silent
+// zero-record transfer: a one-directional difference LARGER than
+// MaxRecordsPerMessage (500) must still reconcile every record. The old code
+// built a single BuildRecordsFrame(>cap), got ErrSyncTooLarge, and sent NOTHING
+// while still reporting convergence; the fix chunks the records into ≤cap frames.
+func TestSyncReconcileOneDirectionalOverCap(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	var pk [32]byte
+	copy(pk[:], pub)
+
+	h := newHarness()
+	a, b := New(testLog()), New(testLog())
+	defer a.Close()
+	defer b.Close()
+	h.peers["A"], h.peers["B"] = a, b
+	a.SetCapabilitySource(reconCaps)
+	b.SetCapabilitySource(reconCaps)
+	cacheA, cacheB := NewRecordCache(), NewRecordCache()
+	a.SetRecordSource(cacheA)
+	a.SetRecordSink(cacheA)
+	b.SetRecordSource(cacheB)
+	b.SetRecordSink(cacheB)
+
+	// B holds 600 records A lacks (one-directional). 600 > 500 needs >1 records
+	// frame; A holds nothing, so this is a pure catch-up — the case reconciliation
+	// exists to serve.
+	const N = 600
+	for i := 0; i < N; i++ {
+		cacheB.Add(signRec(t, priv, pk, "bonly"+strconv.Itoa(i), byte(i)))
+	}
+
+	h.connect("A", "B")
+	waitRecon(t, a, b, "A", "B")
+	if _, err := a.StartSync("B", ltepwire.SyncFilter{}, cacheA.Snapshot()); err != nil {
+		t.Fatalf("StartSync: %v", err)
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if cacheA.Len() == N {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if cacheA.Len() != N {
+		t.Fatalf("one-directional over-cap diff converged A=%d, want %d (records-frame chunking failed)", cacheA.Len(), N)
+	}
+}
+
 // TestConvergeFloorAndOnceGuard: the initiator does not finalize until it has
 // applied convergeSymbolFloor symbols (avoiding premature convergence on a
 // short prefix) and then fires exactly once.
