@@ -66,6 +66,9 @@ func (s *Server) handleSetCapabilities(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Serialize the read-merge-write so two concurrent PATCHes can't each read
+	// the same base and clobber the other's field (last-writer-wins lost update).
+	s.capMu.Lock()
 	cur := s.opts.Capabilities.Sharing()
 	if req.ShareLocal != nil {
 		cur.ShareLocal = clampInt(*req.ShareLocal, 0, 2)
@@ -77,6 +80,7 @@ func (s *Server) handleSetCapabilities(w http.ResponseWriter, r *http.Request) {
 		cur.ContentHits = *req.ContentHits
 	}
 	s.opts.Capabilities.SetSharing(cur)
+	s.capMu.Unlock()
 	s.handleGetCapabilities(w, r)
 }
 

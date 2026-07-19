@@ -125,10 +125,27 @@ func (m *Manifest) AddHit(keyword string, hit dhtschema.KeywordHit) (int, error)
 	if !replaced {
 		entry.Hits = append(entry.Hits, hit)
 	}
-	for len(entry.Hits) > 0 && dhtschema.EstimateValueSize(dhtschema.KeywordValue{Hits: entry.Hits}) > dhtschema.MaxValueBytes {
+	// Evict the oldest hits until the value fits — but NEVER drop the last hit.
+	// A single over-cap hit means a pathologically long cached name; truncate the
+	// name to fit rather than leaving an empty list, which would publish a useless
+	// empty BEP-44 item and make the torrent undiscoverable under its own keyword.
+	for len(entry.Hits) > 1 && dhtschema.EstimateValueSize(dhtschema.KeywordValue{Hits: entry.Hits}) > dhtschema.MaxValueBytes {
 		entry.Hits = entry.Hits[1:]
 	}
+	if len(entry.Hits) == 1 {
+		entry.Hits[0] = fitHitToCap(entry.Hits[0])
+	}
 	return len(entry.Hits), nil
+}
+
+// fitHitToCap trims a hit's cached name until a single-hit KeywordValue fits
+// under the BEP-44 size cap. An infohash-only hit (empty name) is tiny, so this
+// always converges to a publishable, still-discoverable hit.
+func fitHitToCap(h dhtschema.KeywordHit) dhtschema.KeywordHit {
+	for len(h.N) > 0 && dhtschema.EstimateValueSize(dhtschema.KeywordValue{Hits: []dhtschema.KeywordHit{h}}) > dhtschema.MaxValueBytes {
+		h.N = h.N[:len(h.N)*3/4] // shrink ~25% per pass; converges in a few steps
+	}
+	return h
 }
 
 // RemoveAllHits scrubs infohash from every keyword. Emptied entries are dropped

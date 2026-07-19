@@ -92,6 +92,11 @@ type Server struct {
 	mu         sync.Mutex
 	listener   net.Listener
 	httpServer *http.Server
+
+	// capMu serializes the read-merge-write in handleSetCapabilities so two
+	// concurrent PATCH /capabilities requests can't lose one field via a
+	// last-writer-wins race (Sharing() and SetSharing() are separately locked).
+	capMu sync.Mutex
 }
 
 // NewWithOptions builds a server bound to addr ("" defaults to
