@@ -29,6 +29,17 @@ type Config struct {
 	// entirely. Validate never touches it — the identity loader owns its
 	// own parent-dir creation.
 	IdentityPath string
+	// TrustPath locates the publisher allowlist (trust.json). Empty =
+	// trust nobody.
+	TrustPath string
+	// BloomPath locates the known-good Bloom filter. Empty disables it.
+	BloomPath string
+	// ReputationPath locates the per-indexer reputation tracker. Empty
+	// disables it.
+	ReputationPath string
+	// SeedListPath locates the reputation seed list (seeds.json). Empty
+	// skips it.
+	SeedListPath string
 	// ListenPort is the BitTorrent listen port (0 = OS-assigned).
 	ListenPort int
 	// ListenHost, when non-empty, pins the BitTorrent/DHT bind host. An
@@ -66,6 +77,10 @@ type Config struct {
 	// IndexRescanInterval overrides the Layer-L rescan cadence (0 = the
 	// default hour). Tests shrink it; operators need not set it.
 	IndexRescanInterval time.Duration
+	// CheckpointInterval overrides the Bloom+reputation checkpoint cadence
+	// (0 = the default 5 minutes). Tests shrink it so the crash-safety
+	// window is observable in seconds.
+	CheckpointInterval time.Duration
 
 	// Regtest and DHTInsecure are test-only knobs, refused outside test
 	// binaries unless SWARTZNET_UNSAFE=1 (the single unsafe gate).
@@ -77,11 +92,15 @@ type Config struct {
 func Default() Config {
 	root := ResolveShareRoot()
 	return Config{
-		DataDir:      filepath.Join(root, "data"),
-		IndexDir:     filepath.Join(root, "index"),
-		IdentityPath: filepath.Join(root, "identity.key"),
-		ListenPort:   42069,
-		Seed:         true,
+		DataDir:        filepath.Join(root, "data"),
+		IndexDir:       filepath.Join(root, "index"),
+		IdentityPath:   filepath.Join(root, "identity.key"),
+		TrustPath:      filepath.Join(root, "trust.json"),
+		BloomPath:      filepath.Join(root, "known-good.bloom"),
+		ReputationPath: filepath.Join(root, "reputation.json"),
+		SeedListPath:   filepath.Join(root, "seeds.json"),
+		ListenPort:     42069,
+		Seed:           true,
 	}
 }
 

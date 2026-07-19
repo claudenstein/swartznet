@@ -56,6 +56,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSearch(args[1:], stdout, stderr)
 	case "index":
 		return cmdIndex(args[1:], stdout, stderr)
+	case "trust":
+		return cmdTrust(args[1:], stdout, stderr)
+	case "confirm":
+		return cmdConfirm(args[1:], stdout, stderr)
+	case "flag":
+		return cmdFlag(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -85,6 +91,10 @@ Commands:
   search <query...>    Full-text search the local index (Layer L). --signed-by,
                        --swarm, --dht route through the daemon.
   index [<ih> on|off]  Show index stats, or toggle a torrent's indexing.
+  trust <list|add|remove>
+                       Manage the publisher allowlist (offline; no daemon).
+  confirm <infohash>   Mark a hit as good (adds it to the known-good filter).
+  flag <infohash>      Report a hit as bad (demotes its attributed indexers).
   version              Print the version.
   help                 Show this help.
 
@@ -118,10 +128,10 @@ Flags for 'create':
   --data-dir <path>    With --seed, session-state directory.
   --no-dht             With --seed, disable DHT + port mapping (direct peers).
 
-Flags for 'status' and 'files':
+Flags for 'status', 'files', 'confirm' and 'flag':
 
   --api-addr <addr>    Address of the running swartznet HTTP API (default: localhost:7654).
-  --json               Emit JSON instead of text.
+  --json               Emit JSON instead of text ('status' and 'files' only).
 
 Environment:
 

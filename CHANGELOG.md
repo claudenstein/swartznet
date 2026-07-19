@@ -14,6 +14,47 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 5 — trust, reputation, Bloom, confirm/flag (2026-07-18)
+
+- New `internal/reputation`: the frozen FNV-64a Kirsch-Mitzenmacher
+  **known-good Bloom filter** (`SBLM` v1 on-disk format, pinned by a golden
+  byte-vector and a checked-in `testdata/known-good.bloom`), the
+  **Bayesian-smoothed per-publisher reputation tracker** (prior weight 5.0,
+  neutral 0.5, decaying seed bonus; score-sorted `Snapshot`), and the
+  source-attribution LRU that records which indexer returned each hit.
+- New `internal/trust`: the persistent publisher **allowlist** (`trust.json`,
+  pretty JSON, atomic write, 64-hex validation).
+- New `internal/admission`: a **deny-by-default** admission engine (inverts
+  the legacy's permissive §6 admission; the permissive policy survives only
+  for tests).
+- The **one shared confirm/flag path** (`daemon.Confirm`/`daemon.Flag` →
+  `engine.ConfirmHit`/`engine.FlagHit`): deterministic code owns the Bloom/
+  reputation state transition. **Confirm** adds the infohash to the Bloom and
+  boosts its attributed indexers; **flag** demotes ONLY attributed,
+  non-trusted indexers and **fails closed** on zero attribution — fixing the
+  legacy §6 dishonest-success defect (it never claims a demotion it did not
+  perform; `indexers_flagged` is not `omitempty`, `attribution` is explicit).
+- Two Bloom auto-confirm paths, both **add-only** (no reputation
+  self-reinforcement): a **trusted publisher** is confirmed at metadata
+  arrival; a **completed** torrent is confirmed unconditionally — and
+  `watchCompletion` promotes the next queued slot *before* the Bloom
+  checkpoint so promotion never waits on disk I/O.
+- Crash-safety: a bounded **periodic checkpoint** (~5 min) plus a
+  save-on-close flush; each save writes a **unique tempfile** and the
+  checkpoint is serialized, so a checkpoint racing a confirm/flag can never
+  tear `reputation.json`. A corrupt/unreadable but configured `trust.json`
+  **fails closed** (`attribution=trust-unavailable`, demotes nobody) rather
+  than silently disabling the trusted-publisher exemption.
+- HTTP: `POST /confirm`, `POST /flag`, `GET /aggregate` (known-indexer /
+  bootstrap counts, distinguishing a starved node from a quiet one), and
+  `/status` gains `bloom` + `reputation` blocks. CLI: `swartznet trust`
+  (offline `list`/`add`/`remove`), `swartznet confirm`, and `swartznet flag`
+  (honest "no reputations changed …" reporting).
+- `scripts/dod-slice5.sh`: 22 checks — offline trust management, golden Bloom
+  load, trusted-publisher auto-confirm at metadata, the shared confirm/flag
+  path, `kill -9` checkpoint durability, `/aggregate` shape, and the
+  fail-closed corrupt-trust path.
+
 ### Slice 4 — Layer L: local full-text search (2026-07-18)
 
 - New `internal/indexer`: the Bleve (scorch) schema v3, the single-worker

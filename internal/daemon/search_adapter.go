@@ -78,3 +78,59 @@ func (a *controllerAdapter) localDocCount() (uint64, error) {
 	}
 	return idx.DocCount()
 }
+
+// bloomStat reports the known-good Bloom for /status (nil = block omitted).
+func (a *controllerAdapter) bloomStat() *httpapi.BloomStatus {
+	bloom := a.eng.KnownGoodBloom()
+	if bloom == nil {
+		return nil
+	}
+	return &httpapi.BloomStatus{
+		BitSize:        bloom.Bits(),
+		HashFunctions:  bloom.HashFunctions(),
+		PopulationBits: bloom.PopulationCount(),
+		EstimatedItems: bloom.EstimatedItems(),
+	}
+}
+
+// reputationStat reports the reputation tracker for /status (top 10 by score).
+func (a *controllerAdapter) reputationStat() *httpapi.ReputationStat {
+	tracker := a.eng.ReputationTracker()
+	if tracker == nil {
+		return nil
+	}
+	snap := tracker.Snapshot() // sorted by score, tie-broken deterministically
+	out := &httpapi.ReputationStat{KnownIndexers: len(snap)}
+	for i, e := range snap {
+		if i >= 10 {
+			break
+		}
+		out.TopIndexers = append(out.TopIndexers, httpapi.ReputationIndexerSummary{
+			PubKey:        string(e.PubKey),
+			Score:         e.Score,
+			HitsReturned:  e.Counters.HitsReturned,
+			HitsConfirmed: e.Counters.HitsConfirmed,
+			HitsFlagged:   e.Counters.HitsFlagged,
+		})
+	}
+	return out
+}
+
+// aggregate reports the admission counts (and a static services placeholder
+// until Slice 6). Distinguishes a starved node from a quiet one.
+func (a *controllerAdapter) aggregate() httpapi.AggregateStatusResponse {
+	resp := httpapi.AggregateStatusResponse{
+		Services: "0000000000000000", // static until Slice 6's live producer
+	}
+	if t := a.eng.ReputationTracker(); t != nil {
+		resp.KnownIndexers = len(t.Snapshot())
+	}
+	if a.adm != nil {
+		resp.Bootstrap = httpapi.AggregateBootstrap{
+			Anchors:  a.adm.AnchorCount(),
+			Admitted: a.adm.AdmittedCount(),
+			Pending:  a.adm.PendingCount(),
+		}
+	}
+	return resp
+}

@@ -73,6 +73,31 @@ func (e *Engine) autoIndex(h *Handle) {
 		return
 	}
 	e.log.Info("indexer.indexed", "info_hash", doc.InfoHash, "name", doc.Name, "files", doc.FileCount, "size", doc.SizeBytes)
+	e.trustedPublisherAutoConfirm(h)
+}
+
+// trustedPublisherAutoConfirm adds a trust-listed publisher's torrent to the
+// known-good Bloom the moment metadata arrives — the deliberate trust
+// relationship substitutes for the completion signal, so it need not wait
+// for the download. Untrusted torrents reach the Bloom only via completion
+// or an explicit confirm. Like completion, this is bloom.Add ONLY (D22).
+func (e *Engine) trustedPublisherAutoConfirm(h *Handle) {
+	signedBy := h.SignedBy()
+	if signedBy == "" {
+		return
+	}
+	store := e.TrustStore()
+	if store == nil || !store.IsTrusted(signedBy) {
+		return
+	}
+	bloom := e.KnownGoodBloom()
+	if bloom == nil {
+		return
+	}
+	ih := h.T.InfoHash()
+	bloom.Add(ih[:])
+	e.log.Info("engine.bloom.trusted_publisher_confirmed", "info_hash", h.InfoHashHex(), "pubkey", signedBy, "label", store.Label(signedBy))
+	e.Checkpoint()
 }
 
 func (e *Engine) indexerDocFromTorrent(h *Handle) indexer.TorrentDoc {

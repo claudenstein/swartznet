@@ -38,9 +38,11 @@ type TorrentSnapshot struct {
 func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
 	handles := e.Torrents()
 	out := make([]TorrentSnapshot, 0, len(handles))
+	store := e.TrustStore()
 	for _, h := range handles {
 		s := h.snapshot()
 		s.IndexedFiles, s.IndexExtracted = e.IndexStats(s.InfoHash)
+		s.TrustedPub = s.SignedBy != "" && store != nil && store.IsTrusted(s.SignedBy)
 		out = append(out, s)
 	}
 	return out

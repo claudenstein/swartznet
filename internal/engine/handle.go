@@ -221,6 +221,23 @@ func (e *Engine) watchCompletion(h *Handle) {
 	case <-h.removed:
 		return
 	}
-	// (Slice 5: bloom auto-confirm slots in here, behind a nil-check.)
+	// Promote the next queued torrent FIRST: freeing the slot is the
+	// latency-sensitive act, and it must never wait on the Bloom side effect
+	// below — not on its nil check and not on the synchronous Checkpoint's
+	// disk I/O (the §6 stranded-slot fix means promotion is unconditional AND
+	// unblocked). A crash between here and the Checkpoint is harmless: the
+	// torrent is still complete on restart, so this watcher re-fires and
+	// re-adds it to the Bloom idempotently.
 	e.promoteQueued()
+
+	// Auto-confirm the completed infohash into the known-good Bloom (a
+	// benign self-signal — the node fully downloaded this content). This is
+	// bloom.Add ONLY, never RecordConfirmed: completion must not
+	// self-reinforce reputation (D22).
+	if bloom := e.KnownGoodBloom(); bloom != nil {
+		ih := h.T.InfoHash()
+		bloom.Add(ih[:])
+		e.log.Info("engine.bloom.auto_confirmed", "info_hash", h.InfoHashHex(), "name", h.T.Name())
+		e.Checkpoint()
+	}
 }

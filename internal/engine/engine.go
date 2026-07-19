@@ -22,6 +22,8 @@ import (
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/reputation"
+	"github.com/swartznet/swartznet/internal/trust"
 )
 
 // unlimitedBurst keeps the rate limiters' burst positive even in unlimited
@@ -71,10 +73,37 @@ type Engine struct {
 	// files whose file-complete event was dropped by the fan-out
 	// (SPEC §5.5); deterministic doc IDs make the re-submit idempotent.
 	rescanInterval time.Duration
+
+	// Spam-resistance subsystems (nil = feature off). repMu guards the
+	// bloom+tracker attachments against the checkpoint goroutine.
+	repMu   sync.Mutex
+	bloom   *reputation.BloomFilter
+	tracker *reputation.Tracker
+	sources *reputation.SourceTracker // always non-nil
+	trust   *trust.Store
+	// trustFailed is true when TrustPath was configured but the store
+	// could not be loaded (corrupt/unreadable file). Distinguished from
+	// "trust off" (nil trust, trustFailed false) so FlagHit can fail
+	// CLOSED — it must never demote when it cannot check the exemption.
+	trustFailed bool
+
+	// checkpointInterval is this engine's Bloom+reputation flush cadence
+	// (instance field, like rescanInterval — no shared global to race).
+	checkpointInterval time.Duration
+	// ckptMu serializes Checkpoint so the periodic ticker, confirm/flag,
+	// completion, and Close never overlap their bloom+tracker saves.
+	ckptMu sync.Mutex
+	// ckptWG joins the checkpoint goroutine so Close's final flush is the
+	// authoritative last write (no late ticker save clobbers it).
+	ckptWG sync.WaitGroup
 }
 
 // defaultRescanInterval is the production hourly cadence.
 const defaultRescanInterval = time.Hour
+
+// defaultCheckpointInterval bounds crash loss of Bloom/reputation to one
+// interval (D23 — the legacy saved only at clean Close).
+const defaultCheckpointInterval = 5 * time.Minute
 
 // New constructs the engine. cfg must already be Validate()d by the caller
 // (the daemon); Validate is re-run here as a safety net since it is
@@ -149,20 +178,26 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	e := &Engine{
-		cfg:            cfg,
-		log:            log,
-		client:         cl,
-		ulLimiter:      ul,
-		dlLimiter:      dl,
-		bgCtx:          bgCtx,
-		bgCancel:       bgCancel,
-		handles:        make(map[metainfo.Hash]*Handle),
-		closeDone:      make(chan struct{}),
-		rescanInterval: cfg.IndexRescanInterval,
+		cfg:                cfg,
+		log:                log,
+		client:             cl,
+		ulLimiter:          ul,
+		dlLimiter:          dl,
+		bgCtx:              bgCtx,
+		bgCancel:           bgCancel,
+		handles:            make(map[metainfo.Hash]*Handle),
+		closeDone:          make(chan struct{}),
+		rescanInterval:     cfg.IndexRescanInterval,
+		checkpointInterval: cfg.CheckpointInterval,
+		sources:            reputation.NewSourceTracker(0),
 	}
 	if e.rescanInterval <= 0 {
 		e.rescanInterval = defaultRescanInterval
 	}
+	if e.checkpointInterval <= 0 {
+		e.checkpointInterval = defaultCheckpointInterval
+	}
+	e.loadSpamResistance(cfg)
 
 	log.Info("engine.started",
 		"data_dir", cfg.DataDir,
@@ -192,6 +227,8 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	}
 
 	go e.runIndexRescan()
+	e.ckptWG.Add(1)
+	go e.runReputationCheckpoint()
 
 	return e, nil
 }
@@ -225,7 +262,14 @@ func (e *Engine) Close() error {
 		e.pipeline = nil
 	}
 	e.idxMu.Unlock()
-	// (publisher / bloom+reputation teardown land here with their slices.)
+	// Join the checkpoint goroutine (bgCancel above stops its ticker loop)
+	// so no late periodic save can run after — and thus never clobber — the
+	// final flush below.
+	e.ckptWG.Wait()
+	// Final Bloom+reputation flush captures the last sub-checkpoint interval
+	// (the periodic checkpoint bounds crash loss; this bounds clean-close
+	// loss to zero).
+	e.Checkpoint()
 	for _, h := range handles {
 		h.pieceSub.Close()
 		h.fileSub.Close()

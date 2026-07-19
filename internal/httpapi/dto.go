@@ -229,6 +229,57 @@ type SearchResponse struct {
 	// swarm / dht blocks land with their slices.
 }
 
+// ConfirmRequest / FlagRequest carry a single 40-hex infohash.
+type FlagRequest struct {
+	InfoHash string `json:"infohash"`
+}
+
+// ConfirmResult is what the daemon's shared Confirm path returns.
+type ConfirmResult struct {
+	InfoHash          string
+	IndexersConfirmed int
+}
+
+// ConfirmResponse is the POST /confirm document.
+type ConfirmResponse struct {
+	OK                bool   `json:"ok"`
+	InfoHash          string `json:"infohash"`
+	IndexersConfirmed int    `json:"indexers_confirmed"`
+}
+
+// FlagResult is what the daemon's shared Flag path returns.
+type FlagResult struct {
+	InfoHash        string
+	IndexersFlagged int
+	Attribution     string // targeted | trusted-exempt | none
+}
+
+// FlagResponse is the POST /flag document. indexers_flagged is NOT omitempty
+// so a client can tell 0-demoted from absent, and attribution lets every
+// surface render the honest "no reputations changed" message (the §6 fix).
+type FlagResponse struct {
+	OK              bool   `json:"ok"`
+	InfoHash        string `json:"infohash"`
+	IndexersFlagged int    `json:"indexers_flagged"`
+	Attribution     string `json:"attribution"`
+}
+
+// AggregateBootstrap holds the deny-by-default admission counts, letting an
+// operator tell a starved node (nothing admitted) from a quiet one.
+type AggregateBootstrap struct {
+	Anchors  int `json:"anchors"`
+	Admitted int `json:"admitted"`
+	Pending  int `json:"pending"`
+}
+
+// AggregateStatusResponse is the GET /aggregate document. The services field
+// is a static placeholder until Slice 6 makes it live.
+type AggregateStatusResponse struct {
+	KnownIndexers int                `json:"known_indexers"`
+	Services      string             `json:"services"` // 16-hex, static until Slice 6
+	Bootstrap     AggregateBootstrap `json:"bootstrap"`
+}
+
 // IndexStats is the GET /index/stats document.
 type IndexStats struct {
 	DirBytes        int64   `json:"dir_bytes"`

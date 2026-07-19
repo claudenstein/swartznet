@@ -37,14 +37,21 @@ done
 # /status JSON validity
 BODY=$(curl -s "http://$ADDR/status")
 echo "$BODY" | python3 -m json.tool >/dev/null 2>&1 && ok "curl /status parses as JSON" || fail "curl /status parses as JSON"
-# Structural golden: since Slice 1 a real daemon also carries publisher.pubkey.
+# Structural golden: since Slice 1 a real daemon carries publisher.pubkey;
+# since Slice 5 a default node also carries the (empty) bloom + reputation
+# spam-resistance blocks. Both variable blocks are popped and checked
+# structurally so the core envelope stays a frozen golden.
 echo "$BODY" | python3 -c '
 import json,re,sys
 d=json.load(sys.stdin)
 pk=d["publisher"].pop("pubkey","")
 assert re.fullmatch(r"[0-9a-f]{64}", pk), f"bad pubkey {pk!r}"
+bloom=d.pop("bloom")
+assert bloom["hash_functions"]==7 and bloom["population_bits"]==0, bloom
+assert bloom["estimated_items"]==0 and bloom["bit_size"]>0, bloom
+assert d.pop("reputation")=={"known_indexers":0}, d
 assert d=={"local":{"indexed":False,"doc_count":0},"swarm":{"known_peers":0,"capable_peers":0},"publisher":{"total_keywords":0,"total_hits":0}}, d
-' && ok "/status golden body (+pubkey)" || fail "/status golden body: $BODY"
+' && ok "/status golden body (+pubkey, +bloom, +reputation)" || fail "/status golden body: $BODY"
 CT=$(curl -s -o /dev/null -w '%{content_type}' "http://$ADDR/status")
 [ "$CT" = "application/json" ] && ok "/status content-type" || fail "/status content-type: $CT"
 

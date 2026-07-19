@@ -23,7 +23,7 @@ func TestDefaultNonEmpty(t *testing.T) {
 func TestDefaultPathsShareRoot(t *testing.T) {
 	c := Default()
 	root := ResolveShareRoot()
-	for _, p := range []string{c.DataDir, c.IndexDir, c.IdentityPath} {
+	for _, p := range []string{c.DataDir, c.IndexDir, c.IdentityPath, c.TrustPath, c.BloomPath, c.ReputationPath, c.SeedListPath} {
 		if !strings.HasPrefix(p, root) {
 			t.Errorf("path %q does not share root %q", p, root)
 		}

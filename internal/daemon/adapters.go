@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/swartznet/swartznet/internal/admission"
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
 )
@@ -10,6 +11,7 @@ import (
 // law true: httpapi sees only its own types, satisfied here.
 type controllerAdapter struct {
 	eng *engine.Engine
+	adm *admission.AdmissionEngine
 }
 
 func (a *controllerAdapter) AddMagnetURI(uri string) (string, error) {

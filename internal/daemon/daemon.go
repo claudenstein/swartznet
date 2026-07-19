@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/swartznet/swartznet/internal/admission"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
@@ -61,6 +62,10 @@ type Daemon struct {
 	// Idx is the Layer-L index; nil when NoIndex or IndexDir is empty.
 	// Indexer open failure aborts New (the second fatal subsystem).
 	Idx *indexer.Index
+	// admission is the deny-by-default publisher-admission engine backing
+	// the /aggregate counts. Its live feeder channels arrive with the
+	// Aggregate slices; here it is correctly empty.
+	admission *admission.AdmissionEngine
 
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
@@ -142,6 +147,17 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		eng.SetIndex(idx)
 	}
 
+	// The deny-by-default admission engine. Its reputation view adapts the
+	// engine's tracker (nil-safe: an unknown pubkey scores the neutral
+	// prior). Empty anchors ship by design — a curated seeds.json is a
+	// release prerequisite, not code (B8/B9). Construction failure is
+	// non-fatal (the engine only backs /aggregate counts).
+	if adm, err := admission.NewEngine(admission.DefaultPolicy(), reputationView{eng: eng}, admission.DefaultAnchorPubkeys, log); err != nil {
+		log.Warn("daemon.admission_init_err", "err", err)
+	} else {
+		d.admission = adm
+	}
+
 	// (companion, bootstrap land here, in that order.)
 
 	// Session restore runs before the HTTP API so restored torrents are
@@ -154,7 +170,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		if d.Identity != nil {
 			apiOpts.PublisherPubKey = d.Identity.PublicKeyHex
 		}
-		adapter := &controllerAdapter{eng: eng}
+		adapter := &controllerAdapter{eng: eng, adm: d.admission}
 		if d.Idx != nil {
 			mux := &searchmux.Mux{Local: eng.Index()}
 			apiOpts.Search = adapter.search(mux)
@@ -163,6 +179,11 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		}
 		apiOpts.Adder = adapter
 		apiOpts.Control = adapter
+		apiOpts.Confirm = d.Confirm
+		apiOpts.Flag = d.Flag
+		apiOpts.BloomStat = adapter.bloomStat
+		apiOpts.ReputationStat = adapter.reputationStat
+		apiOpts.Aggregate = adapter.aggregate
 		if !opts.Cfg.DisableDHT {
 			apiOpts.DHTStats = eng.DHTRoutingTableSize
 		}

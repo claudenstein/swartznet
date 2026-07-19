@@ -53,6 +53,16 @@ type Options struct {
 	// LocalDocCount reports the index document count for /status; nil ⇒
 	// local.indexed=false.
 	LocalDocCount func() (uint64, error)
+	// Confirm / Flag are the ONE shared spam-signal path. Nil ⇒ 503. Both
+	// return the httpapi error sentinels for bad-infohash / not-configured.
+	Confirm func(infohash string) (ConfirmResult, error)
+	Flag    func(infohash string) (FlagResult, error)
+	// BloomStat / ReputationStat feed the /status blocks; nil ⇒ block
+	// omitted.
+	BloomStat      func() *BloomStatus
+	ReputationStat func() *ReputationStat
+	// Aggregate feeds GET /aggregate; nil ⇒ 503.
+	Aggregate func() AggregateStatusResponse
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -168,6 +178,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /status", s.handleStatus)
 	s.torrentRoutes(mux)
 	s.searchRoutes(mux)
+	s.confirmFlagRoutes(mux)
 
 	if assetsFS, err := fs.Sub(web.Assets(), "."); err == nil {
 		mux.Handle("GET /static/", http.FileServer(http.FS(assetsFS)))
@@ -193,6 +204,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		if n, err := s.opts.LocalDocCount(); err == nil {
 			out.Local.DocCount = n
 		}
+	}
+	if s.opts.BloomStat != nil {
+		out.Bloom = s.opts.BloomStat()
+	}
+	if s.opts.ReputationStat != nil {
+		out.Reputation = s.opts.ReputationStat()
 	}
 	if s.opts.DHTStats != nil {
 		good, total := s.opts.DHTStats()
