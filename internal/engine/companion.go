@@ -170,44 +170,63 @@ func validateCompanionInfo(info *metainfo.Info) error {
 	return nil
 }
 
-// retainCompanionFetch registers an in-flight fetch for infohash so a concurrent
-// fetcher's exit does not drop the shared companion torrent out from under this
-// one.
-func (e *Engine) retainCompanionFetch(ih [20]byte) {
+// retainAndAttachCompanion registers an in-flight fetch for infohash AND attaches
+// (adds/looks up) the companion torrent handle ATOMICALLY under companionFetchMu.
+// The atomicity is load-bearing: releaseCompanionFetch drops the shared torrent
+// under the same lock, so a concurrent fetcher can never attach to a handle in
+// the window between another fetcher's last-ref decrement and its drop — the
+// attach either precedes the decrement (ref stays ≥1, no drop) or follows the
+// drop (addCompanionInfoHash re-adds a fresh handle). Lock order is always
+// companionFetchMu → e.mu (addCompanionInfoHash/DropCompanionTorrent take e.mu),
+// and nothing takes them in the reverse order, so this cannot deadlock.
+func (e *Engine) retainAndAttachCompanion(ih [20]byte) (*Handle, error) {
 	e.companionFetchMu.Lock()
+	defer e.companionFetchMu.Unlock()
 	if e.companionFetchRefs == nil {
 		e.companionFetchRefs = make(map[[20]byte]int)
 	}
 	e.companionFetchRefs[ih]++
-	e.companionFetchMu.Unlock()
+	h, err := e.addCompanionInfoHash(metainfo.Hash(ih))
+	if err != nil {
+		// Attach failed → nothing to drop; just undo the ref we took.
+		if e.companionFetchRefs[ih]--; e.companionFetchRefs[ih] <= 0 {
+			delete(e.companionFetchRefs, ih)
+		}
+		return nil, err
+	}
+	return h, nil
 }
 
 // releaseCompanionFetch drops the shared companion torrent only when the LAST
-// concurrent fetcher for infohash exits, so overlapping fetches never tear down
-// each other's in-progress download.
+// concurrent fetcher for infohash exits. The drop runs UNDER companionFetchMu so
+// the "last ref → drop" decision and the teardown are atomic with a concurrent
+// retainAndAttachCompanion (see its doc); otherwise a fetcher attaching in the
+// gap would be left holding a torrent this call then tore down.
 func (e *Engine) releaseCompanionFetch(ih [20]byte) {
 	e.companionFetchMu.Lock()
+	defer e.companionFetchMu.Unlock()
 	n := e.companionFetchRefs[ih] - 1
-	last := n <= 0
-	if last {
-		delete(e.companionFetchRefs, ih)
-	} else {
+	if n > 0 {
 		e.companionFetchRefs[ih] = n
+		return
 	}
-	e.companionFetchMu.Unlock()
-	if last {
-		_ = e.DropCompanionTorrent(ih)
-	}
+	delete(e.companionFetchRefs, ih)
+	_ = e.DropCompanionTorrent(ih)
 }
 
 // FetchCompanionTorrent adds an untrusted companion infohash, waits for
 // metadata, enforces the fail-closed bounds, downloads the single file, and
 // returns its on-disk path. Satisfies companion.CompanionFetcher.
 func (e *Engine) FetchCompanionTorrent(ctx context.Context, infohash [20]byte) (string, error) {
-	h, err := e.addCompanionInfoHash(metainfo.Hash(infohash))
+	// Retain + attach atomically (see retainAndAttachCompanion): registers this
+	// fetch's interest and gets the shared handle in one critical section, so a
+	// concurrent fetcher's last-ref drop can never tear the handle down between
+	// our attach and our retain.
+	h, err := e.retainAndAttachCompanion(infohash)
 	if err != nil {
 		return "", err
 	}
+	defer e.releaseCompanionFetch(infohash)
 	// SAFETY (companion-collision defense): if the infohash collides with a real
 	// (non-companion) torrent the node is already running, addCompanionInfoHash
 	// returns that live handle. A followed publisher controls the pointer
@@ -218,17 +237,11 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infohash [20]byte) (
 	// as a plain handle — but a colliding real torrent is never mutated: the
 	// companion-index decode simply fails and the fetch returns an error.
 	//
-	// Drop the fetched torrent on EVERY exit path (success, timeout, bad bounds)
-	// so a subscriber re-syncing hourly cannot accumulate handles/goroutines and
-	// the shared on-disk path is not held by a stale torrent. T.Drop keeps the
-	// downloaded file on disk for the caller to read. Reference-counted: two
-	// concurrent fetches of the same infohash (concurrent aggregate lookups
-	// resolving one publisher) share one handle, so the drop must wait for the
-	// LAST fetcher — an unconditional per-fetcher drop would stall the other's
-	// still-running download and degrade a valid lookup to no-results.
-	e.retainCompanionFetch(infohash)
-	defer e.releaseCompanionFetch(infohash)
-
+	// The fetched torrent is dropped on EVERY exit path (success, timeout, bad
+	// bounds) via the deferred releaseCompanionFetch above — reference-counted so
+	// the drop waits for the LAST concurrent fetcher of this infohash (concurrent
+	// aggregate lookups resolving one publisher share one handle). T.Drop keeps
+	// the downloaded file on disk for the caller to read.
 	select {
 	case <-h.T.GotInfo():
 	case <-ctx.Done():

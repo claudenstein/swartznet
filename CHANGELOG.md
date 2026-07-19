@@ -45,9 +45,21 @@ and concurrency surfaces:
   frame declaring a huge inner string forced a ~128 MiB allocation before failing
   — a remotely-reachable memory-exhaustion DoS on every inbound frame. Decodes are
   now bounded to the payload size (`decodeBounded`), matching the BEP-44 side.
-- **Security — untrusted pre-allocation (LOW).** `contracts/snagg` leaf/interior
-  page decoders no longer pre-allocate from an unauthenticated uint16 count; the
-  hint is capped against the remaining bytes.
+- **Security — untrusted pre-allocation.** `contracts/snagg` no longer
+  over-allocates from unauthenticated inputs: leaf/interior page decoders cap the
+  element-count hint against the remaining bytes, and `DecodeRecord` bounds its
+  bencode string length to the record size (a ~15-byte hostile record previously
+  forced a ~128 MiB allocation).
+- **Security — unbounded indexer set (DoS).** The Layer-D lookup set fed by
+  gossiped publisher keys is now capped and FIFO-evicted, so a peer flooding
+  signed records can't grow it (or per-query DHT fan-out) without bound; operator-
+  configured indexers are exempt.
+- **Privacy — sharing caps enforced on responses.** The `sn_search` responder now
+  applies the node's `FileHits`/`ContentHits` sharing prefs to the response
+  payload, not just to explicit scope requests — a name-scope query can no longer
+  extract per-file paths or content matches the operator chose to withhold.
+- **Concurrency.** Concurrent companion fetches of the same infohash retain and
+  attach atomically, closing a residual teardown race in the reference-counting.
 - **Queue accounting.** A queued but already-complete seed no longer consumes a
   download slot in `promoteQueued`, which previously starved a real download.
 - **Companion seed accounting.** A pointer-put failure after a content change no

@@ -120,7 +120,18 @@ func EncodeRecord(r Record) ([]byte, error) {
 // verify the signature or PoW (transport form only).
 func DecodeRecord(b []byte) (Record, error) {
 	var w recordWire
-	if err := bencode.Unmarshal(b, &w); err != nil {
+	// Bound the decode: leaf pages are structurally unauthenticated (Find does not
+	// hash them), so a hostile record blob could declare an inner string length
+	// near the anacrolix ~128 MiB MaxStrLen default and force that allocation
+	// before the field-width checks below ever run (make([]byte, declaredLen)
+	// happens inside Unmarshal). A bencoded string can't exceed the blob that
+	// holds it, so MaxStrLen = len(b) rejects only impossible/hostile lengths —
+	// the same alloc-amplification defense as contracts/dhtschema + ltepwire.
+	d := bencode.NewDecoder(bytes.NewReader(b))
+	if len(b) > 0 {
+		d.MaxStrLen = int64(len(b))
+	}
+	if err := d.Decode(&w); err != nil {
 		return Record{}, fmt.Errorf("snagg: unmarshal record: %w", err)
 	}
 	if len(w.Pk) != 32 {

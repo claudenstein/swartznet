@@ -44,7 +44,18 @@ type IndexerInfo struct {
 	PubKey  [32]byte
 	Label   string
 	AddedAt time.Time
+	// Auto is true for indexers discovered from untrusted gossip
+	// (NotePublisherSeen) rather than added explicitly by the operator. The auto
+	// set is capped + FIFO-evicted so a peer flooding fresh-keypair sync records
+	// cannot grow the lookup set (and per-query DHT fanout) without bound.
+	Auto bool
 }
+
+// maxAutoIndexers caps the gossip-discovered indexer set. Explicit operator
+// indexers (AddIndexer/AddIndexerHex) are exempt and unbounded by operator
+// choice; only untrusted auto-discovered pubkeys are capped. The value also
+// bounds Query's per-search DHT fanout for the auto set.
+const maxAutoIndexers = 128
 
 // LookupHit is a deduplicated Layer-D result across all responding indexers.
 type LookupHit struct {
@@ -102,17 +113,57 @@ func (l *Lookup) SetMinIndexerScore(s float64) {
 	l.mu.Unlock()
 }
 
-// AddIndexer records a known indexer pubkey. Idempotent: re-adding updates the
-// label but does not bump AddedAt.
+// AddIndexer records a known indexer pubkey EXPLICITLY (operator-added, exempt
+// from the auto-set cap). Idempotent: re-adding updates the label but does not
+// bump AddedAt, and promotes a previously auto-discovered pubkey to explicit.
 func (l *Lookup) AddIndexer(pubkey [32]byte, label string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.addIndexerLocked(pubkey, label, false)
+}
+
+// addIndexerLocked upserts an indexer. auto marks a gossip-discovered entry,
+// which is subject to the maxAutoIndexers cap (oldest auto entry evicted first).
+// Caller holds l.mu.
+func (l *Lookup) addIndexerLocked(pubkey [32]byte, label string, auto bool) {
 	if existing, ok := l.indexers[pubkey]; ok {
-		existing.Label = label
-		l.indexers[pubkey] = existing
+		if !auto {
+			// Explicit (re-)add: original unconditional label update, and promote
+			// the entry out of the capped auto set.
+			existing.Label = label
+			existing.Auto = false
+			l.indexers[pubkey] = existing
+		}
+		// An auto re-note of an existing entry is a no-op (no AddedAt refresh, so
+		// re-noting cannot keep a stale entry alive against FIFO eviction).
 		return
 	}
-	l.indexers[pubkey] = IndexerInfo{PubKey: pubkey, Label: label, AddedAt: time.Now()}
+	if auto {
+		l.evictOldestAutoIfFullLocked()
+	}
+	l.indexers[pubkey] = IndexerInfo{PubKey: pubkey, Label: label, AddedAt: time.Now(), Auto: auto}
+}
+
+// evictOldestAutoIfFullLocked drops the oldest auto-discovered indexer when the
+// auto set is at capacity, so a new auto entry cannot grow the set past the cap.
+// Caller holds l.mu.
+func (l *Lookup) evictOldestAutoIfFullLocked() {
+	autoCount := 0
+	var oldestKey [32]byte
+	var oldest time.Time
+	found := false
+	for k, info := range l.indexers {
+		if !info.Auto {
+			continue
+		}
+		autoCount++
+		if !found || info.AddedAt.Before(oldest) {
+			oldest, oldestKey, found = info.AddedAt, k, true
+		}
+	}
+	if autoCount >= maxAutoIndexers && found {
+		delete(l.indexers, oldestKey)
+	}
 }
 
 // AddIndexerHex parses a 64-hex pubkey and calls AddIndexer.
@@ -149,8 +200,14 @@ func (l *Lookup) Indexers() []IndexerInfo {
 }
 
 // NotePublisherSeen satisfies swarmsearch.PublisherObserver: a publisher pubkey
-// gossiped in a sync record enters the lookup set automatically.
-func (l *Lookup) NotePublisherSeen(pubkey [32]byte) { l.AddIndexer(pubkey, "") }
+// gossiped in a sync record enters the lookup set automatically — as a capped,
+// FIFO-evicted AUTO entry, so an attacker flooding fresh-keypair records cannot
+// grow the indexer set (or the per-query DHT fanout) without bound.
+func (l *Lookup) NotePublisherSeen(pubkey [32]byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.addIndexerLocked(pubkey, "", true)
+}
 
 // Query runs a Layer-D keyword lookup. The keyword is the MOST-DISTINCTIVE
 // token of the query (longest by byte length, earliest wins) — NOT the first

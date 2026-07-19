@@ -110,7 +110,7 @@ func (p *Protocol) handleQuery(addr string, payload []byte, reply ReplyFunc) {
 	if reply == nil {
 		return
 	}
-	frame, err := ltepwire.EncodeResult(ltepwire.Result{TxID: q.TxID, Total: total, Hits: hitsToWire(hits)})
+	frame, err := ltepwire.EncodeResult(ltepwire.Result{TxID: q.TxID, Total: total, Hits: hitsToWire(hits, caps)})
 	if err != nil {
 		p.log.Debug("swarmsearch.result_encode_err", "err", err)
 		return
@@ -150,8 +150,18 @@ func (p *Protocol) sendReject(reply ReplyFunc, txid uint32, code int, reason str
 // their torrent's single Hit (first-appearance order preserves rank). A
 // non-hex / non-20-byte infohash is skipped. The freshness stamp T is emitted
 // only when AddedAt is non-zero (never the year-1 stamp — §6 defect b).
-func hitsToWire(hits []LocalHit) []ltepwire.Hit {
+//
+// caps enforces the node's OWN advertised sharing policy on the RESPONSE PAYLOAD,
+// not just against an explicit scope request (unsupportedScope). Otherwise a peer
+// sends scope="n" (or empty) — which unsupportedScope always accepts — and still
+// receives content matches + per-file paths the operator set ContentHits/FileHits
+// false to withhold. Enforcement:
+//   - !ContentHits: drop every content-derived match, and drop a torrent that
+//     surfaced ONLY via content (revealing it leaks that its content matched).
+//   - !FileHits: strip the per-file path (FP) from any match that survives.
+func hitsToWire(hits []LocalHit, caps ltepwire.Sharing) []ltepwire.Hit {
 	byIH := make(map[string]*ltepwire.Hit)
+	hasName := make(map[string]bool)
 	var order []string
 	for _, h := range hits {
 		ih, err := hex.DecodeString(h.InfoHash)
@@ -177,11 +187,26 @@ func hitsToWire(hits []LocalHit) []ltepwire.Hit {
 			order = append(order, h.InfoHash)
 		}
 		if h.DocType == "content" {
-			w.Matches = append(w.Matches, ltepwire.FileMatch{FI: h.FileIndex, FP: h.FilePath})
+			if !caps.ContentHits {
+				continue // content matches withheld by policy
+			}
+			fm := ltepwire.FileMatch{FI: h.FileIndex}
+			if caps.FileHits {
+				fm.FP = h.FilePath // per-file path withheld unless FileHits
+			}
+			w.Matches = append(w.Matches, fm)
+		} else {
+			hasName[h.InfoHash] = true
 		}
 	}
 	out := make([]ltepwire.Hit, 0, len(order))
 	for _, ih := range order {
+		// A torrent that surfaced ONLY via content (no name-level hit) is withheld
+		// entirely when ContentHits is off — otherwise its presence leaks that the
+		// withheld content matched the query.
+		if !caps.ContentHits && !hasName[ih] {
+			continue
+		}
 		out = append(out, *byIH[ih])
 	}
 	return out

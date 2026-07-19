@@ -478,6 +478,52 @@ func TestLookupNotePublisherSeenAddsIndexer(t *testing.T) {
 	}
 }
 
+// TestLookupAutoIndexerSetIsCapped pins the round-6 fix: a peer flooding
+// gossip-discovered pubkeys (NotePublisherSeen) cannot grow the indexer set — and
+// thus the per-query DHT fanout — without bound, and never evicts an explicit
+// operator-added indexer.
+func TestLookupAutoIndexerSetIsCapped(t *testing.T) {
+	t.Parallel()
+	lk := NewLookup(&stubBackend{})
+	mkpk := func(i int) [32]byte {
+		var pk [32]byte
+		pk[0] = byte(i)
+		pk[1] = byte(i >> 8)
+		pk[2] = 0x01 // keep auto keys distinct from the explicit one below
+		return pk
+	}
+
+	for i := 0; i < maxAutoIndexers*3; i++ {
+		lk.NotePublisherSeen(mkpk(i))
+	}
+	if n := len(lk.Indexers()); n > maxAutoIndexers {
+		t.Fatalf("auto indexer set grew to %d, want <= %d (cap not enforced)", n, maxAutoIndexers)
+	}
+
+	// An explicit operator indexer is exempt and must survive further flooding.
+	var ex [32]byte
+	ex[0] = 0xEE
+	lk.AddIndexer(ex, "explicit")
+	for i := 0; i < maxAutoIndexers*2; i++ {
+		lk.NotePublisherSeen(mkpk(1_000_000 + i))
+	}
+	foundExplicit := false
+	for _, info := range lk.Indexers() {
+		if info.PubKey == ex {
+			foundExplicit = true
+			if info.Auto {
+				t.Error("explicit indexer wrongly marked Auto")
+			}
+		}
+	}
+	if !foundExplicit {
+		t.Error("explicit indexer was evicted by the auto-set cap")
+	}
+	if n := len(lk.Indexers()); n > maxAutoIndexers+1 {
+		t.Errorf("total indexers %d exceeds cap + explicit", n)
+	}
+}
+
 // ---- BEP-46 pointer decode cap ----
 
 func TestDecodePointerValueRejectsOversize(t *testing.T) {
