@@ -14,9 +14,12 @@ import (
 	"github.com/swartznet/swartznet/internal/httpapi"
 )
 
-// maxFollowFileBytes bounds the companion follow file (~10k follows). An
-// oversize file fails closed wholesale rather than silently dropping a suffix.
-const maxFollowFileBytes = 1 << 20
+// maxFollowFileBytes bounds the companion follow file. Sized well above the
+// ~10k-follows target even with long labels (compact entries are ~90 B, so 10k
+// ≈ 0.9 MiB; 4 MiB leaves comfortable headroom so a valid large follow set is
+// never dropped wholesale on restart). An oversize file still fails closed
+// wholesale rather than silently dropping a suffix.
+const maxFollowFileBytes = 4 << 20
 
 // followEntry is one row in the companion follow file — a single JSON array.
 type followEntry struct {
@@ -181,7 +184,11 @@ func (a *companionAdapter) persistFollows() error {
 	for pub, label := range following {
 		entries = append(entries, followEntry{PubKey: hex.EncodeToString(pub[:]), Label: label})
 	}
-	data, err := json.MarshalIndent(entries, "", "  ")
+	// Compact (not indented): pretty-printing ~doubled the on-disk size, so a
+	// large-but-valid follow set could exceed LoadFollowFile's read cap and be
+	// dropped WHOLESALE on the next restart (write/read size asymmetry). Compact
+	// keeps the documented capacity comfortably under the cap.
+	data, err := json.Marshal(entries)
 	if err != nil {
 		return fmt.Errorf("marshal follows: %w", err)
 	}
