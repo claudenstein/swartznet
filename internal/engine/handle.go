@@ -243,6 +243,14 @@ func (e *Engine) watchCompletion(h *Handle) {
 	// re-adds it to the Bloom idempotently.
 	e.promoteQueued()
 
+	// Companion bookkeeping torrents are NOT content — they must never enter the
+	// known-good Bloom (which feeds Layer-D spam scoring); each companion refresh
+	// would otherwise monotonically fill the fixed-size filter and erode the spam
+	// signal. Promotion above stays unconditional (§6); only this side-effect is
+	// gated, mirroring autoIndex's companion guard.
+	if h.companion {
+		return
+	}
 	// Auto-confirm the completed infohash into the known-good Bloom (a
 	// benign self-signal — the node fully downloaded this content). This is
 	// bloom.Add ONLY, never RecordConfirmed: completion must not

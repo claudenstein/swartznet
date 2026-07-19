@@ -13,17 +13,22 @@ import (
 // Host header must be loopback (DNS-rebind defense) and any present
 // Origin/Referer must be loopback too.
 //
-// GET, HEAD, and OPTIONS are always exempt — reads carry no CSRF risk and the
-// CLI/web UI depend on unguarded reads.
+// The DNS-rebind Host-header check applies to EVERY method, including reads: a
+// rebind attacker who points a hostname at the loopback API sends a non-loopback
+// Host, and reads leak privacy-sensitive state (torrent list, publisher
+// identity, published keywords). Exempting GET/HEAD/OPTIONS from the Host check
+// left every read endpoint open. The Origin/Referer cross-origin CSRF check
+// stays write-only (reads carry no state-change/CSRF risk). This matches the
+// documented localhost-only model — writes already required a loopback Host.
 func withCSRFGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHostHeader(r.Host) {
+			http.Error(w, "forbidden: non-loopback Host", http.StatusForbidden)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 			next.ServeHTTP(w, r)
-			return
-		}
-		if !isLoopbackHostHeader(r.Host) {
-			http.Error(w, "forbidden: non-loopback Host", http.StatusForbidden)
 			return
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {

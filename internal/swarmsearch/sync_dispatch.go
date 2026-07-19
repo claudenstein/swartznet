@@ -31,6 +31,13 @@ func (p *Protocol) registerSyncSession(addr string, s *SyncSession) {
 	if p.syncSessions[addr] == nil {
 		p.syncSessions[addr] = make(map[uint32]*SyncSession)
 	}
+	// Stop any incumbent at this txid before replacing it, so its pump goroutine
+	// is not orphaned (unreachable from the registry → never StopPump'd, leaking
+	// until budget exhaustion). Mirrors registerSyncSessionIfUnderCap; the initiator
+	// and responder txid spaces can collide (both climb from 1 per peer).
+	if incumbent, ok := p.syncSessions[addr][s.txid]; ok && incumbent != s {
+		incumbent.StopPump()
+	}
 	p.syncSessions[addr][s.txid] = s
 }
 

@@ -69,9 +69,11 @@ func TestCSRFGuard(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{"GET exempt even with evil origin", "GET", "localhost:7654", "http://evil.example", "", 200, ""},
-		{"HEAD exempt", "HEAD", "evil.example", "http://evil.example", "", 200, ""},
-		{"OPTIONS exempt", "OPTIONS", "evil.example", "", "", 200, ""},
+		{"GET loopback Host passes even with evil origin", "GET", "localhost:7654", "http://evil.example", "", 200, ""},
+		{"GET non-loopback Host blocked (DNS-rebind)", "GET", "evil.example:7654", "", "", 403, "forbidden: non-loopback Host"},
+		{"HEAD loopback Host passes", "HEAD", "localhost:7654", "", "", 200, ""},
+		{"HEAD non-loopback Host blocked", "HEAD", "evil.example", "http://evil.example", "", 403, "forbidden: non-loopback Host"},
+		{"OPTIONS non-loopback Host blocked", "OPTIONS", "evil.example", "", "", 403, "forbidden: non-loopback Host"},
 		{"POST clean loopback", "POST", "localhost:7654", "", "", 200, ""},
 		{"POST loopback origin passes", "POST", "localhost:7654", "http://localhost:7654", "", 200, ""},
 		{"POST 127.0.0.1 origin passes", "POST", "127.0.0.1:7654", "http://127.0.0.1:7654", "", 200, ""},

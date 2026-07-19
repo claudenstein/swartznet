@@ -67,7 +67,11 @@ func cmdCrawlProbe(args []string, stdout, stderr io.Writer) int {
 	// A throwaway loopback DHT server, just long enough to issue the query.
 	// NoSecurity so we may use an arbitrary node ID; Passive so we never
 	// answer inbound queries.
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	// Bind 0.0.0.0 (not loopback): the kernel refuses to send from a 127.0.0.1
+	// source to a non-loopback destination, so a loopback-bound socket cannot
+	// probe any real DHT node — the tool's entire purpose. (The crawl command
+	// binds 0.0.0.0 for the same reason.)
+	conn, err := net.ListenPacket("udp", "0.0.0.0:0")
 	if err != nil {
 		return reportRunErr(fmt.Errorf("bind loopback: %w", err), stderr)
 	}
