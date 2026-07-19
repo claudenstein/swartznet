@@ -18,9 +18,9 @@ type fakeCompanion struct {
 	lastLabel  string
 }
 
-func (f *fakeCompanion) PublisherStatus() CompanionPublisherStatus  { return f.pubStatus }
-func (f *fakeCompanion) RefreshNow() error                          { return f.refreshErr }
-func (f *fakeCompanion) SubscriberStatus() []CompanionFollowStatus  { return f.subStatus }
+func (f *fakeCompanion) PublisherStatus() CompanionPublisherStatus { return f.pubStatus }
+func (f *fakeCompanion) RefreshNow() error                         { return f.refreshErr }
+func (f *fakeCompanion) SubscriberStatus() []CompanionFollowStatus { return f.subStatus }
 func (f *fakeCompanion) Follow(pk [32]byte, label string) error {
 	f.lastFollow, f.lastLabel = pk, label
 	return f.followErr
@@ -52,7 +52,10 @@ func TestCompanionStatusRoute(t *testing.T) {
 func TestCompanionStatusUnconfigured503(t *testing.T) {
 	t.Parallel()
 	addr := startSearchServer(t, Options{}) // no Companion
-	resp, _ := http.Get("http://" + addr + "/companion")
+	resp, err := http.Get("http://" + addr + "/companion")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)

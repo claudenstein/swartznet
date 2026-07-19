@@ -129,19 +129,27 @@ salt    = utf8_lowercase_token(keyword)   ; max 64 bytes per BEP-44
 target  = SHA1(publisher_pubkey || salt)  ; per BEP-44
 ```
 
-The salt is the bare keyword bytes for shard 0. Publishers
-that need to spread hits across more than ~25-40 entries
-MUST shard by appending `#<n>` for `n >= 1`:
+The salt is the bare (already-lowercased) keyword bytes.
+
+**Oversize handling in v1 is oldest-hit eviction, not
+sharding.** A (publisher, keyword) value is a single BEP-44
+mutable item capped at 1000 bytes; when a keyword accumulates
+more hits than fit, the publisher drops the *oldest* hit until
+the encoded value is back under the cap (so a hot keyword keeps
+its most recent ~25-40 hits). The reference implementation never
+splits a keyword across multiple targets.
+
+The `#<n>` multi-shard scheme and the `more` field (see below)
+are **reserved scaffolding**: they ship on the wire (the `more`
+field is omitted while zero) and `SaltForShard(keyword, n>=1)`
+stays exported, so a future version can add spill/redundancy
+without a format bump — but v1 publishers never set `more`,
+never write shard 1+, and searchers never follow `more`.
 
 ```
-salt[0] = keyword
-salt[1] = keyword + "#1"
-salt[2] = keyword + "#2"
-...
+salt[0] = keyword                    ; the only shard v1 writes
+salt[n] = keyword + "#" + n   (n>=1) ; RESERVED, not written in v1
 ```
-
-Shard 0 SHOULD set its `more` field (see below) to `1` so
-searchers know to fetch the additional shards.
 
 ### Tokenisation
 

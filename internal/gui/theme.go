@@ -66,6 +66,6 @@ func (swartzTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Co
 	}
 }
 
-func (swartzTheme) Font(s fyne.TextStyle) fyne.Resource       { return theme.DefaultTheme().Font(s) }
-func (swartzTheme) Icon(n fyne.ThemeIconName) fyne.Resource   { return theme.DefaultTheme().Icon(n) }
-func (swartzTheme) Size(n fyne.ThemeSizeName) float32         { return theme.DefaultTheme().Size(n) }
+func (swartzTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
+func (swartzTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
+func (swartzTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }

@@ -14,7 +14,18 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
-### Slice 12 — Aggregate index: frozen contracts + offline tooling (2026-07-19, in progress)
+### Slice 13 — Hardening: CI merge gate + doc/license reconciliation (2026-07-19)
+
+- The CI merge gate (`gofmt -s`, `go vet`, `go mod tidy`, `go test -race` with
+  the Fyne build deps, timing-sensitive scenarios excluded) is confirmed to run
+  the full deterministic wire-compat suite — all `contracts/*` golden vectors,
+  future-service-bit tolerance, and reject-code-2 — and now passes green (the
+  pass caught and fixed real formatting/vet breakers).
+- Docs reconciled with code: `docs/07` now documents oldest-hit eviction (the
+  shipping oversize handling) with DHT sharding as reserved scaffolding, not a
+  requirement; `ledongthuc/pdf` is correctly attributed BSD-3-Clause.
+
+### Slice 12 — Aggregate index: frozen contracts + offline tooling (2026-07-19)
 
 The signed SNAGG B-tree Aggregate index format and its DHT pointer are frozen,
 and the offline builder/inspector/query tooling ships.

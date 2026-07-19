@@ -229,13 +229,13 @@ func (s *Subscriber) ingest(pubHex string, idx CompanionIndex) (torrents, conten
 					continue
 				}
 				cd := indexer.ContentDoc{
-					InfoHash:  ih,
-					FileIndex: fr.Index,
-					FilePath:  fr.Path,
-					FileSize:  fr.Size,
-					Mime:      fr.Mime,
-					Extractor: fr.Extractor,
-					Text:      ch.Text,
+					InfoHash:   ih,
+					FileIndex:  fr.Index,
+					FilePath:   fr.Path,
+					FileSize:   fr.Size,
+					Mime:       fr.Mime,
+					Extractor:  fr.Extractor,
+					Text:       ch.Text,
 					ChunkIndex: ci,
 				}
 				if err := s.ingester.IndexContent(cd); err != nil {

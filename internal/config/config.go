@@ -133,8 +133,8 @@ func Default() Config {
 
 		CompanionDir:        filepath.Join(root, "companion"),
 		CompanionFollowFile: filepath.Join(root, "companion-follows.json"),
-		ListenPort:     42069,
-		Seed:           true,
+		ListenPort:          42069,
+		Seed:                true,
 		// Default sharing: full local index, file + content hits on.
 		ShareLocal:       2,
 		ShareFileHits:    true,
