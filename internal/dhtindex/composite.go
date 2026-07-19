@@ -50,18 +50,29 @@ func (c *composite) Retract(ctx context.Context, ih [20]byte) error {
 // Lookup merges both backends' hits, deduplicating by infohash (primary wins on
 // metadata). A secondary error is tolerated — the primary result stands.
 func (c *composite) Lookup(ctx context.Context, indexerPub [32]byte, token string) ([]dhtschema.KeywordHit, error) {
-	primary, err := c.primary.Lookup(ctx, indexerPub, token)
-	if err != nil {
-		return nil, err
+	// Query BOTH backends and merge. A PRIMARY error must NOT drop the secondary's
+	// hits: a routine keyword miss surfaces as an error from every Getter ("not
+	// found"), and for an indexer running LayerDMode=aggregatePPMI there is no
+	// legacy BEP-44 item at all — the aggregate secondary is the only source.
+	// Only fail the lookup when BOTH backends error (a genuine dual failure).
+	primary, perr := c.primary.Lookup(ctx, indexerPub, token)
+	secondary, serr := c.secondary.Lookup(ctx, indexerPub, token)
+	if perr != nil {
+		c.log.Debug("dhtindex.composite.primary_lookup_err", "err", perr)
 	}
-	secondary, e2 := c.secondary.Lookup(ctx, indexerPub, token)
-	if e2 != nil {
-		c.log.Debug("dhtindex.composite.secondary_lookup_err", "err", e2)
-		return primary, nil
+	if serr != nil {
+		c.log.Debug("dhtindex.composite.secondary_lookup_err", "err", serr)
 	}
-	seen := make(map[string]struct{}, len(primary))
+	if perr != nil && serr != nil {
+		return nil, perr
+	}
+	// Merge, primary (legacy) winning ties, deduped by infohash.
+	seen := make(map[string]struct{}, len(primary)+len(secondary))
 	out := make([]dhtschema.KeywordHit, 0, len(primary)+len(secondary))
 	for _, h := range primary {
+		if _, dup := seen[string(h.IH)]; dup {
+			continue
+		}
 		seen[string(h.IH)] = struct{}{}
 		out = append(out, h)
 	}

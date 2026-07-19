@@ -126,6 +126,33 @@ func TestCompositeSecondaryErrorTolerated(t *testing.T) {
 	}
 }
 
+// TestCompositePrimaryMissDoesNotDropSecondary is the regression for the
+// composite dual-read: a PRIMARY error — which includes a routine keyword "not
+// found" miss, and is the ONLY outcome for an indexer running aggregatePPMI (no
+// legacy BEP-44 item) — must not drop the secondary's hits.
+func TestCompositePrimaryMissDoesNotDropSecondary(t *testing.T) {
+	t.Parallel()
+	priv, pub := genKey(t)
+	// Primary (legacy) over an EMPTY store → "not found" error for "ubuntu".
+	shared := NewSharedMemoryStore()
+	legacy := NewLegacyKeyword(shared.PutterFor(priv), shared.Getter(), mustMem(), PublisherOptions{}, discardLog())
+	// Secondary (aggregate) that DOES hold the hit under this pubkey.
+	agg := newAggregatePPMI(priv, pub, discardLog())
+	ih := bytes.Repeat([]byte{7}, 20)
+	if err := agg.Publish(context.Background(), []string{"ubuntu"}, dhtschema.KeywordHit{IH: ih}); err != nil {
+		t.Fatal(err)
+	}
+	comp := &composite{primary: legacy, secondary: agg, log: discardLog()}
+
+	hits, err := comp.Lookup(context.Background(), pub, "ubuntu")
+	if err != nil {
+		t.Fatalf("composite lookup errored despite the secondary having the hit: %v", err)
+	}
+	if len(hits) != 1 || string(hits[0].IH) != string(ih) {
+		t.Fatalf("got %d hits, want the secondary's 1 (a primary miss dropped it)", len(hits))
+	}
+}
+
 // errBackend fails every operation (models a broken secondary).
 type errBackend struct{}
 
