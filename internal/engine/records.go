@@ -23,6 +23,14 @@ const (
 // RecordCache returns the Aggregate record cache (never nil after New).
 func (e *Engine) RecordCache() *swarmsearch.RecordCache { return e.recCache }
 
+// selfPubkey returns this node's identity pubkey, or zero before SetSigner. Used
+// by the aggregate resolver to skip resolving the node's own tree.
+func (e *Engine) selfPubkey() [32]byte {
+	e.recMu.Lock()
+	defer e.recMu.Unlock()
+	return e.signerPub
+}
+
 // SetSigner installs the identity that mints Aggregate records. The daemon
 // calls it BEFORE RestoreSession so restored torrents mint. It also wires the
 // publisher pubkey the swarm gossips in peer_announce (only when publishing).

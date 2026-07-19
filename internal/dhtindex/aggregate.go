@@ -3,6 +3,7 @@ package dhtindex
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"log/slog"
 	"strings"
 	"sync"
@@ -12,6 +13,31 @@ import (
 	"github.com/swartznet/swartznet/contracts/record"
 	"github.com/swartznet/swartznet/contracts/snagg"
 )
+
+// TreePublisher distributes a freshly rebuilt SNAGG tree: it wraps the bytes as
+// a companion torrent, seeds them, and publishes the BEP-46/PPMI pointer so
+// other nodes can find the tree by this publisher's pubkey. commit is the
+// tree's fingerprint (the SNAGG trailer's Fingerprint), which the pointer binds
+// to so a subscriber can reject a tree whose bytes disagree with the pointer.
+// The engine supplies the live adapter; tests supply a fake. A nil publisher
+// means "local-only" — the tree is built and self-served but never distributed.
+type TreePublisher interface {
+	PublishTree(ctx context.Context, name string, snaggBytes []byte, commit [32]byte) error
+	// RetractTree is called when a rebuild leaves nothing to distribute (the
+	// record set went empty): the publisher drops any seed it is still holding
+	// so it does not keep serving a stale index. The BEP-44 pointer is left to
+	// expire on its TTL (BEP-44 has no delete).
+	RetractTree(ctx context.Context) error
+}
+
+// TreeResolver resolves another publisher's SNAGG tree from just their pubkey:
+// it reads their PPMI pointer over the DHT, fetches the companion torrent it
+// names, and opens the bytes as a commit-verified tree. The engine supplies the
+// live adapter; tests supply a fake. A nil resolver means cross-publisher
+// lookups return no hits (the local half still works).
+type TreeResolver interface {
+	ResolveTree(ctx context.Context, pubkey [32]byte) (*snagg.Tree, error)
+}
 
 // aggregatePPMI is the Aggregate RecordBackend: it accumulates signed
 // keyword→infohash records, packs them into an in-memory signed SNAGG B-tree,
@@ -29,7 +55,14 @@ type aggregatePPMI struct {
 	mu      sync.Mutex
 	records map[[32]byte]snagg.Record // keyed by ElementID (dedup across re-signs)
 	tree    []byte                    // built SNAGG file (nil until first build)
+	fp      [32]byte                  // fingerprint of the last built tree (PPMI commit)
 	dirty   bool
+
+	// Distribution ports (nil ⇒ local-only). Set once at construction via
+	// setDistribution before the backend goes live, so no lock is needed to
+	// read them; snapshots under mu keep the race detector happy regardless.
+	publisher TreePublisher
+	resolver  TreeResolver
 }
 
 func newAggregatePPMI(priv ed25519.PrivateKey, pub [32]byte, log *slog.Logger) *aggregatePPMI {
@@ -37,6 +70,41 @@ func newAggregatePPMI(priv ed25519.PrivateKey, pub [32]byte, log *slog.Logger) *
 		log = slog.Default()
 	}
 	return &aggregatePPMI{log: log, priv: priv, pub: pub, records: make(map[[32]byte]snagg.Record)}
+}
+
+// DistributableBackend is implemented by RecordBackends that can distribute
+// their SNAGG tree over the DHT (as a companion torrent + PPMI pointer) and
+// resolve other publishers' trees. The engine type-asserts NewBackend's result
+// to this and wires live adapters — the write side gets a TreePublisher, the
+// read side a TreeResolver. A legacy backend does not implement it, so the
+// assert simply fails and nothing wires (ship default stays inert).
+type DistributableBackend interface {
+	// SetDistribution installs the distribute-on-refresh / resolve-on-lookup
+	// ports. Either may be nil (the write side passes only a publisher, the read
+	// side only a resolver).
+	SetDistribution(pub TreePublisher, res TreeResolver)
+}
+
+// SetDistribution wires the optional distribute-on-refresh / resolve-on-lookup
+// ports. Called by the engine when it supplies live adapters; left nil for a
+// local-only or read-only instance. A later call overrides only the non-nil
+// arguments, so the read and write sides can each wire their own half.
+func (a *aggregatePPMI) SetDistribution(pub TreePublisher, res TreeResolver) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if pub != nil {
+		a.publisher = pub
+	}
+	if res != nil {
+		a.resolver = res
+	}
+}
+
+// treeName is the stable companion-torrent filename for this publisher's tree.
+// Deriving it from the pubkey keeps the wrapped infohash a pure function of the
+// tree bytes, so re-seeding identical bytes yields an identical infohash.
+func (a *aggregatePPMI) treeName() string {
+	return "swartznet-aggregate-" + hex.EncodeToString(a.pub[:8]) + ".snagg"
 }
 
 // Publish signs one record per name-keyword for this node's own hit and adds it
@@ -66,11 +134,32 @@ func (a *aggregatePPMI) Publish(_ context.Context, keywords []string, hit dhtsch
 	return nil
 }
 
-// Refresh rebuilds the SNAGG tree if the record set changed.
-func (a *aggregatePPMI) Refresh(_ context.Context) error {
+// Refresh rebuilds the SNAGG tree if the record set changed, then — if a
+// TreePublisher is wired — distributes the fresh bytes (seed + PPMI pointer).
+// The distribute step runs off-lock: it snapshots the built tree + fingerprint
+// under mu, then releases before the seed/DHT work so a slow put can't stall a
+// concurrent Publish/Lookup. A distribute error is returned but the local tree
+// is already updated, so self-lookup keeps working regardless.
+func (a *aggregatePPMI) Refresh(ctx context.Context) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.rebuildLocked()
+	tree := a.tree
+	fp := a.fp
+	pub := a.publisher
+	name := a.treeName()
+	a.mu.Unlock()
+	if pub == nil {
+		return nil
+	}
+	if tree == nil {
+		// Nothing to distribute (records empty or read-only): drop any seed we
+		// still hold so a retracted-to-empty publisher stops serving stale bytes.
+		return pub.RetractTree(ctx)
+	}
+	if err := pub.PublishTree(ctx, name, tree, fp); err != nil {
+		a.log.Warn("dhtindex.aggregate.distribute_err", "err", err)
+		return err
+	}
 	return nil
 }
 
@@ -100,6 +189,7 @@ func (a *aggregatePPMI) rebuildLocked() {
 	a.dirty = false
 	if len(a.records) == 0 || a.priv == nil {
 		a.tree = nil
+		a.fp = [32]byte{}
 		return
 	}
 	recs := make([]snagg.Record, 0, len(a.records))
@@ -112,17 +202,36 @@ func (a *aggregatePPMI) rebuildLocked() {
 	if err != nil {
 		a.log.Warn("dhtindex.aggregate.build_err", "err", err)
 		a.tree = nil
+		a.fp = [32]byte{}
 		return
 	}
 	a.tree = built.Bytes
+	a.fp = built.Fingerprint
 }
 
-// Lookup serves an exact-keyword query from this node's own SNAGG tree. Only
-// self-lookup is wired locally (indexerPub must be this node's pubkey); other
-// publishers' trees resolve via the deferred DHT-PPMI path.
-func (a *aggregatePPMI) Lookup(_ context.Context, indexerPub [32]byte, token string) ([]dhtschema.KeywordHit, error) {
+// Lookup serves an exact-keyword query. A self-lookup (indexerPub == this
+// node's pubkey) answers from the locally built tree. A cross-publisher lookup
+// resolves the other publisher's tree via the TreeResolver port (PPMI pointer →
+// companion torrent → commit-verified tree); with no resolver wired, or when a
+// remote publisher can't be resolved right now, it returns no hits rather than
+// an error — one unreachable publisher must not fail the whole query.
+func (a *aggregatePPMI) Lookup(ctx context.Context, indexerPub [32]byte, token string) ([]dhtschema.KeywordHit, error) {
 	if indexerPub != a.pub {
-		return nil, nil
+		a.mu.Lock()
+		res := a.resolver
+		a.mu.Unlock()
+		if res == nil {
+			return nil, nil
+		}
+		tree, err := res.ResolveTree(ctx, indexerPub)
+		if err != nil {
+			a.log.Debug("dhtindex.aggregate.resolve_err", "pub", hex.EncodeToString(indexerPub[:8]), "err", err)
+			return nil, nil
+		}
+		if tree == nil {
+			return nil, nil
+		}
+		return exactHits(tree, token)
 	}
 	a.mu.Lock()
 	a.rebuildLocked()
@@ -135,13 +244,19 @@ func (a *aggregatePPMI) Lookup(_ context.Context, indexerPub [32]byte, token str
 	if err != nil {
 		return nil, err
 	}
+	return exactHits(tree, token)
+}
+
+// exactHits runs a prefix Find and keeps only exact-keyword matches, mapping
+// them to KeywordHits — the exact-keyword parity the legacy backend gives.
+func exactHits(tree *snagg.Tree, token string) ([]dhtschema.KeywordHit, error) {
 	recs, err := tree.Find(token)
 	if err != nil {
 		return nil, err
 	}
 	var hits []dhtschema.KeywordHit
 	for _, r := range recs {
-		if r.Kw != token { // Find is prefix; keep exact-keyword parity with legacy
+		if r.Kw != token {
 			continue
 		}
 		hits = append(hits, dhtschema.KeywordHit{IH: append([]byte(nil), r.Ih[:]...)})

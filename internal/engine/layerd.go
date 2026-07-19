@@ -33,6 +33,13 @@ func (e *Engine) setupLayerDLookup() {
 		e.log.Warn("engine.layerd.backend_err", "err", err)
 		return
 	}
+	// Aggregate/composite read side: wire the resolver so cross-publisher
+	// lookups can pull another publisher's SNAGG tree (PPMI pointer → companion
+	// torrent → commit-verified tree). A legacy backend does not implement
+	// DistributableBackend, so this is a no-op there (ship default stays inert).
+	if d, ok := readBackend.(dhtindex.DistributableBackend); ok {
+		d.SetDistribution(nil, &aggTreeResolver{fetcher: e, getter: getter, self: e.selfPubkey})
+	}
 	lk := dhtindex.NewLookup(readBackend)
 	e.repMu.Lock()
 	lk.SetTracker(e.tracker)
@@ -94,6 +101,12 @@ func (e *Engine) setupLayerDPublisher(priv ed25519.PrivateKey, pub [32]byte) {
 	if err != nil {
 		e.log.Warn("engine.layerd.backend_err", "err", err)
 		return
+	}
+	// Aggregate/composite write side: wire the publisher so a rebuilt SNAGG tree
+	// is seeded as a companion torrent + advertised via a PPMI pointer on each
+	// refresh. Legacy backends don't implement DistributableBackend (no-op).
+	if d, ok := backend.(dhtindex.DistributableBackend); ok {
+		d.SetDistribution(&aggTreePublisher{seeder: e, putter: putter, dir: e.cfg.CompanionDir}, nil)
 	}
 	publisher := dhtindex.NewPublisher(backend, opts, e.log)
 	publisher.Start()

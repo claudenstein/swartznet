@@ -78,6 +78,15 @@ func (c *composite) Lookup(ctx context.Context, indexerPub [32]byte, token strin
 // Status reports the primary (shipping-path) state.
 func (c *composite) Status() PublisherStatus { return c.primary.Status() }
 
+// SetDistribution forwards to the aggregate secondary if it is distributable,
+// so a composite (legacy primary + aggregate secondary) also seeds its SNAGG
+// tree and resolves cross-publisher trees. The legacy primary is unaffected.
+func (c *composite) SetDistribution(pub TreePublisher, res TreeResolver) {
+	if d, ok := c.secondary.(DistributableBackend); ok {
+		d.SetDistribution(pub, res)
+	}
+}
+
 func (c *composite) Close() error {
 	err := c.primary.Close()
 	if e2 := c.secondary.Close(); e2 != nil && err == nil {

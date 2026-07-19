@@ -41,9 +41,17 @@ and the offline builder/inspector/query tooling ships.
   40), inspect its trailer (integrity gate), and prefix-query it (`--verify`
   re-derives the fingerprint).
 
-The live aggregatePPMI/composite backends, DHT distribution, admission seeds,
-and crawler remain opt-in and off by default — the ship default stays
-`LayerDMode=legacy`.
+The live aggregatePPMI/composite backends and DHT distribution are wired (see
+below); admission seeds and the crawler remain the opt-in tail. All of it is off
+by default — the ship default stays `LayerDMode=legacy`.
+
+- **Aggregate DHT distribution (cross-publisher discovery).** In
+  `aggregatePPMI`/`composite` mode a rebuilt SNAGG tree is now seeded as a
+  companion torrent and advertised by a signed PPMI pointer on each refresh, and
+  a lookup for another publisher resolves their pointer → fetches their tree →
+  verifies it against the pointer's commit before returning hits. An unreachable
+  or unknown publisher degrades to no hits — never a query error — so one
+  offline publisher can't fail a search. Still off by default (`legacy`).
 
 ### Slice 11 — Native Fyne GUI (2026-07-19)
 

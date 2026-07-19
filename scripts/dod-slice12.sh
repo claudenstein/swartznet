@@ -40,6 +40,12 @@ run_go ppmidht ./internal/dhtindex/ \
 run_go aggtorrent ./internal/dhtindex/ \
   'TestWrapSnaggTorrentPieceLengthAligns|TestWrapSnaggTorrentRejectsMisaligned|TestOpenVerifiedTreeCommitBinding' \
   "aggregate distribution core: SNAGG tree wraps to a piece-aligned torrent; OpenVerifiedTree binds the fetched tree to the PPMI commit + rejects a corrupt trailer"
+run_go aggdist ./internal/dhtindex/ \
+  'TestAggregateDistributeResolveRoundTrip|TestAggregateResolveToleratesFailure|TestAggregateResolveRejectsMismatchedCommit|TestAggregateRetractToEmptyDropsSeed|TestAggregateNoPublisherIsLocalOnly' \
+  "aggregate distribution orchestration: node A distributes-on-refresh, node B resolves-on-lookup through the real wrap/open/commit seam; a failing/unknown/unresolved publisher degrades to no-hits (never a query error); retract-to-empty drops the stale seed; nil-publisher stays local-only"
+run_go aggadapter ./internal/engine/ \
+  'TestAggTreePublisherWritesSeedsPuts|TestAggTreeResolverFetchesAndVerifies|TestAggTreeResolverSkipsSelf' \
+  "engine live adapters: TreePublisher writes+seeds+puts the PPMI pointer (infohash==seed, commit==fingerprint), drops the stale seed on republish + RetractTree; TreeResolver fetches+commit-verifies, rejects a mismatched commit / malformed pointer, and SKIPS a self-lookup (never tears down the node's own seed)"
 run_go seammode ./internal/engine/ 'TestLayerDCompositeModeBuilds|TestLayerDAggregateModeBuilds' \
   "engine selects composite / aggregatePPMI LayerDMode with zero app change (ship default stays legacy)"
 run_go cfgmode ./internal/config/ 'TestValidateLayerDMode' \
