@@ -77,6 +77,13 @@ func (e *Engine) autoIndex(h *Handle) {
 	// (gated on the signer + cache, not on per-torrent indexing).
 	e.mintAggregateRecords(h)
 
+	// Publish this torrent's NAME-keywords to Layer D (BEP-44). No-op unless a
+	// publisher is active (identity present, publishing not suppressed). This
+	// sits alongside record-minting, BEFORE the Layer-L gate — per-torrent
+	// indexing-off still publishes existence; only --no-index / --no-dht-publish
+	// suppress network-visible publication.
+	e.publishTorrent(h)
+
 	idx, _ := e.index()
 	if idx == nil || !h.isIndexing() {
 		return

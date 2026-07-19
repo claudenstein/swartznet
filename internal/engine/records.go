@@ -36,6 +36,11 @@ func (e *Engine) SetSigner(priv ed25519.PrivateKey, pub [32]byte) {
 	if e.swarm != nil {
 		e.swarm.SetPublisherPubkey(pub, has && e.publishingActive())
 	}
+	// Bring up the Layer-D write side now that an identity is present. No-op
+	// when the DHT is off or publishing is suppressed (leech-only Layer D).
+	if has {
+		e.setupLayerDPublisher(priv, pub)
+	}
 }
 
 // mintAggregateRecords signs one record per torrent name-keyword and adds it to

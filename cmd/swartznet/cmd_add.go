@@ -35,6 +35,7 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 	apiAddr := fs.String("api-addr", "localhost:7654", "HTTP API listen address (empty to disable)")
 	identityPath := fs.String("identity", "", "path to the ed25519 identity.key file (load-only unless it is the default path, which is auto-created)")
 	noDHT := fs.Bool("no-dht", false, "disable the mainline DHT entirely")
+	noDHTPublish := fs.Bool("no-dht-publish", false, "stay on the DHT but suppress Layer-D (BEP-44) keyword publishing under your identity")
 	leechOnly := fs.Bool("leech-only", false, "disable uploading (debug)")
 	noIndex := fs.Bool("no-index", false, "don't index downloaded content at all")
 	var dhtBootstrap stringSliceFlag
@@ -68,6 +69,7 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 		cfg.IdentityPath = *identityPath
 	}
 	cfg.DisableDHT = *noDHT
+	cfg.DisableDHTPublish = *noDHTPublish
 	cfg.NoUpload = *leechOnly
 	cfg.DHTBootstrapAddrs = dhtBootstrap
 	cfg.DHTInsecure = *dhtInsecure

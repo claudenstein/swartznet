@@ -14,6 +14,40 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 9 — Layer D: BEP-44 keyword index (2026-07-19)
+
+A node now publishes its own torrents' name-keywords as signed BEP-44 mutable
+items and resolves a query against a set of known indexer pubkeys — a real
+2-node DHT cluster round-trips (node A publishes, node B searches and recovers
+A's infohash) over nothing but standard mainline traffic (BEP-44/46/51 — no new
+verb, reserved bit, or UDP port).
+
+- New `contracts/dhtschema`: the frozen `KeywordValue` wire payload (bencoded
+  via anacrolix `torrent/bencode` for byte-identity with the signing path), the
+  ≤1000-byte cap enforced **before** unmarshal on decode, and the verbatim,
+  never-truncated `SaltForKeyword`. Golden-vector pinned, with a `bep44` re-
+  marshal-identity gate and a legacy-bytes read-back gate.
+- New `internal/dhtindex`: the swappable `RecordBackend` seam
+  (`Publish/Refresh/Retract/Lookup/Status/Close`) with the shipping
+  `legacyKeyword` per-keyword backend; the `Publisher` worker (buffered submit +
+  hourly refresh + retract) with a 55-minute per-keyword throttle and oldest-hit
+  eviction; the `Lookup` read side (most-distinctive token, parallel per-indexer
+  fan-out, reputation-gated, scored merge); the `AnacrolixPutter`/`Getter`
+  sharing the fail-closed `checkPutStats` guard (a zero-node put surfaces as a
+  failure, never a false success); the BEP-46 infohash-pointer primitive; and
+  the BEP-51 `SampleInfohashes` primitive.
+- Engine wiring: publish-on-`GotInfo` submits the torrent **name** keywords only
+  (content tokens never reach the DHT) behind `--no-index` / `--no-dht-publish`;
+  retract-on-removal; the read side stays alive leech-only while the write side
+  is suppressed under those flags (the privacy cascade); the self-pubkey and
+  `peer_announce`-gossiped pubkeys enter the lookup set.
+- `searchmux` gains the third concurrent layer; `POST /search {"dht":true}`
+  returns a `dht` block; a Layer-D error is surfaced inline (200), never a 5xx
+  (§5.9). New `GET /publish` status route. New `swartznet crawl-probe` (a
+  stateless BEP-51 diagnostic) and `--no-dht-publish` flag, both in `--help`.
+- Config: `LayerDMode` (`legacy` only this release), `MinIndexerScore`,
+  `PublisherPath`.
+
 ### Slice 8 — RIBLT sync + Aggregate record substrate (2026-07-19)
 
 Two peers now reconcile their signed keyword→infohash record sets over

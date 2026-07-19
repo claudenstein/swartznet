@@ -200,22 +200,41 @@ func searchViaAPI(apiAddr, query string, limit int, signedBy string, swarm, dht 
 	}
 	fmt.Fprintf(stdout, "Query: %s\n", query)
 	fmt.Fprintf(stdout, "Local: %d hits\n\n", out.Local.Total)
-	if len(out.Local.Hits) == 0 {
-		fmt.Fprintln(stdout, "(no results)")
-		return exitOK
+	if len(out.Local.Hits) > 0 {
+		fmt.Fprintln(stdout, "=== LOCAL ===")
+		for i, h := range out.Local.Hits {
+			if h.DocType == "content" {
+				fmt.Fprintf(stdout, "%3d. [content] %s  (%s)  extractor=%s\n", i+1, h.FilePath, h.Mime, h.Extractor)
+				fmt.Fprintf(stdout, "     infohash: %s  score=%.3f\n", h.InfoHash, h.Score)
+			} else {
+				fmt.Fprintf(stdout, "%3d. [torrent] %s\n", i+1, h.Name)
+				fmt.Fprintf(stdout, "     infohash: %s  size=%s  score=%.3f\n", h.InfoHash, humanBytes(h.SizeBytes), h.Score)
+			}
+			if snip := firstFragment(h.Fragments); snip != "" {
+				fmt.Fprintf(stdout, "     … %s\n", stripMarks(snip))
+			}
+		}
 	}
-	fmt.Fprintln(stdout, "=== LOCAL ===")
-	for i, h := range out.Local.Hits {
-		if h.DocType == "content" {
-			fmt.Fprintf(stdout, "%3d. [content] %s  (%s)  extractor=%s\n", i+1, h.FilePath, h.Mime, h.Extractor)
-			fmt.Fprintf(stdout, "     infohash: %s  score=%.3f\n", h.InfoHash, h.Score)
-		} else {
-			fmt.Fprintf(stdout, "%3d. [torrent] %s\n", i+1, h.Name)
-			fmt.Fprintf(stdout, "     infohash: %s  size=%s  score=%.3f\n", h.InfoHash, humanBytes(h.SizeBytes), h.Score)
+	if out.Swarm != nil {
+		fmt.Fprintf(stdout, "\n=== SWARM (Layer S) === asked=%d responded=%d\n", out.Swarm.Asked, out.Swarm.Responded)
+		if out.Swarm.Error != "" {
+			fmt.Fprintf(stdout, "     (error: %s)\n", out.Swarm.Error)
 		}
-		if snip := firstFragment(h.Fragments); snip != "" {
-			fmt.Fprintf(stdout, "     … %s\n", stripMarks(snip))
+		for i, h := range out.Swarm.Hits {
+			fmt.Fprintf(stdout, "%3d. %s  %s  seeders=%d  sources=%d\n", i+1, h.InfoHash, h.Name, h.Seeders, len(h.Sources))
 		}
+	}
+	if out.Dht != nil {
+		fmt.Fprintf(stdout, "\n=== DHT (Layer D) === indexers=%d/%d\n", out.Dht.IndexersResponded, out.Dht.IndexersAsked)
+		if out.Dht.Error != "" {
+			fmt.Fprintf(stdout, "     (error: %s)\n", out.Dht.Error)
+		}
+		for i, h := range out.Dht.Hits {
+			fmt.Fprintf(stdout, "%3d. %s  %s  seeders=%d  score=%.3f  sources=%d\n", i+1, h.InfoHash, h.Name, h.Seeders, h.Score, len(h.Sources))
+		}
+	}
+	if len(out.Local.Hits) == 0 && out.Swarm == nil && out.Dht == nil {
+		fmt.Fprintln(stdout, "(no results)")
 	}
 	return exitOK
 }

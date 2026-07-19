@@ -193,6 +193,7 @@ type SearchParams struct {
 	Swarm          bool
 	SwarmTimeoutMS int
 	DHT            bool
+	DHTTimeoutMS   int
 }
 
 // LocalHit is one Layer-L result. file_index is omitempty so a content hit
@@ -219,19 +220,41 @@ type LocalBlock struct {
 
 // SearchResult is the adapter's return: the local block plus an error the
 // handler maps to 500 (Layer-L failure is fatal to the whole request), and the
-// optional swarm block (a Layer-S failure is surfaced INLINE, never a 500).
+// optional swarm/dht blocks (a Layer-S or Layer-D failure is surfaced INLINE,
+// never a 500).
 type SearchResult struct {
 	Local    LocalBlock
 	LocalErr error
 	Swarm    *SwarmBlock
+	Dht      *DHTBlock
 }
 
-// SearchResponse is the POST /search document. The swarm block appears only
-// when the request asked for it AND the swarm collaborator is wired.
+// SearchResponse is the POST /search document. The swarm/dht blocks appear only
+// when the request asked for them AND the collaborator is wired.
 type SearchResponse struct {
 	Local LocalBlock  `json:"local"`
 	Swarm *SwarmBlock `json:"swarm,omitempty"`
-	// dht block lands with its slice.
+	Dht   *DHTBlock   `json:"dht,omitempty"`
+}
+
+// DHTBlock is the Layer-D portion of a search response. A Layer-D failure
+// renders as the Error string with a 200 (§5.9), never a 5xx.
+type DHTBlock struct {
+	IndexersAsked     int      `json:"indexers_asked"`
+	IndexersResponded int      `json:"indexers_responded"`
+	Hits              []DHTHit `json:"hits"` // never null
+	Error             string   `json:"error,omitempty"`
+}
+
+// DHTHit is one merged Layer-D result.
+type DHTHit struct {
+	InfoHash string   `json:"infohash"`
+	Name     string   `json:"name"`
+	Size     int64    `json:"size,omitempty"`
+	Seeders  int      `json:"seeders,omitempty"`
+	Score    float64  `json:"score"`
+	BloomHit bool     `json:"bloom_hit,omitempty"`
+	Sources  []string `json:"sources"`
 }
 
 // SwarmBlock is the Layer-S portion of a search response. A Layer-S failure

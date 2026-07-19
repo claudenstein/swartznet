@@ -74,6 +74,10 @@ type Options struct {
 	// SwarmStatus reports (known, capable) sn_search peer counts for /status;
 	// nil ⇒ the swarm block stays zero.
 	SwarmStatus func() (known, capable int)
+	// PublisherStatus reports the Layer-D publisher state for GET /publish and
+	// the /status publisher block; nil ⇒ empty publisher state (the PubKey
+	// still renders from PublisherPubKey when an identity is loaded).
+	PublisherStatus func() PublisherStatus
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -187,6 +191,7 @@ func (s *Server) Stop(ctx context.Context) error {
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("GET /publish", s.handlePublish)
 	s.torrentRoutes(mux)
 	s.searchRoutes(mux)
 	s.confirmFlagRoutes(mux)
@@ -231,8 +236,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		known, capable := s.opts.SwarmStatus()
 		out.Swarm = SwarmStatus{KnownPeers: known, CapablePeers: capable}
 	}
+	if s.opts.PublisherStatus != nil {
+		ps := s.opts.PublisherStatus()
+		// PubKey is owned by PublisherPubKey (renders whenever an identity is
+		// loaded, independent of the publisher); the totals come from the
+		// publisher. The per-keyword list is reserved for GET /publish.
+		out.Publisher.TotalKeywords = ps.TotalKeywords
+		out.Publisher.TotalHits = ps.TotalHits
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handlePublish renders the Layer-D publisher state, including the per-keyword
+// list. The PubKey renders from PublisherPubKey whenever an identity is loaded,
+// even before any publisher collaborator is wired.
+func (s *Server) handlePublish(w http.ResponseWriter, _ *http.Request) {
+	var out PublisherStatus
+	if s.opts.PublisherPubKey != nil {
+		out.PubKey = s.opts.PublisherPubKey()
+	}
+	if s.opts.PublisherStatus != nil {
+		ps := s.opts.PublisherStatus()
+		out.TotalKeywords = ps.TotalKeywords
+		out.TotalHits = ps.TotalHits
+		out.Keywords = ps.Keywords
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

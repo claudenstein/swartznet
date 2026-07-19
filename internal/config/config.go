@@ -37,6 +37,10 @@ type Config struct {
 	// ReputationPath locates the per-indexer reputation tracker. Empty
 	// disables it.
 	ReputationPath string
+	// PublisherPath locates the Layer-D publisher manifest (publisher.json),
+	// the full hit list this node re-announces on every refresh. Empty keeps
+	// the manifest in memory only (a fresh process re-publishes from scratch).
+	PublisherPath string
 	// SeedListPath locates the reputation seed list (seeds.json). Empty
 	// skips it.
 	SeedListPath string
@@ -90,6 +94,16 @@ type Config struct {
 	ShareFileHits    bool // default true
 	ShareContentHits bool // default true
 
+	// LayerDMode selects the Layer-D RecordBackend (Slice 9). Only "legacy"
+	// (the per-keyword BEP-44 index) is valid this slice; the Slice-12
+	// Aggregate backends ("composite"/"aggregatePPMI") widen Validate later.
+	// Empty is treated as "legacy".
+	LayerDMode string
+	// MinIndexerScore is the minimum reputation an indexer must have before
+	// Layer-D lookups query it (SPEC §5.7). Zero (default) disables the gate;
+	// it has no effect without a reputation tracker.
+	MinIndexerScore float64
+
 	// Regtest and DHTInsecure are test-only knobs, refused outside test
 	// binaries unless SWARTZNET_UNSAFE=1 (the single unsafe gate).
 	Regtest     bool
@@ -106,6 +120,7 @@ func Default() Config {
 		TrustPath:      filepath.Join(root, "trust.json"),
 		BloomPath:      filepath.Join(root, "known-good.bloom"),
 		ReputationPath: filepath.Join(root, "reputation.json"),
+		PublisherPath:  filepath.Join(root, "publisher.json"),
 		SeedListPath:   filepath.Join(root, "seeds.json"),
 		ListenPort:     42069,
 		Seed:           true,
@@ -113,6 +128,8 @@ func Default() Config {
 		ShareLocal:       2,
 		ShareFileHits:    true,
 		ShareContentHits: true,
+		// Layer D: the shipping per-keyword BEP-44 backend.
+		LayerDMode: "legacy",
 	}
 }
 
@@ -141,6 +158,11 @@ func (c Config) Validate() error {
 	}
 	if c.ShareLocal < 0 || c.ShareLocal > 2 {
 		return fmt.Errorf("config: ShareLocal %d out of range (0..2)", c.ShareLocal)
+	}
+	switch c.LayerDMode {
+	case "", "legacy":
+	default:
+		return fmt.Errorf("config: LayerDMode %q unsupported (only \"legacy\" this release)", c.LayerDMode)
 	}
 	if err := c.checkUnsafe(testing.Testing()); err != nil {
 		return err

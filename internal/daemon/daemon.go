@@ -185,7 +185,13 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		if idx := eng.Index(); idx != nil {
 			mux.Local = idx
 		}
+		// Layer D rides only when the DHT is enabled (a nil DHTLookup would
+		// answer empty anyway, but wiring is gated on the same knob).
+		if !opts.Cfg.DisableDHT {
+			mux.DHT = &dhtSearchAdapter{eng: eng}
+		}
 		apiOpts.Search = adapter.search(mux)
+		apiOpts.PublisherStatus = adapter.publisherStatus
 		if d.Idx != nil {
 			apiOpts.IndexStats = adapter.indexStats
 			apiOpts.LocalDocCount = adapter.localDocCount

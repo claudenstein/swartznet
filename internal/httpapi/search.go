@@ -53,6 +53,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			Swarm:          req.Swarm,
 			SwarmTimeoutMS: req.SwarmTimeout,
 			DHT:            req.DHT,
+			DHTTimeoutMS:   req.DHTTimeout,
 		})
 		if res.LocalErr != nil {
 			s.log.Warn("httpapi.local_err", "err", res.LocalErr)
@@ -63,9 +64,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if out.Local.Hits == nil {
 			out.Local.Hits = []LocalHit{}
 		}
-		// A Layer-S failure is surfaced inline (a 200 with swarm.error), never
-		// a 5xx (§5.9). The block appears only when the adapter produced one.
+		// Layer-S AND Layer-D failures are surfaced inline (a 200 with the
+		// block's error string), never a 5xx (§5.9). Each block appears only
+		// when the adapter produced one.
 		out.Swarm = res.Swarm
+		out.Dht = res.Dht
 	}
 	writeJSON(w, out)
 }

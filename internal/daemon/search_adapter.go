@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
 	"github.com/swartznet/swartznet/internal/indexer"
@@ -14,6 +15,7 @@ import (
 const (
 	maxSearchTimeout     = 30 * time.Second
 	defaultSwarmTimeout  = 2 * time.Second
+	defaultDHTTimeout    = 5 * time.Second
 	swarmCtxTimeoutGrace = 500 * time.Millisecond
 )
 
@@ -23,6 +25,19 @@ type swarmSearchAdapter struct{ eng *engine.Engine }
 
 func (s *swarmSearchAdapter) SwarmSearch(ctx context.Context, req swarmsearch.QueryRequest) (*swarmsearch.QueryResponse, error) {
 	return s.eng.SwarmSearch().Query(ctx, req)
+}
+
+// dhtSearchAdapter satisfies searchmux.DHTSearcher over the engine's Layer-D
+// lookup. A nil lookup (DHT disabled) is never wired into the mux, so the
+// adapter only exists when DHTLookup is live.
+type dhtSearchAdapter struct{ eng *engine.Engine }
+
+func (d *dhtSearchAdapter) DHTSearch(ctx context.Context, q string, _ int) (*dhtindex.LookupResponse, error) {
+	lk := d.eng.DHTLookup()
+	if lk == nil {
+		return &dhtindex.LookupResponse{}, nil
+	}
+	return lk.Query(ctx, q)
 }
 
 // clampSearchTimeout bounds a requested swarm timeout to (0, maxSearchTimeout],
@@ -45,10 +60,21 @@ func clampSearchTimeout(ms int, def time.Duration) time.Duration {
 func (a *controllerAdapter) search(mux *searchmux.Mux) func(httpapi.SearchParams) httpapi.SearchResult {
 	return func(p httpapi.SearchParams) httpapi.SearchResult {
 		ctx := context.Background()
-		var cancel context.CancelFunc
+		// The context deadline bounds the network layers (S and D). Take the
+		// larger of the two requested budgets (each layer runs concurrently),
+		// plus a small grace so a layer's own deadline fires first.
+		var budget time.Duration
 		if p.Swarm {
-			timeout := clampSearchTimeout(p.SwarmTimeoutMS, defaultSwarmTimeout)
-			ctx, cancel = context.WithTimeout(ctx, timeout+swarmCtxTimeoutGrace)
+			budget = clampSearchTimeout(p.SwarmTimeoutMS, defaultSwarmTimeout)
+		}
+		if p.DHT {
+			if d := clampSearchTimeout(p.DHTTimeoutMS, defaultDHTTimeout); d > budget {
+				budget = d
+			}
+		}
+		if budget > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, budget+swarmCtxTimeoutGrace)
 			defer cancel()
 		}
 		res := mux.Search(ctx, searchmux.Query{
@@ -66,8 +92,62 @@ func (a *controllerAdapter) search(mux *searchmux.Mux) func(httpapi.SearchParams
 		if p.Swarm {
 			out.Swarm = swarmBlock(res.Swarm, res.SwarmErr)
 		}
+		if p.DHT {
+			out.Dht = dhtBlock(res.DHT, res.DHTErr)
+		}
 		return out
 	}
+}
+
+// dhtBlock translates a Layer-D response (or error) to the httpapi DTO. An
+// error renders as a block carrying only the Error string (200, §5.9); httpapi
+// imports none of these dhtindex types.
+func dhtBlock(resp *dhtindex.LookupResponse, err error) *httpapi.DHTBlock {
+	block := &httpapi.DHTBlock{Hits: []httpapi.DHTHit{}}
+	if err != nil {
+		block.Error = err.Error()
+		return block
+	}
+	if resp == nil {
+		return block
+	}
+	block.IndexersAsked = resp.IndexersAsked
+	block.IndexersResponded = resp.IndexersResponded
+	for _, h := range resp.Hits {
+		block.Hits = append(block.Hits, httpapi.DHTHit{
+			InfoHash: h.InfoHash,
+			Name:     h.Name,
+			Size:     h.Size,
+			Seeders:  h.Seeders,
+			Score:    h.Score,
+			BloomHit: h.BloomHit,
+			Sources:  h.Sources,
+		})
+	}
+	return block
+}
+
+// publisherStatus adapts the engine's Layer-D publisher state into the httpapi
+// PublisherStatus DTO (field by field; httpapi imports no dhtindex types).
+func (a *controllerAdapter) publisherStatus() httpapi.PublisherStatus {
+	ps := a.eng.PublisherStatus()
+	out := httpapi.PublisherStatus{
+		TotalKeywords: ps.TotalKeywords,
+		TotalHits:     ps.TotalHits,
+	}
+	for _, k := range ps.Keywords {
+		entry := httpapi.PublisherKeywordEntry{
+			Keyword:      k.Keyword,
+			HitsCount:    k.HitsCount,
+			PublishCount: k.PublishCount,
+			LastError:    k.LastError,
+		}
+		if !k.LastPublished.IsZero() {
+			entry.LastPublished = k.LastPublished.UTC().Format(time.RFC3339)
+		}
+		out.Keywords = append(out.Keywords, entry)
+	}
+	return out
 }
 
 // swarmBlock translates a Layer-S response (or error) to the httpapi DTO. An

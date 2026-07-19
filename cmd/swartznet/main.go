@@ -62,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdConfirm(args[1:], stdout, stderr)
 	case "flag":
 		return cmdFlag(args[1:], stdout, stderr)
+	case "crawl-probe":
+		return cmdCrawlProbe(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -95,6 +97,9 @@ Commands:
                        Manage the publisher allowlist (offline; no daemon).
   confirm <infohash>   Mark a hit as good (adds it to the known-good filter).
   flag <infohash>      Report a hit as bad (demotes its attributed indexers).
+  crawl-probe --addr <host:port>
+                       One-shot BEP-51 sample_infohashes probe of a DHT node
+                       (ops diagnostic; no daemon). --target, --timeout-ms, --json.
   version              Print the version.
   help                 Show this help.
 
@@ -108,6 +113,8 @@ Flags for 'add':
                        any other missing path is an error.
   --port <n>           BitTorrent listen port (default: 42069, 0 = OS-assigned).
   --no-dht             Disable the mainline DHT entirely.
+  --no-dht-publish     Stay on the DHT but suppress Layer-D keyword publishing
+                       under your identity (privacy; leech-only Layer D).
   --dht-bootstrap <hp> DHT bootstrap node host:port (repeatable).
   --dht-insecure       Disable BEP-42 node-ID security (testing only; gated).
   --leech-only         Disable uploading (debug).
@@ -132,6 +139,29 @@ Flags for 'status', 'files', 'confirm' and 'flag':
 
   --api-addr <addr>    Address of the running swartznet HTTP API (default: localhost:7654).
   --json               Emit JSON instead of text ('status' and 'files' only).
+
+Flags for 'search':
+
+  --limit <n>          Max results (default: 20).
+  --signed-by <hex>    Restrict local hits to a 64-hex publisher (routes via daemon).
+  --swarm              Also query connected peers (Layer S; routes via daemon).
+  --dht                Also query the DHT keyword index (Layer D; routes via daemon).
+  --swarm-timeout-ms <n> Layer-S timeout (default: 2000).
+  --dht-timeout-ms <n> Layer-D timeout (default: 5000).
+  --api-addr <addr>    Daemon HTTP API address (default: localhost:7654).
+  --index-dir <path>   Bleve index directory for a direct (no-daemon) local search.
+  --json               Emit JSON instead of text.
+
+  Example: swartznet search --dht --json new ubuntu
+
+Flags for 'crawl-probe':
+
+  --addr <host:port>   DHT node to probe (required).
+  --target <hex>       20-byte (40-hex) node-ID target (default: random each run).
+  --timeout-ms <n>     Query timeout in milliseconds (default: 5000).
+  --json               Emit JSON (samples/nodes as hex, interval, num-tracked).
+
+  Example: swartznet crawl-probe --addr 127.0.0.1:6881 --json
 
 Environment:
 

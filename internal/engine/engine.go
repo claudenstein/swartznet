@@ -24,6 +24,7 @@ import (
 
 	"github.com/swartznet/swartznet/contracts/ltepwire"
 	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/internal/dhtindex"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/reputation"
 	"github.com/swartznet/swartznet/internal/swarmsearch"
@@ -119,6 +120,15 @@ type Engine struct {
 	signer    ed25519.PrivateKey
 	signerPub [32]byte
 	hasSigner bool
+
+	// Layer D (Slice 9): the read side (dhtLookup) is built in New when the
+	// DHT is enabled and stays alive even leech-only; the write side
+	// (dhtPublisher) is built in SetSigner when an identity arrives AND
+	// publishing is active (--no-index / --no-dht-publish suppress it). dhtMu
+	// guards both against SetSigner/autoIndex/Close races.
+	dhtMu        sync.Mutex
+	dhtLookup    *dhtindex.Lookup
+	dhtPublisher *dhtindex.Publisher
 }
 
 // defaultRescanInterval is the production hourly cadence.
@@ -295,6 +305,9 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		e.checkpointInterval = defaultCheckpointInterval
 	}
 	e.loadSpamResistance(cfg)
+	// Layer-D read side: built after spam-resistance so the lookup can consult
+	// the tracker/bloom/sources. Publishing (write side) waits for SetSigner.
+	e.setupLayerDLookup()
 
 	log.Info("engine.started",
 		"data_dir", cfg.DataDir,
@@ -363,6 +376,13 @@ func (e *Engine) Close() error {
 	// Stop the Layer-S announce worker.
 	if e.swarm != nil {
 		e.swarm.Close()
+	}
+	// Stop the Layer-D publisher (its final backend.Close persists the manifest).
+	e.dhtMu.Lock()
+	pub := e.dhtPublisher
+	e.dhtMu.Unlock()
+	if pub != nil {
+		pub.Stop()
 	}
 	// Join the checkpoint goroutine (bgCancel above stops its ticker loop)
 	// so no late periodic save can run after — and thus never clobber — the
@@ -506,6 +526,15 @@ func (e *Engine) RemoveTorrent(ihHex string) error {
 		return err
 	}
 	h.markRemoved()
+	// Retract this torrent's Layer-D hits before dropping it, so the publisher
+	// stops re-announcing stale keywords on the next refresh tick.
+	ih := h.T.InfoHash()
+	e.dhtMu.Lock()
+	pub := e.dhtPublisher
+	e.dhtMu.Unlock()
+	if pub != nil {
+		pub.Retract(ih)
+	}
 	h.pieceSub.Close()
 	h.fileSub.Close()
 	h.T.Drop()
