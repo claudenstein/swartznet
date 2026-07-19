@@ -14,6 +14,44 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 7 — Layer S: `sn_search` peer-wire extension (2026-07-19)
+
+The first wire slice. Two SwartzNet peers negotiate `sn_search` in the LTEP
+`m` dict and answer scoped queries over an ordinary piece-transfer connection;
+a vanilla BitTorrent client sees only an ignorable name in the `m` dict and
+**receives zero `sn_search` frames**. No new reserved bit, no new DHT verb, no
+new UDP port.
+
+- New `contracts/ltepwire/wire.go`: the frozen query/result/reject/
+  peer_announce envelope (msg_types 0–3; 4–8 reserved for RIBLT sync) with
+  byte-exact golden vectors. The wire drops the year-1 zero timestamp,
+  truncates hit names to 60 bytes (rune-safe, non-UTF-8 preserved), clamps
+  rank, and forces an empty (never null) hit list.
+- New `internal/swarmsearch`: the `Protocol` (LTEP negotiation, per-peer state,
+  the token-gated transport seam), the inbound `Handler` (scope-checked answer
+  or reject, fail-closed on `ShareLocal≠2`), the outbound query fan-out with
+  **asked-set anti-spoof** (a result counts only from a peer we asked, one
+  frame per peer), a Bitcoin-style **banman** (local, never gossiped) and a
+  per-peer token-bucket rate limiter. It never imports Bleve (answers via an
+  injected searcher) nor the torrent package.
+- Engine LTEP transport seam: the `sn_search` extension is advertised on every
+  outbound handshake; inbound frames are dispatched **off the read loop** with
+  dual 256-slot semaphores and a payload copy; a `PeerToken` (mintable only from
+  a recorded advertisement) makes "no send to a non-advertising peer" a
+  compile-time property. `peer_announce.services` is produced by the single
+  Slice-6 `Announced()` mask, so capability downgrades now reach the wire.
+- `POST /search {"swarm":true}` fans in swarm hits concurrently with Layer L; a
+  Layer-S failure is surfaced inline as `swarm.error` with a 200 (never a 5xx);
+  `/status` reports the known/capable peer counts.
+- `wirecompat` gains a raw-socket `MiniPeer` and two scenarios: a **vanilla
+  peer sees zero `sn_search` frames** while a capable peer gets the
+  `peer_announce`, and a peer queries the engine over the real wire and gets
+  its indexed hits.
+- `scripts/dod-slice7.sh`: 11 checks — the wire gates (codec goldens, §6 fixes,
+  scope-reject-2, fail-closed, anti-spoof, vanilla silence, real-wire query,
+  compile-time no-bare-send) plus the HTTP swarm surface (§5.9 inline error,
+  `/status` counts, index-independent swarm).
+
 ### Slice 6 — capability mask: the single services-bit producer (2026-07-19)
 
 - New `contracts/ltepwire`: the frozen 64-bit `sn_search` services bitfield

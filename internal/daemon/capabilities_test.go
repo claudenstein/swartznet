@@ -72,12 +72,12 @@ func TestCapabilitiesAggregateLiveMask(t *testing.T) {
 	if c.Publisher {
 		t.Error("Publisher should be false under NoIndex config")
 	}
-	if c.Services != "00000000000002ed" {
-		t.Errorf("initial services = %q, want 00000000000002ed", c.Services)
+	if c.Services != "00000000000000ed" {
+		t.Errorf("initial services = %q, want 00000000000000ed", c.Services)
 	}
 	// /aggregate renders the same LIVE mask.
-	if a := getAgg(); a.Services != "00000000000002ed" {
-		t.Errorf("/aggregate services = %q, want live 00000000000002ed", a.Services)
+	if a := getAgg(); a.Services != "00000000000000ed" {
+		t.Errorf("/aggregate services = %q, want live 00000000000000ed", a.Services)
 	}
 
 	// Downgrade to share-nothing; both readouts must change live.
@@ -94,8 +94,8 @@ func TestCapabilitiesAggregateLiveMask(t *testing.T) {
 
 	// Live proof: /aggregate now renders 0x2E0 (bits 0..3 cleared), NOT the
 	// legacy static 0x2ED.
-	if a := getAgg(); a.Services != "00000000000002e0" {
-		t.Errorf("/aggregate after downgrade = %q, want live 00000000000002e0", a.Services)
+	if a := getAgg(); a.Services != "00000000000000e0" {
+		t.Errorf("/aggregate after downgrade = %q, want live 00000000000000e0", a.Services)
 	}
 	c2 := getCap()
 	if c2.ShareLocal != 0 || c2.FileHits || c2.ContentHits {
@@ -104,7 +104,7 @@ func TestCapabilitiesAggregateLiveMask(t *testing.T) {
 	if c2.Publisher {
 		t.Error("PATCH must not touch the daemon-owned Publisher bit")
 	}
-	if c2.Services != "00000000000002e0" {
-		t.Errorf("/capabilities services after downgrade = %q, want 00000000000002e0", c2.Services)
+	if c2.Services != "00000000000000e0" {
+		t.Errorf("/capabilities services after downgrade = %q, want 00000000000000e0", c2.Services)
 	}
 }

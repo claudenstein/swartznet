@@ -18,12 +18,14 @@ import (
 	peer_store "github.com/anacrolix/dht/v2/peer-store"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	pp "github.com/anacrolix/torrent/peer_protocol"
 	"golang.org/x/time/rate"
 
 	"github.com/swartznet/swartznet/contracts/ltepwire"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/reputation"
+	"github.com/swartznet/swartznet/internal/swarmsearch"
 	"github.com/swartznet/swartznet/internal/trust"
 )
 
@@ -103,6 +105,11 @@ type Engine struct {
 	// shareMu; runtime-only (not persisted), like the rate limits.
 	shareMu sync.Mutex
 	sharing ltepwire.Sharing
+
+	// swarm is the Layer-S sn_search peer-wire protocol (Slice 7); swarmPeers
+	// tracks addr→conn for the token-gated sender.
+	swarm      *swarmsearch.Protocol
+	swarmPeers *peerTracker
 }
 
 // defaultRescanInterval is the production hourly cadence.
@@ -175,11 +182,65 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	tc.Callbacks.StatusUpdated = append(tc.Callbacks.StatusUpdated, func(ev torrent.StatusUpdatedEvent) {
 		log.Debug("torrent.status", "event", ev.Event, "info_hash", ev.InfoHash, "url", ev.Url, "err", ev.Error)
 	})
-	// (The PeerConnAdded / extended-handshake callbacks are the sn_search
-	// transport seam — wired by the Layer-S slice.)
+
+	// --- Layer S: the sn_search LTEP transport seam (Slice 7) ---
+	// Built before NewClient so the callbacks close over the protocol +
+	// tracker + semaphores. Capabilities/searcher are injected after the
+	// engine exists (they need e.Sharing/e.ServicesMask/e.Index).
+	swarm := swarmsearch.New(log)
+	peers := newPeerTracker()
+	snSearchSem := make(chan struct{}, maxInboundSnSearchWorkers)
+	snReplySem := make(chan struct{}, maxInboundSnSearchWorkers)
+	swarm.SetTransport(&swarmSender{peers: peers})
+
+	// PeerConnAdded: advertise sn_search in OUR outbound m dict + record the
+	// conn. A vanilla peer just sees an ignorable name it does not list back.
+	tc.Callbacks.PeerConnAdded = append(tc.Callbacks.PeerConnAdded, func(pc *torrent.PeerConn) {
+		pc.LocalLtepProtocolMap.AddUserProtocol(extName)
+		addr := pc.RemoteAddr.String()
+		swarm.NotePeerAdded(addr)
+		peers.add(addr, pc)
+	})
+	// ReadExtendedHandshake: record whether the remote advertised sn_search
+	// (present with a non-zero id). This is the ONLY place a PeerToken is
+	// minted — from the m dict, never from a peer_announce.
+	tc.Callbacks.ReadExtendedHandshake = func(pc *torrent.PeerConn, hs *pp.ExtendedHandshakeMessage) {
+		id := hs.M[extName]
+		swarm.OnRemoteHandshake(pc.RemoteAddr.String(), id != 0, int(id))
+	}
+	// PeerConnReadExtensionMessage: dispatch inbound sn_search frames OFF the
+	// read loop (which holds the client lock). Admit via the handler
+	// semaphore, copy the payload (the decoder reuses its buffer), then hand
+	// to the protocol on a goroutine with a gated reply writer.
+	tc.Callbacks.PeerConnReadExtensionMessage = append(tc.Callbacks.PeerConnReadExtensionMessage,
+		func(ev torrent.PeerConnReadExtensionMessageEvent) {
+			name, _, err := ev.PeerConn.LocalLtepProtocolMap.LookupId(ev.ExtensionNumber)
+			if err != nil || name != extName {
+				return
+			}
+			select {
+			case snSearchSem <- struct{}{}:
+			default:
+				log.Debug("engine.swarm.inbound_dropped_overloaded")
+				return
+			}
+			payload := append([]byte(nil), ev.Payload...)
+			pc := ev.PeerConn
+			addr := pc.RemoteAddr.String()
+			go func() {
+				defer func() { <-snSearchSem }()
+				swarm.HandleMessage(addr, payload, gatedReply(snReplySem, pc, log))
+			}()
+		})
+	tc.Callbacks.PeerConnClosed = func(pc *torrent.PeerConn) {
+		addr := pc.RemoteAddr.String()
+		swarm.OnPeerClosed(addr)
+		peers.remove(addr)
+	}
 
 	cl, err := torrent.NewClient(tc)
 	if err != nil {
+		swarm.Close()
 		return nil, fmt.Errorf("engine: new client: %w", err)
 	}
 
@@ -203,7 +264,14 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 			FileHits:    cfg.ShareFileHits,
 			ContentHits: cfg.ShareContentHits,
 		},
+		swarm:      swarm,
+		swarmPeers: peers,
 	}
+	// Feed the single mask producer to the outbound peer_announce + inbound
+	// scope decisions (Slice 6's Announced, live).
+	swarm.SetCapabilitySource(func() swarmsearch.Capabilities {
+		return swarmsearch.Capabilities{Sharing: e.Sharing(), Services: e.ServicesMask()}
+	})
 	if e.rescanInterval <= 0 {
 		e.rescanInterval = defaultRescanInterval
 	}
@@ -275,6 +343,10 @@ func (e *Engine) Close() error {
 		e.pipeline = nil
 	}
 	e.idxMu.Unlock()
+	// Stop the Layer-S announce worker.
+	if e.swarm != nil {
+		e.swarm.Close()
+	}
 	// Join the checkpoint goroutine (bgCancel above stops its ticker loop)
 	// so no late periodic save can run after — and thus never clobber — the
 	// final flush below.

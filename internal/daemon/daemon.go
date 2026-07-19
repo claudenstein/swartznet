@@ -171,9 +171,14 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			apiOpts.PublisherPubKey = d.Identity.PublicKeyHex
 		}
 		adapter := &controllerAdapter{eng: eng, adm: d.admission}
+		// Always wire /search so Layer S (swarm) works even with no local
+		// index; Local stays nil (200-empty) when the index is off.
+		mux := &searchmux.Mux{Swarm: &swarmSearchAdapter{eng: eng}}
+		if idx := eng.Index(); idx != nil {
+			mux.Local = idx
+		}
+		apiOpts.Search = adapter.search(mux)
 		if d.Idx != nil {
-			mux := &searchmux.Mux{Local: eng.Index()}
-			apiOpts.Search = adapter.search(mux)
 			apiOpts.IndexStats = adapter.indexStats
 			apiOpts.LocalDocCount = adapter.localDocCount
 		}
@@ -186,6 +191,10 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		apiOpts.Aggregate = adapter.aggregate
 		apiOpts.ServicesReporter = eng.ServicesMask
 		apiOpts.Capabilities = adapter
+		apiOpts.SwarmStatus = func() (int, int) {
+			sw := eng.SwarmSearch()
+			return sw.KnownPeers(), sw.CapablePeerCount()
+		}
 		if !opts.Cfg.DisableDHT {
 			apiOpts.DHTStats = eng.DHTRoutingTableSize
 		}

@@ -35,11 +35,11 @@ func capEngine(t *testing.T, mutate func(*config.Config)) *Engine {
 }
 
 // TestServicesMaskDefaultPublishing: a default node (index on, DHT publish on)
-// advertises the full default set plus the Publisher bit → 0x2FD.
+// advertises the full default set plus the Publisher bit → 0x0FD.
 func TestServicesMaskDefaultPublishing(t *testing.T) {
 	e := capEngine(t, nil)
-	if got := e.ServicesMask(); got != 0x2FD {
-		t.Errorf("default mask = 0x%x, want 0x2FD", got)
+	if got := e.ServicesMask(); got != 0x0FD {
+		t.Errorf("default mask = 0x%x, want 0x0FD", got)
 	}
 	if !e.RuntimeFacts().Publishing {
 		t.Error("default node should be Publishing")
@@ -56,8 +56,8 @@ func TestNoIndexZeroesPublisherBit(t *testing.T) {
 	if ltepwire.ServiceBits(got).Has(ltepwire.BitLayerDPublisher) {
 		t.Errorf("--no-index mask 0x%x still has the Publisher bit", got)
 	}
-	if got != 0x2ED {
-		t.Errorf("--no-index mask = 0x%x, want 0x2ED", got)
+	if got != 0x0ED {
+		t.Errorf("--no-index mask = 0x%x, want 0x0ED", got)
 	}
 }
 
@@ -67,8 +67,8 @@ func TestDisableDHTPublishZeroesPublisherBit(t *testing.T) {
 	if e.RuntimeFacts().Publishing {
 		t.Error("--no-dht-publish node must not be Publishing")
 	}
-	if e.ServicesMask() != 0x2ED {
-		t.Errorf("mask = 0x%x, want 0x2ED", e.ServicesMask())
+	if e.ServicesMask() != 0x0ED {
+		t.Errorf("mask = 0x%x, want 0x0ED", e.ServicesMask())
 	}
 }
 
@@ -83,9 +83,9 @@ func TestRegtestSetsLoudBit(t *testing.T) {
 	if !ltepwire.ServiceBits(got).Has(ltepwire.BitRegtest) {
 		t.Errorf("regtest mask 0x%x missing the loud bit 8", got)
 	}
-	// default publishing (0x2FD) + regtest (0x100) = 0x3FD.
-	if got != 0x3FD {
-		t.Errorf("regtest mask = 0x%x, want 0x3FD", got)
+	// default publishing (0x0FD) + regtest (0x100) = 0x1FD.
+	if got != 0x1FD {
+		t.Errorf("regtest mask = 0x%x, want 0x1FD", got)
 	}
 }
 
@@ -93,13 +93,28 @@ func TestRegtestSetsLoudBit(t *testing.T) {
 // live (the §6 defect-3 fix at the engine seam).
 func TestSetSharingDowngradeChangesMask(t *testing.T) {
 	e := capEngine(t, nil)
-	if e.ServicesMask() != 0x2FD {
-		t.Fatalf("pre-downgrade mask = 0x%x, want 0x2FD", e.ServicesMask())
+	if e.ServicesMask() != 0x0FD {
+		t.Fatalf("pre-downgrade mask = 0x%x, want 0x0FD", e.ServicesMask())
 	}
 	e.SetSharing(ltepwire.Sharing{ShareLocal: 0, FileHits: false, ContentHits: false})
-	// build bits (5,6,7,9 = 0x2E0) + Publisher (bit4 = 0x10) = 0x2F0.
-	if got := e.ServicesMask(); got != 0x2F0 {
-		t.Errorf("post-downgrade mask = 0x%x, want 0x2F0 (bits 0..3 cleared)", got)
+	// build bits (5,6,7 = 0xE0; bit 9 re-gated off until Slice 8) + Publisher
+	// (bit4 = 0x10) = 0x0F0.
+	if got := e.ServicesMask(); got != 0x0F0 {
+		t.Errorf("post-downgrade mask = 0x%x, want 0x0F0 (bits 0..3 cleared)", got)
+	}
+}
+
+// TestReconciliationBitNotAdvertised pins the Slice-7 review fix: bit 9
+// (BitSetReconciliation) must be CLEAR in the announced mask until the RIBLT
+// sync bodies land (Slice 8), so a Slice-8 peer is not lured into sending sync
+// frames we answer with a ban-charging reject.
+func TestReconciliationBitNotAdvertised(t *testing.T) {
+	e := capEngine(t, nil)
+	if e.RuntimeFacts().Reconciliation {
+		t.Error("Reconciliation must be false until Slice 8")
+	}
+	if ltepwire.ServiceBits(e.ServicesMask()).Has(ltepwire.BitSetReconciliation) {
+		t.Errorf("mask 0x%x advertises BitSetReconciliation (bit 9) it cannot serve", e.ServicesMask())
 	}
 }
 

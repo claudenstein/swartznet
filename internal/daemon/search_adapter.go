@@ -2,18 +2,56 @@ package daemon
 
 import (
 	"context"
+	"time"
 
+	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/searchmux"
+	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
+const (
+	maxSearchTimeout     = 30 * time.Second
+	defaultSwarmTimeout  = 2 * time.Second
+	swarmCtxTimeoutGrace = 500 * time.Millisecond
+)
+
+// swarmSearchAdapter satisfies searchmux.SwarmSearcher over the engine's
+// sn_search protocol.
+type swarmSearchAdapter struct{ eng *engine.Engine }
+
+func (s *swarmSearchAdapter) SwarmSearch(ctx context.Context, req swarmsearch.QueryRequest) (*swarmsearch.QueryResponse, error) {
+	return s.eng.SwarmSearch().Query(ctx, req)
+}
+
+// clampSearchTimeout bounds a requested swarm timeout to (0, maxSearchTimeout],
+// falling back to the default when unset.
+func clampSearchTimeout(ms int, def time.Duration) time.Duration {
+	if ms <= 0 {
+		return def
+	}
+	d := time.Duration(ms) * time.Millisecond
+	if d > maxSearchTimeout {
+		return maxSearchTimeout
+	}
+	return d
+}
+
 // search returns the httpapi Search collaborator, translating between
-// httpapi's local DTOs and the searchmux/indexer types field by field so
-// httpapi imports neither.
+// httpapi's DTOs and the searchmux/indexer/swarmsearch types field by field so
+// httpapi imports none of them. A Layer-S failure is returned inline (a
+// SwarmBlock with an Error), never as a fatal error (§5.9).
 func (a *controllerAdapter) search(mux *searchmux.Mux) func(httpapi.SearchParams) httpapi.SearchResult {
 	return func(p httpapi.SearchParams) httpapi.SearchResult {
-		res := mux.Search(context.Background(), searchmux.Query{
+		ctx := context.Background()
+		var cancel context.CancelFunc
+		if p.Swarm {
+			timeout := clampSearchTimeout(p.SwarmTimeoutMS, defaultSwarmTimeout)
+			ctx, cancel = context.WithTimeout(ctx, timeout+swarmCtxTimeoutGrace)
+			defer cancel()
+		}
+		res := mux.Search(ctx, searchmux.Query{
 			Text:      p.Query,
 			Limit:     p.Limit,
 			SignedBy:  p.SignedBy,
@@ -24,8 +62,39 @@ func (a *controllerAdapter) search(mux *searchmux.Mux) func(httpapi.SearchParams
 		if res.LocalErr != nil {
 			return httpapi.SearchResult{LocalErr: res.LocalErr}
 		}
-		return httpapi.SearchResult{Local: localBlock(res.Local)}
+		out := httpapi.SearchResult{Local: localBlock(res.Local)}
+		if p.Swarm {
+			out.Swarm = swarmBlock(res.Swarm, res.SwarmErr)
+		}
+		return out
 	}
+}
+
+// swarmBlock translates a Layer-S response (or error) to the httpapi DTO. An
+// error renders as a block carrying only the Error string (200, §5.9).
+func swarmBlock(resp *swarmsearch.QueryResponse, err error) *httpapi.SwarmBlock {
+	block := &httpapi.SwarmBlock{Hits: []httpapi.SwarmHit{}}
+	if err != nil {
+		block.Error = err.Error()
+		return block
+	}
+	if resp == nil {
+		return block
+	}
+	block.Asked = resp.Asked
+	block.Responded = resp.Responded
+	block.Rejected = resp.Rejected
+	for _, h := range resp.Hits {
+		block.Hits = append(block.Hits, httpapi.SwarmHit{
+			InfoHash: h.InfoHash,
+			Name:     h.Name,
+			Size:     h.Size,
+			Seeders:  h.Seeders,
+			Score:    h.Score,
+			Sources:  h.Sources,
+		})
+	}
+	return block
 }
 
 func localBlock(resp *indexer.SearchResponse) httpapi.LocalBlock {

@@ -44,3 +44,6 @@ Thumbs.db
 /tests/torrent-test/peer*-index/
 /tests/torrent-test/results/
 .claude/
+
+# Editor artifacts
+.obsidian/

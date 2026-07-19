@@ -46,12 +46,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	out := SearchResponse{Local: LocalBlock{Hits: []LocalHit{}}}
 	if s.opts.Search != nil {
 		res := s.opts.Search(SearchParams{
-			Query:     req.Q,
-			Limit:     limit,
-			SignedBy:  req.SignedBy,
-			Highlight: req.Highlight,
-			Swarm:     req.Swarm,
-			DHT:       req.DHT,
+			Query:          req.Q,
+			Limit:          limit,
+			SignedBy:       req.SignedBy,
+			Highlight:      req.Highlight,
+			Swarm:          req.Swarm,
+			SwarmTimeoutMS: req.SwarmTimeout,
+			DHT:            req.DHT,
 		})
 		if res.LocalErr != nil {
 			s.log.Warn("httpapi.local_err", "err", res.LocalErr)
@@ -62,6 +63,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if out.Local.Hits == nil {
 			out.Local.Hits = []LocalHit{}
 		}
+		// A Layer-S failure is surfaced inline (a 200 with swarm.error), never
+		// a 5xx (§5.9). The block appears only when the adapter produced one.
+		out.Swarm = res.Swarm
 	}
 	writeJSON(w, out)
 }

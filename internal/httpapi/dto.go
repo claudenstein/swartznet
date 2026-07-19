@@ -186,12 +186,13 @@ type SearchRequestBody struct {
 // SearchParams is what the daemon adapter receives (httpapi owns it, so the
 // package imports no searchmux/indexer types).
 type SearchParams struct {
-	Query     string
-	Limit     int
-	SignedBy  string
-	Highlight bool
-	Swarm     bool
-	DHT       bool
+	Query          string
+	Limit          int
+	SignedBy       string
+	Highlight      bool
+	Swarm          bool
+	SwarmTimeoutMS int
+	DHT            bool
 }
 
 // LocalHit is one Layer-L result. file_index is omitempty so a content hit
@@ -217,16 +218,40 @@ type LocalBlock struct {
 }
 
 // SearchResult is the adapter's return: the local block plus an error the
-// handler maps to 500 (Layer-L failure is fatal to the whole request).
+// handler maps to 500 (Layer-L failure is fatal to the whole request), and the
+// optional swarm block (a Layer-S failure is surfaced INLINE, never a 500).
 type SearchResult struct {
 	Local    LocalBlock
 	LocalErr error
+	Swarm    *SwarmBlock
 }
 
-// SearchResponse is the POST /search document.
+// SearchResponse is the POST /search document. The swarm block appears only
+// when the request asked for it AND the swarm collaborator is wired.
 type SearchResponse struct {
-	Local LocalBlock `json:"local"`
-	// swarm / dht blocks land with their slices.
+	Local LocalBlock  `json:"local"`
+	Swarm *SwarmBlock `json:"swarm,omitempty"`
+	// dht block lands with its slice.
+}
+
+// SwarmBlock is the Layer-S portion of a search response. A Layer-S failure
+// renders as the Error string with a 200 (§5.9), never a 5xx.
+type SwarmBlock struct {
+	Asked     int        `json:"asked"`
+	Responded int        `json:"responded"`
+	Rejected  int        `json:"rejected"`
+	Hits      []SwarmHit `json:"hits"` // never null
+	Error     string     `json:"error,omitempty"`
+}
+
+// SwarmHit is one merged Layer-S result.
+type SwarmHit struct {
+	InfoHash string   `json:"infohash"`
+	Name     string   `json:"name"`
+	Size     int64    `json:"size,omitempty"`
+	Seeders  int      `json:"seeders,omitempty"`
+	Score    int      `json:"score"`
+	Sources  []string `json:"sources"`
 }
 
 // ConfirmRequest / FlagRequest carry a single 40-hex infohash.

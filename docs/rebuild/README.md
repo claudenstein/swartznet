@@ -7,13 +7,13 @@ branch and is used only as a *behavioral* reference, never copied structurally.
 
 ## Deliverables (top of repo)
 
-| Document | Phase | Status |
-|---|---|---|
-| [`SPEC.md`](../../SPEC.md) | 1 — extracted spec | Done; §6 defects each adversarially verified |
-| [`SPEC.md` §0](../../SPEC.md) | 2 — original vision | **Confirmed by the author 2026-07-17** (all five checklist items) |
-| [`ARCHITECTURE.md`](../../ARCHITECTURE.md) | 3 — fresh architecture | Done; critic's required fixes applied |
-| [`PLAN.md`](../../PLAN.md) | 3 — vertical-slice build order | Done (14 slices) |
-| [`DECISIONS.md`](../../DECISIONS.md) | cross-phase decision log | Live; consolidated 2026-07-17 |
+| Document                                   | Phase                          | Status                                                            |
+| ------------------------------------------ | ------------------------------ | ----------------------------------------------------------------- |
+| [`SPEC.md`](../../SPEC.md)                 | 1 — extracted spec             | Done; §6 defects each adversarially verified                      |
+| [`SPEC.md` §0](../../SPEC.md)              | 2 — original vision            | **Confirmed by the author 2026-07-17** (all five checklist items) |
+| [`ARCHITECTURE.md`](../../ARCHITECTURE.md) | 3 — fresh architecture         | Done; critic's required fixes applied                             |
+| [`PLAN.md`](../../PLAN.md)                 | 3 — vertical-slice build order | Done (14 slices)                                                  |
+| [`DECISIONS.md`](../../DECISIONS.md)       | cross-phase decision log       | Live; consolidated 2026-07-17                                     |
 
 ## Provenance kept here
 

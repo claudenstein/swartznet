@@ -27,6 +27,15 @@ func (e *Engine) SetIndex(idx *indexer.Index) {
 		e.pipeline.Start()
 	}
 	e.idxMu.Unlock()
+	// Wire (or unwire) the Layer-S local searcher so inbound sn_search queries
+	// answer from the same index — swarmsearch never imports Bleve.
+	if e.swarm != nil {
+		if idx != nil {
+			e.swarm.SetSearcher(&indexerSearcher{idx: idx})
+		} else {
+			e.swarm.SetSearcher(nil)
+		}
+	}
 }
 
 func (e *Engine) index() (*indexer.Index, *indexer.Pipeline) {

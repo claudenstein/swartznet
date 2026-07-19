@@ -71,6 +71,9 @@ type Options struct {
 	// Capabilities is the sn_search sharing-prefs collaborator; nil ⇒
 	// /capabilities answers 503.
 	Capabilities CapabilitiesController
+	// SwarmStatus reports (known, capable) sn_search peer counts for /status;
+	// nil ⇒ the swarm block stays zero.
+	SwarmStatus func() (known, capable int)
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -223,6 +226,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.opts.DHTStats != nil {
 		good, total := s.opts.DHTStats()
 		out.DHT = &DHTStatus{GoodNodes: good, Nodes: total}
+	}
+	if s.opts.SwarmStatus != nil {
+		known, capable := s.opts.SwarmStatus()
+		out.Swarm = SwarmStatus{KnownPeers: known, CapablePeers: capable}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
