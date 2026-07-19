@@ -164,6 +164,13 @@ type TorrentDoc struct {
 	// torrent's .torrent file, or empty for unsigned torrents. Keyword
 	// field, so the search-by-publisher facet matches it exactly.
 	SignedBy string
+	// PreserveExistingSigner, when set, forbids a non-empty SignedBy from
+	// OVERWRITING a different existing attribution. The companion subscriber
+	// sets it: its snapshot proves the publisher authored the LIST, not that it
+	// signed each torrent (there is no per-torrent signature), so it must never
+	// hijack a torrent the node already attributes to another publisher.
+	// Transient — never serialized.
+	PreserveExistingSigner bool
 }
 
 // docID keys a torrent doc by infohash so re-indexing the same torrent is
@@ -214,6 +221,14 @@ func (i *Index) IndexTorrent(doc TorrentDoc) error {
 	}
 	if doc.SignedBy == "" {
 		if stored := i.storedSignedByLocked(doc.docID()); stored != "" {
+			doc.SignedBy = stored
+		}
+	} else if doc.PreserveExistingSigner {
+		// A companion import must not overwrite a DIFFERENT existing attribution:
+		// keep the stored signer so a followed publisher can't hijack authorship
+		// of a torrent it merely listed. A new torrent (no stored signer) or one
+		// already attributed to the same publisher is stamped normally.
+		if stored := i.storedSignedByLocked(doc.docID()); stored != "" && stored != strings.ToLower(doc.SignedBy) {
 			doc.SignedBy = stored
 		}
 	}

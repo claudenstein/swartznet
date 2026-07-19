@@ -106,6 +106,45 @@ func TestIndexTorrentSignedByNonEmptyOverwrites(t *testing.T) {
 	}
 }
 
+// TestIndexTorrentPreserveExistingSignerBlocksHijack is the regression for the
+// companion authorship-hijack: a companion import (PreserveExistingSigner) must
+// NOT overwrite a torrent already attributed to a DIFFERENT publisher, but a new
+// torrent it introduces IS attributed to that publisher.
+func TestIndexTorrentPreserveExistingSignerBlocksHijack(t *testing.T) {
+	t.Parallel()
+	idx, err := indexer.Open(filepath.Join(t.TempDir(), "idx"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer idx.Close()
+
+	const trusted = "a000000000000000000000000000000000000000000000000000000000000000"
+	const attacker = "b000000000000000000000000000000000000000000000000000000000000000"
+
+	// A torrent legitimately attributed to `trusted`.
+	const ih = "3333333333333333333333333333333333333333"
+	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih, Name: "x", SignedBy: trusted}); err != nil {
+		t.Fatal(err)
+	}
+	// A followed publisher `attacker` lists ih in its companion snapshot. The
+	// import must NOT hijack the attribution.
+	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih, Name: "x", SignedBy: attacker, PreserveExistingSigner: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := signedByOf(t, idx, ih); got != trusted {
+		t.Errorf("SignedBy = %q, want %q — a companion import hijacked an existing attribution", got, trusted)
+	}
+
+	// A genuinely NEW torrent introduced by the companion import IS attributed to it.
+	const ih2 = "4444444444444444444444444444444444444444"
+	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih2, Name: "y", SignedBy: attacker, PreserveExistingSigner: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := signedByOf(t, idx, ih2); got != attacker {
+		t.Errorf("new-torrent SignedBy = %q, want %q", got, attacker)
+	}
+}
+
 // TestIndexTorrentUnsignedStaysUnsigned covers the base case: with no
 // prior doc (or an unsigned one), an unsigned write stores "".
 func TestIndexTorrentUnsignedStaysUnsigned(t *testing.T) {

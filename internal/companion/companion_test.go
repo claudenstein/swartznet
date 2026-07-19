@@ -339,6 +339,76 @@ func publishToDisk(t *testing.T, pub [32]byte, src CorpusSource) (string, string
 	return jsonPath, pubHex
 }
 
+// seqGetter returns a sequence of pointer infohashes on successive Syncs.
+type seqGetter struct {
+	ihs [][20]byte
+	n   int
+}
+
+func (g *seqGetter) GetInfohashPointer(_ context.Context, _ [32]byte, _ []byte) ([20]byte, error) {
+	ih := g.ihs[g.n]
+	if g.n < len(g.ihs)-1 {
+		g.n++
+	}
+	return ih, nil
+}
+
+// mapFetcher returns a distinct on-disk snapshot per infohash.
+type mapFetcher struct{ m map[[20]byte]string }
+
+func (f *mapFetcher) FetchCompanionTorrent(_ context.Context, ih [20]byte) (string, error) {
+	return f.m[ih], nil
+}
+
+// TestSubscriberImportsNewContentDespiteEqualGeneratedAt is the regression for
+// the freeze bug: a publisher that republishes NEW content (new pointer/
+// infohash) but reuses the SAME GeneratedAt must still be imported, and lastIH
+// must advance so the subscriber does not re-fetch the same snapshot every
+// interval forever. The old `prev == GeneratedAt` dedup dropped it and never
+// advanced lastIH.
+func TestSubscriberImportsNewContentDespiteEqualGeneratedAt(t *testing.T) {
+	t.Parallel()
+	pub := keypair(11)
+	pubHex := hex.EncodeToString(pub[:])
+	const fixedT = 1700000000
+
+	build := func(ih string) string {
+		src := &fakeCorpus{torrents: []indexer.TorrentDoc{{InfoHash: ih, Name: "n", FilePaths: []string{"a"}}}}
+		idx, err := BuildFromIndex(src, pubHex, DefaultBuildOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		idx.GeneratedAt = fixedT // pin the SAME timestamp on both snapshots
+		dir := t.TempDir()
+		jsonPath, _, err := WriteCompanionFiles(dir, idx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return jsonPath
+	}
+	path1 := build(strings.Repeat("a", 40))
+	path2 := build(strings.Repeat("b", 40)) // different content → different pointer, same GeneratedAt
+
+	rec := &recorder{}
+	getter := &seqGetter{ihs: [][20]byte{{1}, {2}}}
+	fetcher := &mapFetcher{m: map[[20]byte]string{{1}: path1, {2}: path2}}
+	sub, err := NewSubscriber(getter, fetcher, rec, DefaultSubscriberOptions(), discardLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if r := sub.Sync(context.Background(), pub); r.Err != nil || r.TorrentsImported != 1 {
+		t.Fatalf("sync #1: err=%v imported=%d", r.Err, r.TorrentsImported)
+	}
+	r2 := sub.Sync(context.Background(), pub)
+	if r2.Err != nil {
+		t.Fatalf("sync #2 err: %v", r2.Err)
+	}
+	if r2.Deduped || r2.TorrentsImported != 1 {
+		t.Fatalf("sync #2 dropped new content on an equal GeneratedAt (freeze bug): deduped=%v imported=%d", r2.Deduped, r2.TorrentsImported)
+	}
+}
+
 func TestSubscriberImportsAndStampsSignedBy(t *testing.T) {
 	t.Parallel()
 	pub := keypair(10)

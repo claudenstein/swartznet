@@ -142,15 +142,23 @@ func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 		return res
 	}
 
-	// FIX (§6): dedup on GeneratedAt — an unchanged snapshot already imported is
-	// not re-ingested (the legacy re-downloaded + re-wrote the whole corpus every
-	// interval).
+	// The pointer-infohash dedup above already skips an UNCHANGED snapshot, so a
+	// changed infohash here means genuinely new content. Only guard against a
+	// ROLLBACK/replay — a new pointer to an OLDER snapshot (GeneratedAt regressed)
+	// — and, crucially, still advance lastIH on that reject so we don't re-fetch
+	// the same infohash every interval. (The old code used `prev == GeneratedAt`,
+	// which dropped new content whenever the publisher reused a timestamp and
+	// NEVER advanced lastIH — a permanent freeze + unbounded per-interval refetch.)
 	s.mu.Lock()
 	prev, ok := s.imported[pubkey]
 	s.mu.Unlock()
-	if ok && idx.GeneratedAt != 0 && prev == idx.GeneratedAt {
+	if ok && idx.GeneratedAt != 0 && idx.GeneratedAt < prev {
 		res.Deduped = true
-		s.log.Debug("companion.subscriber.deduped", "publisher", pubHex, "generated_at", idx.GeneratedAt)
+		s.mu.Lock()
+		s.lastIH[pubkey] = ih
+		s.mu.Unlock()
+		s.log.Debug("companion.subscriber.rollback_ignored", "publisher", pubHex,
+			"generated_at", idx.GeneratedAt, "last_imported", prev)
 		return res
 	}
 
@@ -215,6 +223,9 @@ func (s *Subscriber) ingest(pubHex string, idx CompanionIndex) (torrents, conten
 			FilePaths: paths,
 			FileCount: len(paths),
 			SignedBy:  pubHex,
+			// The snapshot proves the publisher authored the LIST, not that it
+			// signed this torrent — never hijack an existing different attribution.
+			PreserveExistingSigner: true,
 		}
 		if tr.AddedAt > 0 {
 			td.AddedAt = time.Unix(tr.AddedAt, 0).UTC()
