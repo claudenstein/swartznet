@@ -24,6 +24,9 @@ below "Unreleased" describes the legacy line.
 - Docs reconciled with code: `docs/07` now documents oldest-hit eviction (the
   shipping oversize handling) with DHT sharding as reserved scaffolding, not a
   requirement; `ledongthuc/pdf` is correctly attributed BSD-3-Clause.
+- `cmd/dht-smoke` (live-DHT smoke tool) is rebuilt with a corrected exit
+  contract: an all-failed `-stress` phase is now a hard failure (exit 1) instead
+  of a swallowed warning, so a dead DHT path no longer reports PASS.
 
 ### Slice 12 — Aggregate index: frozen contracts + offline tooling (2026-07-19)
 

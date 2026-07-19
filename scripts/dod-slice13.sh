@@ -46,6 +46,9 @@ run_go rejectcode ./internal/swarmsearch/ \
 run_go silence ./internal/swarmsearch/ \
   'TestVanillaPeerNeverReceivesFrames|TestBannedPeerNeverMintsToken' \
   "vanilla-silence (deterministic, CI): a non-advertising peer receives ZERO sn_search frames (no token minted)"
+run_go dhtsmoke ./cmd/dht-smoke/ \
+  'TestStressFailedHard|TestSmokeRoundTripLoopback' \
+  "cmd/dht-smoke rebuilt (§6 exit fix): an all-failed stress phase is a HARD failure (non-zero exit), not a swallowed warning; smoke Put/Get round-trips over a loopback DHT"
 
 # ======================================================================
 # Part 3 — docs + licenses reconciled with the code (§6 doc-drift fixes)
