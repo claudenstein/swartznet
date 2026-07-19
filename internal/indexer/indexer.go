@@ -203,6 +203,13 @@ func (d TorrentDoc) toBleve() map[string]any {
 	}
 }
 
+// ErrForeignTorrent is returned by IndexTorrent when a PreserveExistingSigner
+// write targets a torrent already attributed to a DIFFERENT publisher. It is a
+// benign skip signal, not a failure: the companion subscriber uses it to skip
+// that torrent's content docs too, so a followed publisher cannot hijack a
+// torrent the node holds.
+var ErrForeignTorrent = errors.New("indexer: torrent already attributed to a different publisher")
+
 // IndexTorrent adds or updates a torrent document (put-or-replace on the
 // doc ID). Non-empty stored signed_by is sticky (DECISIONS §7-Q37): a
 // later upsert with an empty SignedBy — a local magnet re-add, a
@@ -224,12 +231,15 @@ func (i *Index) IndexTorrent(doc TorrentDoc) error {
 			doc.SignedBy = stored
 		}
 	} else if doc.PreserveExistingSigner {
-		// A companion import must not overwrite a DIFFERENT existing attribution:
-		// keep the stored signer so a followed publisher can't hijack authorship
-		// of a torrent it merely listed. A new torrent (no stored signer) or one
-		// already attributed to the same publisher is stamped normally.
+		// A companion import must not hijack a torrent already attributed to a
+		// DIFFERENT publisher: the snapshot proves the publisher authored the
+		// LIST, not that it owns this torrent. Skip the ENTIRE write (not just
+		// SignedBy — also Name/FilePaths/Size, else the publisher could relabel a
+		// torrent the node holds) and signal the caller to skip its content too. A
+		// new torrent (no stored signer) or one already attributed to the same
+		// publisher is stamped normally.
 		if stored := i.storedSignedByLocked(doc.docID()); stored != "" && stored != strings.ToLower(doc.SignedBy) {
-			doc.SignedBy = stored
+			return ErrForeignTorrent
 		}
 	}
 	return i.bleve.Index(doc.docID(), doc.toBleve())

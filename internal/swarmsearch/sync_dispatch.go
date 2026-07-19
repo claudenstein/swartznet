@@ -88,6 +88,14 @@ func (p *Protocol) registerSyncSessionIfUnderCap(addr string, s *SyncSession, ca
 	if n >= cap {
 		return false
 	}
+	// A re-begin on the same txid replaces the incumbent — but STOP its pump
+	// first. Without this, the old session's runSyncPump goroutine is orphaned
+	// (unreachable from the registry, so no StopPump call site + not released by
+	// OnPeerClosed) and keeps streaming symbols to a dead token until its budget
+	// exhausts — a per-peer-cap bypass + pump leak surviving disconnect.
+	if incumbent, ok := m[s.txid]; ok && incumbent != s {
+		incumbent.StopPump()
+	}
 	m[s.txid] = s
 	return true
 }

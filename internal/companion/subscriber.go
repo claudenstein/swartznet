@@ -231,6 +231,14 @@ func (s *Subscriber) ingest(pubHex string, idx CompanionIndex) (torrents, conten
 			td.AddedAt = time.Unix(tr.AddedAt, 0).UTC()
 		}
 		if err := s.ingester.IndexTorrent(td); err != nil {
+			if errors.Is(err, indexer.ErrForeignTorrent) {
+				// The node already attributes this torrent to a different
+				// publisher — the snapshot proves the publisher authored the LIST,
+				// not that it owns this torrent. Skip it entirely (metadata AND
+				// content); do not count it and do not fail the whole sync.
+				s.log.Debug("companion.subscriber.skip_foreign_torrent", "publisher", pubHex, "infohash", ih)
+				continue
+			}
 			return torrents, contents, fmt.Errorf("index torrent %s: %w", ih, err)
 		}
 		torrents++
@@ -248,6 +256,8 @@ func (s *Subscriber) ingest(pubHex string, idx CompanionIndex) (torrents, conten
 					Extractor:  fr.Extractor,
 					Text:       ch.Text,
 					ChunkIndex: ci,
+					// Never overwrite the node's own locally-extracted content.
+					PreserveExisting: true,
 				}
 				if err := s.ingester.IndexContent(cd); err != nil {
 					return torrents, contents, fmt.Errorf("index content %s/%d/%d: %w", ih, fr.Index, ci, err)

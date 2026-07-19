@@ -1,6 +1,7 @@
 package indexer_test
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -126,10 +127,11 @@ func TestIndexTorrentPreserveExistingSignerBlocksHijack(t *testing.T) {
 	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih, Name: "x", SignedBy: trusted}); err != nil {
 		t.Fatal(err)
 	}
-	// A followed publisher `attacker` lists ih in its companion snapshot. The
-	// import must NOT hijack the attribution.
-	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih, Name: "x", SignedBy: attacker, PreserveExistingSigner: true}); err != nil {
-		t.Fatal(err)
+	// A followed publisher `attacker` lists ih in its companion snapshot and tries
+	// to relabel it. The import must be SKIPPED entirely (ErrForeignTorrent),
+	// leaving BOTH the attribution and the name untouched.
+	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih, Name: "RELABELED", SignedBy: attacker, PreserveExistingSigner: true}); !errors.Is(err, indexer.ErrForeignTorrent) {
+		t.Fatalf("foreign-torrent write returned %v, want ErrForeignTorrent", err)
 	}
 	if got := signedByOf(t, idx, ih); got != trusted {
 		t.Errorf("SignedBy = %q, want %q — a companion import hijacked an existing attribution", got, trusted)
@@ -143,6 +145,51 @@ func TestIndexTorrentPreserveExistingSignerBlocksHijack(t *testing.T) {
 	if got := signedByOf(t, idx, ih2); got != attacker {
 		t.Errorf("new-torrent SignedBy = %q, want %q", got, attacker)
 	}
+}
+
+// TestIndexContentPreserveExistingBlocksOverwrite is the regression for the
+// content-doc hijack: a companion import (PreserveExisting) must never overwrite
+// the node's OWN locally-extracted content for an infohash it merely listed, but
+// a genuinely new content doc is still imported.
+func TestIndexContentPreserveExistingBlocksOverwrite(t *testing.T) {
+	t.Parallel()
+	idx, err := indexer.Open(filepath.Join(t.TempDir(), "idx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	const ih = "5555555555555555555555555555555555555555"
+
+	// The node's own locally-extracted content.
+	if err := idx.IndexContent(indexer.ContentDoc{InfoHash: ih, FileIndex: 0, ChunkIndex: 0, Text: "myuniquelocalword"}); err != nil {
+		t.Fatal(err)
+	}
+	// A companion import must NOT clobber it.
+	if err := idx.IndexContent(indexer.ContentDoc{InfoHash: ih, FileIndex: 0, ChunkIndex: 0, Text: "attackerpoisonword", PreserveExisting: true}); err != nil {
+		t.Fatal(err)
+	}
+	if n := countHits(t, idx, "attackerpoisonword"); n != 0 {
+		t.Errorf("attacker text overwrote local content (%d hits)", n)
+	}
+	if n := countHits(t, idx, "myuniquelocalword"); n == 0 {
+		t.Error("local content was lost")
+	}
+	// A NEW content doc (different file) IS imported.
+	if err := idx.IndexContent(indexer.ContentDoc{InfoHash: ih, FileIndex: 1, ChunkIndex: 0, Text: "newcompanionword", PreserveExisting: true}); err != nil {
+		t.Fatal(err)
+	}
+	if n := countHits(t, idx, "newcompanionword"); n == 0 {
+		t.Error("a new companion content doc was not imported")
+	}
+}
+
+func countHits(t *testing.T, idx *indexer.Index, q string) int {
+	t.Helper()
+	res, err := idx.Search(indexer.SearchRequest{Query: q, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(res.Total)
 }
 
 // TestIndexTorrentUnsignedStaysUnsigned covers the base case: with no

@@ -26,6 +26,12 @@ type ContentDoc struct {
 	// for large-file chunks. Encoded ONLY in the doc ID — schema v3 has
 	// no stored chunk_index field, so reconstruction always yields 0.
 	ChunkIndex int
+	// PreserveExisting, when set, makes IndexContent skip the write if a doc for
+	// this (infohash, file, chunk) already exists. The companion subscriber sets
+	// it: content docs carry no provenance, so a followed publisher's snapshot
+	// must never overwrite the node's OWN locally-extracted content for an
+	// infohash it merely listed. Transient — never serialized.
+	PreserveExisting bool
 }
 
 // docID keys a content doc by (infohash, file index, chunk index) so
@@ -67,6 +73,13 @@ func (i *Index) IndexContent(doc ContentDoc) error {
 	defer i.mu.Unlock()
 	if i.bleve == nil {
 		return errors.New("indexer: closed")
+	}
+	if doc.PreserveExisting {
+		if d, err := i.bleve.Document(doc.docID()); err == nil && d != nil {
+			// Already have content for this (infohash, file, chunk) — never let a
+			// companion import clobber the node's own extraction.
+			return nil
+		}
 	}
 	return i.bleve.Index(doc.docID(), doc.toBleve())
 }
