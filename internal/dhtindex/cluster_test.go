@@ -1,6 +1,7 @@
 package dhtindex_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -223,6 +224,12 @@ func TestPutFailsClosedOnZeroNodes(t *testing.T) {
 			t.Fatalf("pointer put must fail closed, got %v", err)
 		}
 	})
+	t.Run("ppmi", func(t *testing.T) {
+		err := putter.PutPPMI(ctx, dhtschema.PPMIValue{IH: bytes.Repeat([]byte{1}, 20), Ts: 1700000000})
+		if err == nil || !strings.Contains(err.Error(), "zero DHT nodes") {
+			t.Fatalf("PPMI put must fail closed, got %v", err)
+		}
+	})
 }
 
 // TestVanillaBep44 closes wire-compat row 8.3-D: a client speaking only stock
@@ -294,4 +301,62 @@ func genClusterKey(t *testing.T) (ed25519.PrivateKey, [32]byte) {
 	var arr [32]byte
 	copy(arr[:], pub)
 	return priv, arr
+}
+
+// TestPPMIClusterRoundTrip: node A publishes a PPMI item over a real BEP-44 put
+// at SHA1(pubkey||PPMISalt); node B resolves it via GetPPMI and recovers A's
+// merged-index infohash + commit. Same shared-hub topology as the keyword test.
+func TestPPMIClusterRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real-DHT cluster test skipped in -short")
+	}
+	t.Parallel()
+
+	hub := newLoopbackServer(t, "ppmi-cluster-storage-hub00000", nil, 0)
+	a := newLoopbackServer(t, "ppmi-cluster-node-a0000000000", []*net.UDPAddr{udpAddr(hub)}, 0)
+	b := newLoopbackServer(t, "ppmi-cluster-node-b0000000000", []*net.UDPAddr{udpAddr(hub)}, 0)
+	a.Ping(udpAddr(hub))
+	b.Ping(udpAddr(hub))
+	time.Sleep(500 * time.Millisecond)
+
+	priv, pubArr := genClusterKey(t)
+	putter, err := dhtindex.NewAnacrolixPutter(a, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ih [20]byte
+	for i := range ih {
+		ih[i] = byte(0x30 + i)
+	}
+	commit := bytes.Repeat([]byte{0xcc}, 32)
+	putCtx, putCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer putCancel()
+	if err := putter.PutPPMI(putCtx, dhtschema.PPMIValue{IH: ih[:], Commit: commit, Ts: 1700000000}); err != nil {
+		t.Fatalf("node A PutPPMI failed: %v", err)
+	}
+
+	getter, err := dhtindex.NewAnacrolixGetter(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var got dhtschema.PPMIValue
+	for {
+		getCtx, getCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		got, err = getter.GetPPMI(getCtx, pubArr)
+		getCancel()
+		if err == nil && len(got.IH) == 20 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node B never resolved A's PPMI (last err=%v)", err)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if hex.EncodeToString(got.IH) != hex.EncodeToString(ih[:]) {
+		t.Errorf("resolved PPMI infohash mismatch: got %x", got.IH)
+	}
+	if hex.EncodeToString(got.Commit) != hex.EncodeToString(commit) {
+		t.Errorf("resolved PPMI commit mismatch")
+	}
 }

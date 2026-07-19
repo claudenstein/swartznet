@@ -34,6 +34,9 @@ run_go aggcli ./cmd/swartznet/ \
 run_go seam ./internal/dhtindex/ \
   'TestAggregatePPMISelfLookup|TestAggregatePPMIReadOnlyInert|TestAggregatePPMIRetract|TestCompositeDualWriteLegacyReadable|TestCompositeSecondaryErrorTolerated' \
   "RecordBackend seam: aggregatePPMI self-lookup over its SNAGG tree; composite dual-write → legacy-only read still returns hits; secondary errors tolerated"
+run_go ppmidht ./internal/dhtindex/ \
+  'TestPPMIClusterRoundTrip|TestPutFailsClosedOnZeroNodes' \
+  "PPMI BEP-44 primitive: real 2-node DHT round-trip at SHA1(pubkey||SHA256(\"snet.index\")); PutPPMI fails closed on zero nodes"
 run_go seammode ./internal/engine/ 'TestLayerDCompositeModeBuilds|TestLayerDAggregateModeBuilds' \
   "engine selects composite / aggregatePPMI LayerDMode with zero app change (ship default stays legacy)"
 run_go cfgmode ./internal/config/ 'TestValidateLayerDMode' \
