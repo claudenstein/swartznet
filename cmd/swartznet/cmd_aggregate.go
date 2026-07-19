@@ -65,6 +65,10 @@ func cmdAggregateInspect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: swartznet aggregate inspect <index-file>")
 		return exitUsage
 	}
+	if *pieceSize <= 0 {
+		fmt.Fprintln(stderr, "swartznet: --piece-size must be positive")
+		return exitUsage
+	}
 	path := fs.Arg(0)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -101,6 +105,10 @@ func cmdAggregateFind(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() != 2 {
 		fmt.Fprintln(stderr, "usage: swartznet aggregate find [--piece-size=N] [--verify] <index-file> <prefix>")
+		return exitUsage
+	}
+	if *pieceSize <= 0 {
+		fmt.Fprintln(stderr, "swartznet: --piece-size must be positive")
 		return exitUsage
 	}
 	path, prefix := fs.Arg(0), fs.Arg(1)

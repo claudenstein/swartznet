@@ -19,7 +19,12 @@ type BytesPageSource struct {
 	PieceSize int
 }
 
-func (b BytesPageSource) NumPieces() int { return len(b.Data) / b.PieceSize }
+func (b BytesPageSource) NumPieces() int {
+	if b.PieceSize <= 0 { // guard against an integer divide-by-zero on a bad piece size
+		return 0
+	}
+	return len(b.Data) / b.PieceSize
+}
 func (b BytesPageSource) Piece(index int) ([]byte, error) {
 	n := b.NumPieces()
 	if index < 0 || index >= n {

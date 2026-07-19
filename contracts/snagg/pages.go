@@ -147,7 +147,11 @@ func DecodeInterior(page []byte) ([]InteriorChild, error) {
 			return nil, fmt.Errorf("snagg: bad separator varint")
 		}
 		p = p[adv:]
-		if uint64(len(p)) < sl+4 {
+		// Overflow-safe bounds check: `sl+4` would wrap for an attacker-set sl
+		// near 2^64 (a valid 10-byte uvarint), letting p[:sl] panic. Compare the
+		// separator length against the buffer WITHOUT adding to it, then require
+		// 4 more bytes for the child index.
+		if sl > uint64(len(p)) || uint64(len(p))-sl < 4 {
 			return nil, fmt.Errorf("snagg: short separator or child index")
 		}
 		sep := append([]byte(nil), p[:sl]...)

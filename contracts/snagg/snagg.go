@@ -232,6 +232,13 @@ func DecodeTrailer(page []byte) (Trailer, error) {
 	if int(h.payload) != TrailerPayloadSize {
 		return Trailer{}, fmt.Errorf("snagg: trailer payload length %d, expected %d", h.payload, TrailerPayloadSize)
 	}
+	// h.payload is read from the header bytes and does not bound the actual page
+	// length; a crafted short page could declare payload=162 while being <178
+	// bytes, so guard the slice like DecodeLeaf/DecodeInterior do (else the next
+	// line panics on malformed input instead of erroring).
+	if PageHeaderSize+TrailerPayloadSize > len(page) {
+		return Trailer{}, fmt.Errorf("snagg: trailer payload length exceeds page")
+	}
 	p := page[PageHeaderSize : PageHeaderSize+TrailerPayloadSize]
 	if p[0] != TrailerVersion {
 		return Trailer{}, fmt.Errorf("snagg: unsupported trailer version %d", p[0])

@@ -109,6 +109,13 @@ func (e *Engine) DropCompanionTorrent(ih [20]byte) error {
 		e.mu.Unlock()
 		return nil
 	}
+	if !h.companion {
+		// SAFETY: never drop a real (non-companion) torrent through the companion
+		// path. A followed publisher controls the pointer infohash; without this
+		// guard, naming a live torrent's infohash would tear that torrent down.
+		e.mu.Unlock()
+		return nil
+	}
 	delete(e.handles, metainfo.Hash(ih))
 	e.mu.Unlock()
 	h.markRemoved()
@@ -170,6 +177,14 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infohash [20]byte) (
 	h, err := e.addCompanionInfoHash(metainfo.Hash(infohash))
 	if err != nil {
 		return "", err
+	}
+	// SAFETY: if the infohash collides with a real (non-companion) torrent the
+	// node is already running, addCompanionInfoHash returns that live handle
+	// (registerLocked adopts any existing handle). Refuse BEFORE the defer and
+	// DownloadAll below — a followed publisher must not be able to name a live
+	// torrent's infohash and make us override its file priorities or drop it.
+	if !h.companion {
+		return "", fmt.Errorf("engine: companion infohash %x collides with a live torrent; refusing", infohash)
 	}
 	// Drop the fetched torrent on EVERY exit path (success, timeout, bad bounds)
 	// so a subscriber re-syncing hourly cannot accumulate handles/goroutines and
