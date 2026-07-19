@@ -14,6 +14,29 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Web client — full embedded SPA (2026-07-19)
+
+The embedded web UI (served by the daemon at `/`) grows from a placeholder into a
+**fully functional** single-page app at feature parity with the CLI and native GUI.
+
+- Vanilla JS, native ES modules, **no build step / framework / CDN** — served via
+  the existing `go:embed` contract. Five tabs (Downloads, Search, Status,
+  Companion, Settings) matching the GUI; only the visible tab polls.
+- **Downloads:** live torrent list with progress/status/peers/rates, add-magnet,
+  pause/resume/remove (files on disk always kept; optional index-forget),
+  indexing toggle, and a per-file priority drawer.
+- **Search:** the three search layers (Local / Swarm / DHT) render as **three
+  strictly-separate result groups** — never merged, sorted, or deduped — each with
+  its own counters and score type; per-hit Confirm/Flag through the shared spam
+  path; highlight snippets are safely escaped.
+- **Status / Companion / Settings:** node health with honest degraded blocks
+  (disabled subsystems shown as such), companion follow/unfollow/refresh, and
+  bandwidth/queue/sharing settings with merge-PATCH saves (only changed fields
+  sent; the clamped response is authoritative).
+- Security model is the daemon's existing loopback bind + CSRF guard; the client
+  sends no auth token and works same-origin. Verified by `scripts/smoke-web.sh`
+  (21 live checks incl. the cross-origin 403 guard) and a Go embed-manifest test.
+
 ### Slice 13 — Hardening: CI merge gate + doc/license reconciliation (2026-07-19)
 
 - The CI merge gate (`gofmt -s`, `go vet`, `go mod tidy`, `go test -race` with

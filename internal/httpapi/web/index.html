@@ -7,12 +7,11 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <main>
-    <h1>SwartzNet</h1>
-    <p>The daemon is running. This page is a placeholder; the full web UI
-       (Search, Add, Downloads, Companion, Status, Sharing) arrives as the
-       rebuild progresses.</p>
-    <p><a href="/status">GET /status</a> · <a href="/healthz">GET /healthz</a></p>
-  </main>
+  <header id="topbar">
+    <div class="brand">SwartzNet <span id="version" class="version"></span></div>
+    <nav id="tabs" class="tabs"></nav>
+  </header>
+  <main id="view"></main>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>
