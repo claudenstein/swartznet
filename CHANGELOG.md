@@ -14,6 +14,15 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Whitepaper (2026-07-19)
+
+- Added `docs/whitepaper.md` — a concise (~2.5k words), Bitcoin-whitepaper-styled
+  paper (abstract, numbered sections, conclusion, references) describing
+  SwartzNet's architecture and innovations: mainline-invisible search over
+  existing BEPs, the three isolated search layers (local / peer-wire / DHT),
+  signed identity and records, RIBLT set reconciliation, the signed Aggregate
+  B-tree + PPMI pointer, deny-by-default spam resistance, and the capability mask.
+
 ### Web client — full embedded SPA (2026-07-19)
 
 The embedded web UI (served by the daemon at `/`) grows from a placeholder into a
