@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/searchmux"
 )
 
 // testConfig returns a fully-defaulted config rooted under a temp XDG data
@@ -572,5 +574,40 @@ func TestCloseIdempotent(t *testing.T) {
 	}
 	if begins != 1 {
 		t.Fatalf("teardown ran %d times, want once", begins)
+	}
+}
+
+// TestDaemonSearchLocalLayer proves the shared three-layer search fan-out (the
+// GUI and HTTP API both route through Daemon.Search): an indexed torrent is
+// returned in the Local layer.
+func TestDaemonSearchLocalLayer(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.NoIndex = false // this test exercises Layer L
+	d, err := New(context.Background(), Options{
+		Cfg: cfg,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.Idx == nil {
+		t.Fatal("index not opened")
+	}
+	if err := d.Idx.IndexTorrent(indexer.TorrentDoc{
+		InfoHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Name: "ubuntu 24.04 desktop", FilePaths: []string{"disk.img"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := d.Search(context.Background(), searchmux.Query{Text: "ubuntu", Limit: 10})
+	if res.LocalErr != nil {
+		t.Fatalf("local err: %v", res.LocalErr)
+	}
+	if res.Local == nil || res.Local.Total == 0 {
+		t.Fatalf("search returned no local hits: %+v", res.Local)
+	}
+	// Swarm/DHT not requested → nil (never merged into Local).
+	if res.Swarm != nil || res.DHT != nil {
+		t.Errorf("unrequested layers populated: swarm=%v dht=%v", res.Swarm, res.DHT)
 	}
 }

@@ -14,6 +14,24 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 11 — Native Fyne GUI (2026-07-19)
+
+The first graphical build: `swartznet-gui` presents Downloads, Search, Status,
+Companion, and Settings over the SAME daemon the CLI and web UI use — pure
+presentation, no independent logic.
+
+- New `internal/gui` (Fyne) + `cmd/swartznet-gui`. The Search tab renders
+  per-layer Local / Swarm / DHT result cards from the shared search fan-out and
+  never merges them; Confirm/Flag on a hit route through the daemon's shared
+  spam path. The Downloads tab shows live download %/status and drives add /
+  pause / resume / remove through the engine.
+- The search fan-out is unified behind a new `Daemon.Search` that both the HTTP
+  API and the GUI call, so their reconciliation can never drift.
+- The About dialog now states Apache-2.0 for first-party code (correcting the
+  legacy "MIT" claim) and notes the MPL-2.0 anacrolix engine dependency; the
+  version and license come from one build-stamped source.
+- Build with `./scripts/build-gui.sh dev` (requires CGo for Fyne/OpenGL).
+
 ### Slice 10 — Companion content-index publish/subscribe (2026-07-19)
 
 A node now publishes a compact companion content-index (a gzip-JSON snapshot of

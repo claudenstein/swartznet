@@ -7,12 +7,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This tree is mid-way through a from-scratch rebuild (`SPEC.md` → `ARCHITECTURE.md` →
 `PLAN.md`, gate cleared by the author 2026-07-17). The legacy implementation lives
 untouched on the **`legacy-snapshot`** branch as a read-only behavioral reference; the
-working tree grows slice by slice per `PLAN.md`. Slices 0–2 have landed: config,
-identity, daemon, httpapi, `contracts/bencode`, the anacrolix engine, and the
-`add`/`status`/`files` CLI (`add` IS the daemon — there is no `serve`). Until Slice 11
-lands there is **no GUI binary** — only `dist/swartznet` is rebuilt per change. Sections
+working tree grows slice by slice per `PLAN.md`. Slices 0–11 have landed: config,
+identity, daemon, httpapi, `contracts/*`, the anacrolix engine, the CLI (`add` IS the
+daemon — there is no `serve`), Layer L (Bleve search), trust/reputation/Bloom, the
+capability mask, Layer S (`sn_search` peer-wire), RIBLT record sync, Layer D (BEP-44
+keyword index), the companion content-index (BEP-46), and the native Fyne GUI. The GUI
+binary now exists — rebuild **both** `dist/swartznet` and
+`dist/swartznet-gui-dev-linux-amd64` per change (`./scripts/build-gui.sh dev`). Sections
 below describing the repository layout refer to the target state; packages appear as
-their slice lands. Per-slice binary DoD scripts live in `scripts/dod-slice*.sh`; the
+their slice lands. Remaining: Slice 12 (Aggregate/PPMI backend, opt-in) and Slice 13
+(hardening). Per-slice binary DoD scripts live in `scripts/dod-slice*.sh`; the
 timing-sensitive multi-client tests live in `internal/wirecompat/scenarios` (excluded
 from CI, run locally via `go test -race ./...`). Running decisions go in `DECISIONS.md`.
 

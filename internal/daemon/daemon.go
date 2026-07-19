@@ -73,6 +73,10 @@ type Daemon struct {
 	CompPub *companion.Publisher
 	CompSub *companion.SubscriberWorker
 
+	// mux is the shared three-layer search fan-out (Layer L/S/D). Every
+	// frontend routes search through it via Search, never its own logic.
+	mux *searchmux.Mux
+
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
 	bgWG     sync.WaitGroup
@@ -218,24 +222,25 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	// Per-entry failures only warn.
 	_ = eng.RestoreSession()
 
+	// The search mux is built unconditionally (not gated on the HTTP API) so
+	// every frontend — CLI, web UI, and the native GUI — fans out through the
+	// SAME three-layer mux, never its own reconciliation. Always wire Layer S;
+	// Layer L when an index is open; Layer D when the DHT is enabled.
+	d.mux = &searchmux.Mux{Swarm: &swarmSearchAdapter{eng: eng}}
+	if idx := eng.Index(); idx != nil {
+		d.mux.Local = idx
+	}
+	if !opts.Cfg.DisableDHT {
+		d.mux.DHT = &dhtSearchAdapter{eng: eng}
+	}
+
 	if opts.APIAddr != "" {
 		apiOpts := httpapi.Options{Version: opts.Version}
 		if d.Identity != nil {
 			apiOpts.PublisherPubKey = d.Identity.PublicKeyHex
 		}
 		adapter := &controllerAdapter{eng: eng, adm: d.admission}
-		// Always wire /search so Layer S (swarm) works even with no local
-		// index; Local stays nil (200-empty) when the index is off.
-		mux := &searchmux.Mux{Swarm: &swarmSearchAdapter{eng: eng}}
-		if idx := eng.Index(); idx != nil {
-			mux.Local = idx
-		}
-		// Layer D rides only when the DHT is enabled (a nil DHTLookup would
-		// answer empty anyway, but wiring is gated on the same knob).
-		if !opts.Cfg.DisableDHT {
-			mux.DHT = &dhtSearchAdapter{eng: eng}
-		}
-		apiOpts.Search = adapter.search(mux)
+		apiOpts.Search = adapter.search(d.mux)
 		apiOpts.PublisherStatus = adapter.publisherStatus
 		// The adapter is constructed unconditionally — even when both legs are
 		// nil — so the /companion routes always exist and degrade gracefully.
@@ -269,6 +274,17 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	}
 
 	return d, nil
+}
+
+// Search fans a query across Layer L/S/D through the shared mux and returns the
+// three native response types side by side (never merged). The native GUI and
+// the HTTP API both call into this same fan-out. The caller passes a ctx whose
+// deadline bounds the swarm/DHT layers.
+func (d *Daemon) Search(ctx context.Context, q searchmux.Query) searchmux.Result {
+	if d.mux == nil {
+		return searchmux.Result{}
+	}
+	return d.mux.Search(ctx, q)
 }
 
 // goBG runs fn on the daemon-owned background context. Close cancels that
