@@ -57,7 +57,7 @@ func cmdCrawl(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&durationMs, "duration-ms", 30000, "overall crawl time budget in milliseconds")
 	fs.BoolVar(&asJSON, "json", false, "emit JSON instead of human text")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if workers < 1 {
 		fmt.Fprintln(stderr, "swartznet crawl: --workers must be >= 1")

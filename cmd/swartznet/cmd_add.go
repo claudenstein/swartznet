@@ -43,7 +43,7 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 	dhtInsecure := fs.Bool("dht-insecure", false, "disable BEP-42 node-ID security (TESTING ONLY; needed for private DHTs)")
 	regtest := fs.Bool("regtest", false, "accelerated companion/Layer-D publisher timings (TESTING ONLY — never run against mainnet)")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(stderr, "usage: swartznet add <magnet | path.torrent | infohash | ->")

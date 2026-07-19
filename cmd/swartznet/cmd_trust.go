@@ -57,7 +57,7 @@ func trustList(args []string, stdout, stderr io.Writer) int {
 	filePath := fs.String("file", "", "override the trust.json path")
 	asJSON := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	store, err := openTrustStore(fs, *filePath)
 	if err != nil {
@@ -90,7 +90,7 @@ func trustAdd(args []string, stdout, stderr io.Writer) int {
 	// "--file X" into the label, silently writing to the DEFAULT store.
 	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if len(pos) < 1 {
 		fmt.Fprintln(stderr, "usage: swartznet trust add <pubkey> [<label>]")
@@ -118,7 +118,7 @@ func trustRemove(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	filePath := fs.String("file", "", "override the trust.json path")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(stderr, "usage: swartznet trust remove <pubkey>")

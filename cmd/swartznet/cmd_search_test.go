@@ -5,9 +5,51 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestSearchDirectJSONSchemaMatchesAPI is the regression for the two-schema bug:
+// a direct (no-daemon) `search --json` must emit the SAME {"local":...} envelope
+// as the daemon-routed path, not the old flat {"Total":...} shape — so a scripted
+// consumer sees one stable schema regardless of whether a daemon is running.
+func TestSearchDirectJSONSchemaMatchesAPI(t *testing.T) {
+	t.Parallel()
+	idxDir := filepath.Join(t.TempDir(), "idx")
+	var stdout, stderr bytes.Buffer
+	if code := cmdSearch([]string{"--index-dir", idxDir, "--json", "hello"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, stdout.String())
+	}
+	if _, ok := got["local"]; !ok {
+		t.Errorf("direct --json missing the 'local' key (schema drift from the daemon path): %s", stdout.String())
+	}
+	if _, ok := got["Total"]; ok {
+		t.Errorf("direct --json still emits the old flat 'Total' schema")
+	}
+}
+
+// TestSubcommandHelpExitsZero is the regression for the help exit code: a
+// -h/--help request must exit 0 (not the usage code 2), consistent with the
+// top-level `swartznet --help`; a genuine parse error still exits with the usage
+// code.
+func TestSubcommandHelpExitsZero(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"--help"}, {"-h"}} {
+		var out, errb bytes.Buffer
+		if code := cmdSearch(args, &out, &errb); code != exitOK {
+			t.Errorf("search %v exit = %d, want %d (help is not an error)", args, code, exitOK)
+		}
+	}
+	var out, errb bytes.Buffer
+	if code := cmdSearch([]string{"--nosuchflag"}, &out, &errb); code != exitUsage {
+		t.Errorf("search --nosuchflag exit = %d, want %d", code, exitUsage)
+	}
+}
 
 func TestSearchUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer

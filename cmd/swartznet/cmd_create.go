@@ -34,7 +34,7 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	noDHT := fs.Bool("no-dht", false, "with --seed, disable the DHT and gateway port mapping (direct peers only)")
 	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if len(pos) != 1 {
 		fmt.Fprintln(stderr, "usage: swartznet create <file-or-folder> -o <output.torrent>")

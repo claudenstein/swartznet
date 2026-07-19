@@ -31,7 +31,7 @@ func cmdAggregateBuild(args []string, stdout, stderr io.Writer) int {
 	pieceSize := fs.Int("piece-size", snagg.MinPieceSize, "piece size in bytes; MUST match the .torrent's metainfo when wrapped")
 	powBits := fs.Uint("pow-bits", 0, "hashcash difficulty (0 = no mining, 20 = production default)")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if *outPath == "" {
 		fmt.Fprintln(stderr, "aggregate build: --out is required")

@@ -32,7 +32,7 @@ func confirmFlag(action string, args []string, stdout, stderr io.Writer) int {
 	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if len(pos) != 1 {
 		fmt.Fprintf(stderr, "usage: swartznet %s <infohash>\n", action)

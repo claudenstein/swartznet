@@ -24,7 +24,7 @@ func cmdFiles(args []string, stdout, stderr io.Writer) int {
 	asJSON := fs.Bool("json", false, "emit JSON instead of a table")
 	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if n := len(pos); n != 1 && n != 3 {
 		fmt.Fprintln(stderr, "usage:")

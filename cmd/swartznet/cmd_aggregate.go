@@ -59,7 +59,7 @@ func cmdAggregateInspect(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	pieceSize := fs.Int("piece-size", snagg.MinPieceSize, "piece size in bytes; must match the torrent's metainfo")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(stderr, "usage: swartznet aggregate inspect <index-file>")
@@ -101,7 +101,7 @@ func cmdAggregateFind(args []string, stdout, stderr io.Writer) int {
 	pieceSize := fs.Int("piece-size", snagg.MinPieceSize, "piece size in bytes; must match the torrent's metainfo")
 	verify := fs.Bool("verify", false, "also run VerifyFingerprint (scans every leaf; slower)")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if fs.NArg() != 2 {
 		fmt.Fprintln(stderr, "usage: swartznet aggregate find [--piece-size=N] [--verify] <index-file> <prefix>")

@@ -20,7 +20,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	asJSON := fs.Bool("json", false, "emit JSON instead of text")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

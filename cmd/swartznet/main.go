@@ -277,6 +277,18 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 	return ctx, cancel
 }
 
+// parseErrExit maps a FlagSet parse error to a process exit code. A -h/--help
+// request surfaces as flag.ErrHelp (the FlagSet already printed its usage), which
+// is NOT an error — it exits 0, matching the top-level `swartznet --help`. Any
+// other parse error exits with the usage code. Every subcommand routes its parse
+// error through here so `swartznet <cmd> --help` exits 0 consistently.
+func parseErrExit(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return exitOK
+	}
+	return exitUsage
+}
+
 // parseFlagsAllowingLeadingPositionals parses fs while accepting a command's
 // positional argument(s) either BEFORE or AFTER its flags. Go's flag package
 // stops at the first non-flag argument, so `cmd <positional> --flag v` would

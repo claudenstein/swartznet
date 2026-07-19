@@ -24,6 +24,9 @@ func cmdCompanion(args []string, stdout, stderr io.Writer) int {
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
+	case "help", "-h", "--help":
+		fmt.Fprintln(stdout, "usage: swartznet companion <status|follow|unfollow|refresh> [flags]")
+		return exitOK
 	case "status":
 		return companionStatus(rest, stdout, stderr)
 	case "follow":
@@ -45,7 +48,7 @@ func companionStatus(args []string, stdout, stderr io.Writer) int {
 	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	asJSON := fs.Bool("json", false, "emit JSON instead of text")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	raw, code := companionGet(*apiAddr, "/companion", stderr)
 	if code != exitOK {
@@ -106,7 +109,7 @@ func companionFollow(action string, args []string, stdout, stderr io.Writer) int
 	// along with any post-positional flags (which would then hit the default API).
 	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if len(pos) != 1 {
 		fmt.Fprintf(stderr, "usage: swartznet companion %s <pubkey-hex> [--label <name>]\n", action)
@@ -132,7 +135,7 @@ func companionRefresh(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	_, code := companionPost(*apiAddr, "/companion/refresh", []byte("{}"), stderr)
 	if code != exitOK {

@@ -37,7 +37,7 @@ func cmdCrawlProbe(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&timeoutMs, "timeout-ms", 5000, "query timeout in milliseconds")
 	fs.BoolVar(&asJSON, "json", false, "emit JSON instead of human text")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if addrStr == "" {
 		fmt.Fprintln(stderr, "swartznet crawl-probe: --addr is required")

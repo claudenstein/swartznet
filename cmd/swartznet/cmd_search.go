@@ -35,7 +35,7 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 	swarmTimeout := fs.Int("swarm-timeout-ms", 2000, "Layer-S timeout")
 	dhtTimeout := fs.Int("dht-timeout-ms", 5000, "Layer-D timeout")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if fs.NArg() == 0 {
 		fmt.Fprintln(stderr, "usage: swartznet search [--limit N] [--json] [--swarm] [--dht] <query...>")
@@ -75,13 +75,40 @@ func searchDirect(apiAddr, indexDir, query string, limit, swarmTimeout, dhtTimeo
 		return reportRunErr(err, stderr)
 	}
 	if asJSON {
+		// Emit the SAME `{"local":{...}}` envelope the daemon-routed path emits,
+		// so `search --json` yields ONE stable schema whether or not a daemon is
+		// running (the lock-fallback routes through searchViaAPI, which dumps the
+		// httpapi shape; a bare direct dump of indexer.SearchResponse would be a
+		// different, incompatible schema for the identical invocation).
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
-		_ = enc.Encode(resp)
+		_ = enc.Encode(httpapi.SearchResponse{Local: toAPILocalBlock(*resp)})
 		return exitOK
 	}
 	emitSearchText(stdout, query, resp)
 	return exitOK
+}
+
+// toAPILocalBlock converts a direct indexer result into the httpapi local block,
+// so the CLI's direct and daemon-routed --json outputs share one schema.
+func toAPILocalBlock(r indexer.SearchResponse) httpapi.LocalBlock {
+	hits := make([]httpapi.LocalHit, 0, len(r.Hits))
+	for _, h := range r.Hits {
+		hits = append(hits, httpapi.LocalHit{
+			DocType:   h.DocType,
+			InfoHash:  h.InfoHash,
+			Name:      h.Name,
+			SizeBytes: h.SizeBytes,
+			FileIndex: h.FileIndex,
+			FilePath:  h.FilePath,
+			Mime:      h.Mime,
+			Extractor: h.Extractor,
+			Score:     h.Score,
+			SignedBy:  h.SignedBy,
+			Fragments: h.Fragments,
+		})
+	}
+	return httpapi.LocalBlock{Total: r.Total, Hits: hits}
 }
 
 var errIndexOpenTimeout = fmt.Errorf("index open timed out")
