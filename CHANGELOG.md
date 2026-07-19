@@ -14,6 +14,26 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 12 — Aggregate index: frozen contracts + offline tooling (2026-07-19, in progress)
+
+The signed SNAGG B-tree Aggregate index format and its DHT pointer are frozen,
+and the offline builder/inspector/query tooling ships.
+
+- New `contracts/snagg`: the byte-exact signed B-tree format (6-byte magic,
+  bencoded records, MIN-KEY separators, 162-byte signed trailer, deterministic
+  build, SHA-256 record-stream fingerprint, hostile-tree-guarded prefix query).
+- New `contracts/dhtschema.PPMIValue` + `PPMISalt = SHA256("snet.index")`: the
+  BEP-44 pointer to a publisher's merged index, with the tree fingerprint as its
+  commit. Both contracts carry frozen golden vectors.
+- New `swartznet aggregate build|inspect|find`: offline sign + pack a JSONL
+  record set into a signed SNAGG file (mode 0644; `--pow-bits` refused above
+  40), inspect its trailer (integrity gate), and prefix-query it (`--verify`
+  re-derives the fingerprint).
+
+The live aggregatePPMI/composite backends, DHT distribution, admission seeds,
+and crawler remain opt-in and off by default — the ship default stays
+`LayerDMode=legacy`.
+
 ### Slice 11 — Native Fyne GUI (2026-07-19)
 
 The first graphical build: `swartznet-gui` presents Downloads, Search, Status,
