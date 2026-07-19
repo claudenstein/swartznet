@@ -208,10 +208,15 @@ func TestMalformedChargedBeforeLookup(t *testing.T) {
 	}
 }
 
-// TestPeerAnnounceStoresServices + all-zero pk rejected.
+// TestPeerAnnounceStoresServices + all-zero pk rejected. NotePeerAdded precedes
+// the announce, mirroring production: PeerConnAdded (→ NotePeerAdded) fires
+// synchronously before any inbound frame is dispatched, so the entry always
+// exists when a peer_announce is processed (handlePeerAnnounce updates it; it
+// never creates one, so a post-close announce cannot resurrect a zombie).
 func TestPeerAnnounceStoresServices(t *testing.T) {
 	p := New(testLog())
 	defer p.Close()
+	p.NotePeerAdded("peer")
 	// all-zero pk → pubkey not stored, rest processed.
 	frame, _ := ltepwire.EncodePeerAnnounce(ltepwire.PeerAnnounce{Services: 0x2ED, Pk: make([]byte, 32)})
 	p.HandleMessage("peer", frame, nil)

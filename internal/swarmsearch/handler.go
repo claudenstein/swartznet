@@ -226,8 +226,16 @@ func (p *Protocol) handlePeerAnnounce(addr string, pa ltepwire.PeerAnnounce) {
 	p.mu.Lock()
 	ps := p.peers[addr]
 	if ps == nil {
-		ps = &PeerState{Addr: addr}
-		p.peers[addr] = ps
+		// The peer is not (or no longer) connected. Do NOT create an entry here:
+		// peer_announce is dispatched on an async worker, so it can run AFTER
+		// OnPeerClosed already deleted this addr — and p.peers has no reaper or cap,
+		// so re-creating a zombie for a dead connection is a remote-triggerable
+		// unbounded memory leak (each reconnect uses a fresh ephemeral port → a
+		// fresh key). Every LIVE connection already has an entry created
+		// synchronously by NotePeerAdded before any message is processed, so a
+		// legitimate announce always finds one; a missing entry means "gone".
+		p.mu.Unlock()
+		return
 	}
 	ps.Services = ltepwire.ServiceBits(pa.Services) // unknown bits ignored, never rejected
 	ps.Version = pa.Version

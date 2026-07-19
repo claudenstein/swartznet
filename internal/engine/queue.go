@@ -77,6 +77,13 @@ func (e *Engine) queueOrActivate(h *Handle) {
 		return
 	}
 	h.setQueued(true)
+	// Gate the queued torrent at the anacrolix level, not ONLY via None
+	// priorities: a later SetFilePriority could raise a file above None and
+	// resume downloading outside the cap (None priorities are the only other
+	// gate). DisallowDataDownload suppresses piece requests regardless of file
+	// priority; activateDownload re-allows it on promotion. Belt-and-suspenders
+	// with the None reset below.
+	h.T.DisallowDataDownload()
 	// A previously-activated handle (e.g. resumed over a full cap) must not
 	// keep downloading from the queue: reset its priorities — promotion
 	// re-flips them. Without this, a resume-over-cap torrent transfers
@@ -97,6 +104,9 @@ func (e *Engine) activateDownload(h *Handle) {
 	if h.isPaused() {
 		return
 	}
+	// Re-allow data download: a queued torrent had it disallowed as a cap gate
+	// (queueOrActivate); a directly-activated one is already allowed (no-op).
+	h.T.AllowDataDownload()
 	h.setQueued(false)
 	if h.T.Info() == nil {
 		return // autoDownload flips after metadata arrives

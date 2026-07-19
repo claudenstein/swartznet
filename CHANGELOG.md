@@ -45,6 +45,16 @@ and concurrency surfaces:
   frame declaring a huge inner string forced a ~128 MiB allocation before failing
   — a remotely-reachable memory-exhaustion DoS on every inbound frame. Decodes are
   now bounded to the payload size (`decodeBounded`), matching the BEP-44 side.
+- **GUI responsiveness.** The Status tab now computes its index statistics off the
+  UI thread, so a node with a large corpus no longer freezes the whole GUI every
+  couple of seconds.
+- **GUI search results.** Toggling the Swarm/DHT checkboxes while a search is in
+  flight no longer discards results that were already fetched for those layers.
+- **Security — peer-map leak.** A `peer_announce` frame processed just after a
+  peer disconnects can no longer re-create a stale peer entry, closing a slow
+  remote-triggerable memory leak.
+- **Queue accounting.** Raising a file's priority on a queued torrent no longer
+  lets it download outside the max-active-downloads cap.
 - **GUI correctness (data-safety).** The Downloads tab now targets pause/resume/
   remove by the infohash of the selected torrent, not by a list-row index. The
   torrent list is now returned in a deterministic (sorted) order, so a background

@@ -41,11 +41,20 @@ func (st *statusTab) pollLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			fyne.Do(st.refresh)
+			// Compute the (expensive) status OFF the Fyne UI thread — render()
+			// calls indexer.Stats(), a full-corpus scan under the index lock that
+			// can far exceed a frame budget on a real corpus. Running it inside
+			// fyne.Do would block ALL rendering/input (the GLFW main loop drains
+			// the func-queue and draws in mutually-exclusive cases), freezing the
+			// whole GUI every 2s. Only the widget mutation goes on the UI thread.
+			text := st.render()
+			fyne.Do(func() { st.body.SetText(text) })
 		}
 	}
 }
 
+// refresh renders synchronously; used for the one-time initial paint during
+// construction. The recurring poll computes render() off-thread (see pollLoop).
 func (st *statusTab) refresh() {
 	st.body.SetText(st.render())
 }

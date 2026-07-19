@@ -80,20 +80,40 @@ func TestSearchLayerErrorRendersInline(t *testing.T) {
 	}
 }
 
-// TestSearchSwarmDHTOmittedWhenUnchecked: a layer that wasn't requested is not
-// rendered even if the Result carries it.
-func TestSearchLayersGatedOnChecks(t *testing.T) {
+// TestSearchLayersRenderWhatWasQueried pins the round-9 LOW fix: rendering
+// follows the Result (res.Swarm/res.DHT), which runSearch leaves nil for a layer
+// it did not query — so an un-queried layer is not rendered — but a layer that WAS
+// queried renders even if the user toggled its checkbox off mid-search (before the
+// fix, gating on the live checkbox silently dropped already-fetched hits).
+func TestSearchLayersRenderWhatWasQueried(t *testing.T) {
+	// Not queried → nil Swarm/DHT blocks → only the local card renders.
 	st := newTestSearchTab(t) // swarm + dht unchecked
 	st.buildResults(searchmux.Result{
 		Local: &indexer.SearchResponse{Total: 1, Hits: []indexer.SearchHit{{DocType: "torrent", InfoHash: strings.Repeat("a", 40), Name: "x"}}},
-		Swarm: &swarmsearch.QueryResponse{Hits: []swarmsearch.MergedHit{{InfoHash: strings.Repeat("c", 40)}}},
-		DHT:   &dhtindex.LookupResponse{Hits: []dhtindex.LookupHit{{InfoHash: strings.Repeat("d", 40)}}},
+		// Swarm/DHT deliberately nil: runSearch never populates them when unchecked.
 	})
 	if cardCount(st) != 1 {
-		t.Errorf("unchecked swarm/dht layers rendered: %d cards, want 1", cardCount(st))
+		t.Errorf("un-queried swarm/dht layers rendered: %d cards, want 1", cardCount(st))
 	}
 	if strings.Contains(st.statusLbl.Text, "Swarm") || strings.Contains(st.statusLbl.Text, "DHT") {
-		t.Errorf("status shows unchecked layers: %q", st.statusLbl.Text)
+		t.Errorf("status shows un-queried layers: %q", st.statusLbl.Text)
+	}
+
+	// Queried (res populated) but the checkbox is now OFF (user toggled it during
+	// the multi-second fan-out): the fetched hits must STILL render.
+	st2 := newTestSearchTab(t)
+	st2.swarmChk.SetChecked(false)
+	st2.dhtChk.SetChecked(false)
+	st2.buildResults(searchmux.Result{
+		Local: &indexer.SearchResponse{Total: 0, Hits: nil},
+		Swarm: &swarmsearch.QueryResponse{Asked: 2, Responded: 1, Hits: []swarmsearch.MergedHit{{InfoHash: strings.Repeat("c", 40), Name: "debian"}}},
+		DHT:   &dhtindex.LookupResponse{IndexersAsked: 1, IndexersResponded: 1, Hits: []dhtindex.LookupHit{{InfoHash: strings.Repeat("d", 40), Name: "fedora"}}},
+	})
+	if cardCount(st2) != 2 { // 1 swarm + 1 dht
+		t.Errorf("toggling a checkbox off mid-search dropped fetched hits: %d cards, want 2", cardCount(st2))
+	}
+	if !strings.Contains(st2.statusLbl.Text, "Swarm: 1 hits") || !strings.Contains(st2.statusLbl.Text, "DHT: 1 hits") {
+		t.Errorf("status dropped fetched layers after a toggle: %q", st2.statusLbl.Text)
 	}
 }
 

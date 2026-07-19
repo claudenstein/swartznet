@@ -135,35 +135,35 @@ func (st *searchTab) buildResults(res searchmux.Result) {
 		}
 	}
 
-	// Layer S.
-	if st.swarmChk.Checked {
-		switch {
-		case res.SwarmErr != nil:
-			parts = append(parts, fmt.Sprintf("Swarm: error: %v", res.SwarmErr))
-		case res.Swarm != nil:
-			parts = append(parts, fmt.Sprintf("Swarm: %d hits (asked=%d, responded=%d)",
-				len(res.Swarm.Hits), res.Swarm.Asked, res.Swarm.Responded))
-			for _, h := range res.Swarm.Hits {
-				sub := fmt.Sprintf("[swarm] %s  score=%d  seeders=%d  sources=%d",
-					short16(h.InfoHash), h.Score, h.Seeders, len(h.Sources))
-				st.addHitCard(h.Name, h.InfoHash, sub)
-			}
+	// Layer S — render based on what was actually QUERIED (res.Swarm/SwarmErr),
+	// NOT the live checkbox: the user may toggle the box during the multi-second
+	// swarm fan-out, and gating on the live state would silently drop hits that
+	// were already fetched. res.Swarm is nil when the layer wasn't queried, so the
+	// switch renders it only when it ran.
+	switch {
+	case res.SwarmErr != nil:
+		parts = append(parts, fmt.Sprintf("Swarm: error: %v", res.SwarmErr))
+	case res.Swarm != nil:
+		parts = append(parts, fmt.Sprintf("Swarm: %d hits (asked=%d, responded=%d)",
+			len(res.Swarm.Hits), res.Swarm.Asked, res.Swarm.Responded))
+		for _, h := range res.Swarm.Hits {
+			sub := fmt.Sprintf("[swarm] %s  score=%d  seeders=%d  sources=%d",
+				short16(h.InfoHash), h.Score, h.Seeders, len(h.Sources))
+			st.addHitCard(h.Name, h.InfoHash, sub)
 		}
 	}
 
-	// Layer D.
-	if st.dhtChk.Checked {
-		switch {
-		case res.DHTErr != nil:
-			parts = append(parts, fmt.Sprintf("DHT: error: %v", res.DHTErr))
-		case res.DHT != nil:
-			parts = append(parts, fmt.Sprintf("DHT: %d hits (indexers=%d/%d)",
-				len(res.DHT.Hits), res.DHT.IndexersResponded, res.DHT.IndexersAsked))
-			for _, h := range res.DHT.Hits {
-				sub := fmt.Sprintf("[dht] %s  score=%.2f  seeders=%d  sources=%d",
-					short16(h.InfoHash), h.Score, h.Seeders, len(h.Sources))
-				st.addHitCard(h.Name, h.InfoHash, sub)
-			}
+	// Layer D — likewise gated on res.DHT/DHTErr, not the live checkbox.
+	switch {
+	case res.DHTErr != nil:
+		parts = append(parts, fmt.Sprintf("DHT: error: %v", res.DHTErr))
+	case res.DHT != nil:
+		parts = append(parts, fmt.Sprintf("DHT: %d hits (indexers=%d/%d)",
+			len(res.DHT.Hits), res.DHT.IndexersResponded, res.DHT.IndexersAsked))
+		for _, h := range res.DHT.Hits {
+			sub := fmt.Sprintf("[dht] %s  score=%.2f  seeders=%d  sources=%d",
+				short16(h.InfoHash), h.Score, h.Seeders, len(h.Sources))
+			st.addHitCard(h.Name, h.InfoHash, sub)
 		}
 	}
 
