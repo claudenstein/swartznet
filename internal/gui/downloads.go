@@ -26,7 +26,13 @@ type downloadsTab struct {
 	list     *widget.List
 	snaps    []engine.TorrentSnapshot
 	selected int
-	win      func() fyne.Window // resolves the window for dialogs (nil-safe)
+	// selectedIH is the INFOHASH captured at selection time. Actions resolve the
+	// target by this, NOT by dl.selected as an index into dl.snaps: the snapshot
+	// list is rebuilt every poll and (before the deterministic sort) could reorder,
+	// so an index would silently point at a different torrent — pause/resume/remove
+	// would then hit the wrong one. The infohash is stable.
+	selectedIH string
+	win        func() fyne.Window // resolves the window for dialogs (nil-safe)
 }
 
 func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
@@ -57,8 +63,11 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 			bar.SetValue(s.Progress)
 		},
 	)
-	dl.list.OnSelected = func(id widget.ListItemID) { dl.selected = id }
-	dl.list.OnUnselected = func(widget.ListItemID) { dl.selected = -1 }
+	dl.list.OnSelected = func(id widget.ListItemID) { dl.selectRow(id) }
+	dl.list.OnUnselected = func(widget.ListItemID) {
+		dl.selected = -1
+		dl.selectedIH = ""
+	}
 
 	addBtn := widget.NewButtonWithIcon("Add magnet / .torrent", theme.ContentAddIcon(), dl.showAddDialog)
 	pauseBtn := widget.NewButtonWithIcon("Pause", theme.MediaPauseIcon(), func() { dl.act("pause") })
@@ -93,12 +102,22 @@ func (dl *downloadsTab) refresh() {
 	dl.list.Refresh()
 }
 
-// selectedInfoHash returns the currently-selected torrent's infohash, or "".
-func (dl *downloadsTab) selectedInfoHash() string {
-	if dl.selected < 0 || dl.selected >= len(dl.snaps) {
-		return ""
+// selectRow records the selection as the infohash of the row the user clicked,
+// captured against the CURRENT snapshot list. Later actions resolve by this
+// infohash, so a subsequent poll that reorders the list cannot redirect the
+// action to a different torrent.
+func (dl *downloadsTab) selectRow(id widget.ListItemID) {
+	dl.selected = id
+	if id >= 0 && int(id) < len(dl.snaps) {
+		dl.selectedIH = dl.snaps[id].InfoHash
 	}
-	return dl.snaps[dl.selected].InfoHash
+}
+
+// selectedInfoHash returns the infohash captured when the user selected a row,
+// or "". It deliberately does NOT re-resolve dl.selected against dl.snaps — that
+// index is unstable across the per-poll rebuild of the list.
+func (dl *downloadsTab) selectedInfoHash() string {
+	return dl.selectedIH
 }
 
 func (dl *downloadsTab) act(action string) {
@@ -130,6 +149,8 @@ func (dl *downloadsTab) removeSelected() {
 		return
 	}
 	dl.selected = -1
+	dl.selectedIH = ""
+	dl.list.UnselectAll()
 	dl.refresh()
 }
 

@@ -12,7 +12,7 @@ import (
 func TestClusterLRUEvictsLeastRecentlyUsed(t *testing.T) {
 	t.Parallel()
 
-	c := newClusterLRU(2)
+	c := newClusterLRU(2, 1<<30)
 	c.put(1, []byte("one"))
 	c.put(2, []byte("two"))
 
@@ -40,7 +40,7 @@ func TestClusterLRUEvictsLeastRecentlyUsed(t *testing.T) {
 func TestClusterLRURepeatKeyRefreshes(t *testing.T) {
 	t.Parallel()
 
-	c := newClusterLRU(2)
+	c := newClusterLRU(2, 1<<30)
 	c.put(1, []byte("v1"))
 	c.put(1, []byte("v2"))
 	c.put(2, []byte("two"))
@@ -59,9 +59,50 @@ func TestClusterLRURepeatKeyRefreshes(t *testing.T) {
 // TestClusterLRUCapacityFloor guards the capacity<1 normalisation.
 func TestClusterLRUCapacityFloor(t *testing.T) {
 	t.Parallel()
-	c := newClusterLRU(0)
+	c := newClusterLRU(0, 1<<30)
 	c.put(1, []byte("a"))
 	if _, ok := c.get(1); !ok {
 		t.Fatal("a cap-floored LRU should still hold one entry")
+	}
+}
+
+// TestClusterLRUBoundsAggregateBytes pins the round-8 fix: eviction must respect
+// an aggregate BYTE budget, not just the entry count. A crafted .zim with many
+// large clusters previously pinned count×maxClusterBytes (32 × 64 MiB ≈ 2 GiB);
+// the byte budget caps the total resident memory regardless of the count cap.
+func TestClusterLRUBoundsAggregateBytes(t *testing.T) {
+	t.Parallel()
+	// High count cap (100) but a 10 MiB byte budget: 6 × 4 MiB clusters exceed it.
+	const budget = 10 << 20
+	c := newClusterLRU(100, budget)
+	blob := make([]byte, 4<<20) // 4 MiB per cluster
+	for k := uint32(0); k < 6; k++ {
+		c.put(k, blob)
+	}
+	if c.curBytes > budget {
+		t.Errorf("resident bytes %d exceed budget %d — aggregate not bounded", c.curBytes, budget)
+	}
+	// At most floor(10/4)=2 clusters resident.
+	if c.ll.Len() > 2 {
+		t.Errorf("cache holds %d clusters (%d MiB); byte budget should keep <=2", c.ll.Len(), c.curBytes>>20)
+	}
+	// The most-recently-put key survives.
+	if _, ok := c.get(5); !ok {
+		t.Error("most-recent cluster evicted")
+	}
+}
+
+// TestClusterLRUAdmitsSingleOversizedEntry: an entry alone larger than the budget
+// is still admitted (we need it for the current article) and does not loop.
+func TestClusterLRUAdmitsSingleOversizedEntry(t *testing.T) {
+	t.Parallel()
+	c := newClusterLRU(32, 1<<20) // 1 MiB budget
+	big := make([]byte, 4<<20)    // 4 MiB > budget
+	c.put(1, big)
+	if _, ok := c.get(1); !ok {
+		t.Fatal("oversized-but-needed entry must still be cached")
+	}
+	if c.ll.Len() != 1 {
+		t.Errorf("expected exactly 1 entry, got %d", c.ll.Len())
 	}
 }

@@ -87,17 +87,24 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 	})
 
 	var combined strings.Builder
+	// decompressBudget bounds the TOTAL decompressed bytes read across ALL
+	// chapters, charged by bytes CONSUMED (not by output text). The per-chapter
+	// output budget alone is insufficient: a chapter that decompresses gigabytes
+	// but emits ZERO visible text (e.g. a huge <script> body) never grows
+	// `combined`, so an output-only budget stays full for every chapter and a
+	// crafted book of such chapters drives ~1000x total decompression (a CPU/time
+	// DoS + a leaked, still-decompressing extract goroutine).
+	decompressBudget := int64(maxEpubTotalDecompress)
 	for _, f := range chapters {
-		// The text budget is the intended *output* cap (64 MiB), not
-		// the 256 MiB input cap above: a deflate-bomb chapter
-		// amplifies ~1032:1 once decompressed. The remaining budget
-		// shrinks as chapters accumulate so the total output is
-		// bounded too. See maxDocTextBytes.
 		remaining := int64(maxDocTextBytes) - int64(combined.Len())
 		if remaining <= 0 {
 			break // output budget exhausted; index what we have
 		}
-		text, err := extractChapter(f, remaining)
+		if decompressBudget <= 0 {
+			break // total-decompression budget exhausted (a zero-text bomb)
+		}
+		text, consumed, err := extractChapter(f, remaining, decompressBudget)
+		decompressBudget -= consumed
 		if err != nil {
 			// One bad chapter does not poison the rest of the book.
 			continue
@@ -115,18 +122,39 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 	return chunkText(combined.String(), DefaultChunkTargetBytes), nil
 }
 
-// extractChapter opens one zip entry, runs it through the shared
-// HTML text extractor, and returns the visible text. maxOut bounds
-// the DECOMPRESSED entry stream: f.Open() hands back a raw deflate
-// reader, so without the limit a bomb chapter buffers its whole
-// decompressed body inside the tokenizer.
-func extractChapter(f *zip.File, maxOut int64) (string, error) {
+// extractChapter opens one zip entry, runs it through the shared HTML text
+// extractor, and returns the visible text AND the number of decompressed bytes
+// consumed. The chapter's decompression is bounded by the TIGHTER of maxOut (the
+// remaining output budget) and maxDecompress (the remaining shared total-
+// decompression budget), so a chapter that emits no text still depletes the
+// shared budget by what it decompressed (f.Open hands back a raw deflate reader,
+// so without a limit a bomb chapter buffers its whole decompressed body).
+func extractChapter(f *zip.File, maxOut, maxDecompress int64) (string, int64, error) {
 	rc, err := f.Open()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer rc.Close()
-	return extractHTMLText(io.LimitReader(rc, maxOut), maxOut)
+	limit := maxOut
+	if maxDecompress < limit {
+		limit = maxDecompress
+	}
+	counter := &countingReader{r: io.LimitReader(rc, limit)}
+	text, err := extractHTMLText(counter, maxOut)
+	return text, counter.n, err
+}
+
+// countingReader tallies bytes read so a caller can charge decompressed bytes to
+// a shared budget even when the parser discards them (produces no output).
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // isXHTMLChapter reports whether a zip entry is a candidate

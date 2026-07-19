@@ -61,7 +61,8 @@ const (
 
 	zimDefaultMaxArticles = 5000
 	zimDefaultMaxBytes    = 32 * 1024 * 1024
-	zimMaxClusterBytes    = 64 * 1024 * 1024 // hard cap per cluster
+	zimMaxClusterBytes    = 64 * 1024 * 1024  // hard cap per cluster
+	zimMaxCacheBytes      = 128 * 1024 * 1024 // aggregate cap across the cluster cache
 	zimMaxMimeListBytes   = 64 * 1024
 )
 
@@ -100,7 +101,7 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 	// used cluster avoids the thrash a random "drop half" policy can
 	// cause when the working set straddles the cache boundary.
 	const cacheCap = 32
-	clusterCache := newClusterLRU(cacheCap)
+	clusterCache := newClusterLRU(cacheCap, zimMaxCacheBytes)
 
 	var (
 		chunks  []Chunk
@@ -153,9 +154,11 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 // per Extract call) so it needs no locking. Capacity is fixed at
 // construction; the least-recently-accessed entry is evicted when full.
 type clusterLRU struct {
-	cap   int
-	ll    *list.List // front = most recently used
-	items map[uint32]*list.Element
+	cap      int
+	maxBytes int64      // aggregate cache byte budget (evict until total fits)
+	curBytes int64      // bytes currently resident across all entries
+	ll       *list.List // front = most recently used
+	items    map[uint32]*list.Element
 }
 
 // clusterLRUEntry is the value stored in each list element.
@@ -164,14 +167,18 @@ type clusterLRUEntry struct {
 	data []byte
 }
 
-func newClusterLRU(capacity int) *clusterLRU {
+func newClusterLRU(capacity int, maxBytes int64) *clusterLRU {
 	if capacity < 1 {
 		capacity = 1
 	}
+	if maxBytes < 1 {
+		maxBytes = 1
+	}
 	return &clusterLRU{
-		cap:   capacity,
-		ll:    list.New(),
-		items: make(map[uint32]*list.Element, capacity),
+		cap:      capacity,
+		maxBytes: maxBytes,
+		ll:       list.New(),
+		items:    make(map[uint32]*list.Element, capacity),
 	}
 }
 
@@ -189,17 +196,30 @@ func (c *clusterLRU) get(key uint32) ([]byte, bool) {
 // cache is at capacity. A repeat key refreshes the existing entry.
 func (c *clusterLRU) put(key uint32, data []byte) {
 	if el, ok := c.items[key]; ok {
-		el.Value.(*clusterLRUEntry).data = data
+		e := el.Value.(*clusterLRUEntry)
+		c.curBytes += int64(len(data)) - int64(len(e.data))
+		e.data = data
 		c.ll.MoveToFront(el)
 		return
 	}
-	if c.ll.Len() >= c.cap {
-		if oldest := c.ll.Back(); oldest != nil {
-			c.ll.Remove(oldest)
-			delete(c.items, oldest.Value.(*clusterLRUEntry).key)
+	// Evict the least-recently-used entries until BOTH the count cap and the
+	// aggregate BYTE budget admit the new entry. Count alone let 32 clusters at up
+	// to 64 MiB each pin ~2 GiB from a tiny crafted .zim; the byte budget bounds
+	// the total. The `Len() > 0` guard keeps the loop finite when the incoming
+	// entry alone exceeds the budget (it is still admitted — we need it now — but
+	// each cluster is already capped at zimMaxClusterBytes < the budget).
+	for c.ll.Len() > 0 && (c.ll.Len() >= c.cap || c.curBytes+int64(len(data)) > c.maxBytes) {
+		oldest := c.ll.Back()
+		if oldest == nil {
+			break
 		}
+		oe := oldest.Value.(*clusterLRUEntry)
+		c.ll.Remove(oldest)
+		delete(c.items, oe.key)
+		c.curBytes -= int64(len(oe.data))
 	}
 	c.items[key] = c.ll.PushFront(&clusterLRUEntry{key: key, data: data})
+	c.curBytes += int64(len(data))
 }
 
 // zimHeader is the parsed 80-byte file header.

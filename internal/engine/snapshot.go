@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sort"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -45,6 +46,11 @@ func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
 		s.TrustedPub = s.SignedBy != "" && store != nil && store.IsTrusted(s.SignedBy)
 		out = append(out, s)
 	}
+	// Deterministic order by infohash. Torrents() ranges a map (randomized
+	// iteration order), so without this the list reshuffles on every poll — a GUI
+	// that tracks selection by row index would then act on the wrong torrent, and
+	// any consumer diffing successive snapshots sees spurious churn.
+	sort.Slice(out, func(i, j int) bool { return out[i].InfoHash < out[j].InfoHash })
 	return out
 }
 

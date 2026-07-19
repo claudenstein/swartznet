@@ -45,6 +45,19 @@ and concurrency surfaces:
   frame declaring a huge inner string forced a ~128 MiB allocation before failing
   — a remotely-reachable memory-exhaustion DoS on every inbound frame. Decodes are
   now bounded to the payload size (`decodeBounded`), matching the BEP-44 side.
+- **GUI correctness (data-safety).** The Downloads tab now targets pause/resume/
+  remove by the infohash of the selected torrent, not by a list-row index. The
+  torrent list is now returned in a deterministic (sorted) order, so a background
+  refresh can no longer reorder it under the selection — previously Remove could
+  act on a torrent the user never selected.
+- **Security — EPUB / ZIM extractor resource bombs.** A crafted EPUB whose
+  chapters decompress to gigabytes while emitting no text no longer drives
+  unbounded decompression (a shared total-decompression budget now bounds it), and
+  the ZIM decompressed-cluster cache is now bounded by aggregate bytes (not just
+  entry count), so a small crafted `.zim` can't pin gigabytes of memory.
+- **Test harness.** The s12 swarm/DHT scenario's publish-wait now has a real
+  timeout — a Layer-D publisher regression makes it report FAIL instead of hanging
+  the whole testbed run indefinitely.
 - **Security — PDF extractor OOM (DoS).** A downloaded PDF whose content stream
   decompresses (flate) to gigabytes of text no longer OOM-crashes the daemon: the
   extractor now bounds accumulation page-by-page and skips any page whose

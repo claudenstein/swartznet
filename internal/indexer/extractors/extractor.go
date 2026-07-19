@@ -48,6 +48,14 @@ type Extractor interface {
 // any real document.
 const maxDocTextBytes = 64 * 1024 * 1024
 
+// maxEpubTotalDecompress bounds the TOTAL decompressed bytes an EPUB extraction
+// may read across ALL chapters, charged by bytes consumed (not output text). The
+// per-chapter output budget cannot bound decompression work when a chapter emits
+// no visible text (e.g. a giant <script> body), so a crafted multi-chapter EPUB
+// could drive ~1000x total decompression without it. 256 MiB (4x the output cap)
+// leaves ample headroom for legitimate markup while bounding a bomb.
+const maxEpubTotalDecompress = 4 * maxDocTextBytes
+
 // Candidate describes a file the dispatcher is considering.
 type Candidate struct {
 	// Path is the user-visible file path (for extension sniffing).
