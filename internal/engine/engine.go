@@ -129,6 +129,15 @@ type Engine struct {
 	dhtMu        sync.Mutex
 	dhtLookup    *dhtindex.Lookup
 	dhtPublisher *dhtindex.Publisher
+
+	// companionFetchRefs counts in-flight FetchCompanionTorrent calls per
+	// infohash. Concurrent Layer-D lookups (aggregate mode) can resolve the same
+	// publisher's PPMI infohash simultaneously; anacrolix hands both fetchers the
+	// SAME companion handle, so an unconditional per-fetcher DropCompanionTorrent
+	// would tear the shared torrent down mid-download for the other. The drop
+	// fires only when the last concurrent fetcher for an infohash exits.
+	companionFetchMu   sync.Mutex
+	companionFetchRefs map[[20]byte]int
 }
 
 // defaultRescanInterval is the production hourly cadence.

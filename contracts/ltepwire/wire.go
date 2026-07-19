@@ -141,7 +141,7 @@ type peekHeader struct {
 // error if the payload is not a bencoded dict (charge ScoreBadBencode).
 func PeekMsgType(payload []byte) (int, error) {
 	var h peekHeader
-	if err := bencode.Unmarshal(payload, &h); err != nil {
+	if err := decodeBounded(payload, &h); err != nil {
 		return 0, fmt.Errorf("ltepwire: bad header: %w", err)
 	}
 	return h.MsgType, nil
@@ -152,7 +152,7 @@ func PeekMsgType(payload []byte) (int, error) {
 // echo the txid in a reject without a full typed decode.
 func PeekTxID(payload []byte) uint32 {
 	var h peekHeader
-	if err := bencode.Unmarshal(payload, &h); err != nil {
+	if err := decodeBounded(payload, &h); err != nil {
 		return 0
 	}
 	return h.TxID
@@ -216,7 +216,7 @@ func EncodePeerAnnounce(pa PeerAnnounce) ([]byte, error) {
 // DecodeQuery unmarshals and re-asserts msg_type == query.
 func DecodeQuery(payload []byte) (Query, error) {
 	var q Query
-	if err := bencode.Unmarshal(payload, &q); err != nil {
+	if err := decodeBounded(payload, &q); err != nil {
 		return Query{}, err
 	}
 	if q.MsgType != MsgTypeQuery {
@@ -228,7 +228,7 @@ func DecodeQuery(payload []byte) (Query, error) {
 // DecodeResult unmarshals and re-asserts msg_type == result.
 func DecodeResult(payload []byte) (Result, error) {
 	var r Result
-	if err := bencode.Unmarshal(payload, &r); err != nil {
+	if err := decodeBounded(payload, &r); err != nil {
 		return Result{}, err
 	}
 	if r.MsgType != MsgTypeResult {
@@ -240,7 +240,7 @@ func DecodeResult(payload []byte) (Result, error) {
 // DecodeReject unmarshals and re-asserts msg_type == reject.
 func DecodeReject(payload []byte) (Reject, error) {
 	var r Reject
-	if err := bencode.Unmarshal(payload, &r); err != nil {
+	if err := decodeBounded(payload, &r); err != nil {
 		return Reject{}, err
 	}
 	if r.MsgType != MsgTypeReject {
@@ -255,7 +255,7 @@ func DecodeReject(payload []byte) (Reject, error) {
 // entry never fails the frame).
 func DecodePeerAnnounce(payload []byte) (PeerAnnounce, error) {
 	var pa PeerAnnounce
-	if err := bencode.Unmarshal(payload, &pa); err != nil {
+	if err := decodeBounded(payload, &pa); err != nil {
 		return PeerAnnounce{}, err
 	}
 	if pa.MsgType != MsgTypePeerAnnounce {

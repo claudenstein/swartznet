@@ -195,7 +195,7 @@ func validSyncRecord(r SyncRecord) error {
 // DecodeSyncBegin re-asserts msg_type and the element_size==32 invariant.
 func DecodeSyncBegin(payload []byte) (SyncBegin, error) {
 	var m SyncBegin
-	if err := bencode.Unmarshal(payload, &m); err != nil {
+	if err := decodeBounded(payload, &m); err != nil {
 		return SyncBegin{}, err
 	}
 	if m.MsgType != MsgTypeSyncBegin {
@@ -210,7 +210,7 @@ func DecodeSyncBegin(payload []byte) (SyncBegin, error) {
 // DecodeSyncSymbols re-asserts msg_type and the symbol caps/sizes.
 func DecodeSyncSymbols(payload []byte) (SyncSymbols, error) {
 	var m SyncSymbols
-	if err := bencode.Unmarshal(payload, &m); err != nil {
+	if err := decodeBounded(payload, &m); err != nil {
 		return SyncSymbols{}, err
 	}
 	if m.MsgType != MsgTypeSyncSymbols {
@@ -230,7 +230,7 @@ func DecodeSyncSymbols(payload []byte) (SyncSymbols, error) {
 // DecodeSyncNeed re-asserts msg_type and the id caps/sizes.
 func DecodeSyncNeed(payload []byte) (SyncNeed, error) {
 	var m SyncNeed
-	if err := bencode.Unmarshal(payload, &m); err != nil {
+	if err := decodeBounded(payload, &m); err != nil {
 		return SyncNeed{}, err
 	}
 	if m.MsgType != MsgTypeSyncNeed {
@@ -251,7 +251,7 @@ func DecodeSyncNeed(payload []byte) (SyncNeed, error) {
 // (incl. kw≤64).
 func DecodeSyncRecords(payload []byte) (SyncRecords, error) {
 	var m SyncRecords
-	if err := bencode.Unmarshal(payload, &m); err != nil {
+	if err := decodeBounded(payload, &m); err != nil {
 		return SyncRecords{}, err
 	}
 	if m.MsgType != MsgTypeSyncRecords {
@@ -271,7 +271,7 @@ func DecodeSyncRecords(payload []byte) (SyncRecords, error) {
 // DecodeSyncEnd re-asserts msg_type.
 func DecodeSyncEnd(payload []byte) (SyncEnd, error) {
 	var m SyncEnd
-	if err := bencode.Unmarshal(payload, &m); err != nil {
+	if err := decodeBounded(payload, &m); err != nil {
 		return SyncEnd{}, err
 	}
 	if m.MsgType != MsgTypeSyncEnd {

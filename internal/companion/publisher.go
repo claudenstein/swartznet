@@ -256,6 +256,21 @@ func (p *Publisher) refreshOnce(parent context.Context) {
 	defer cancel()
 	if err := p.putter.PutInfohashPointer(ctx, []byte(SaltContentIndex), infoHash); err != nil {
 		p.recordFailure(fmt.Errorf("put pointer: %w", err))
+		// The pointer was NOT published, so no live BEP-46 pointer references this
+		// freshly-seeded infohash. Drop it UNLESS it is the one still advertised by
+		// the last SUCCESSFUL pointer (unchanged corpus → identical infohash → a
+		// TTL-refresh retry), which must keep seeding. Without this, every
+		// put-failure-coinciding-with-a-content-change leaks one companion seed
+		// (seeded forever, referenced by nothing) — defeating the drop logic below
+		// whose whole purpose is that companion seeds do not accumulate.
+		p.mu.Lock()
+		advertised := p.lastSeededIH
+		p.mu.Unlock()
+		if [20]byte(infoHash) != advertised {
+			if derr := p.seeder.DropTorrent([20]byte(infoHash)); derr != nil {
+				p.log.Debug("companion.publisher.drop_orphan_warn", "err", derr)
+			}
+		}
 		return
 	}
 

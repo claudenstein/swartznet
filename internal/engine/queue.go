@@ -131,7 +131,16 @@ func (e *Engine) promoteQueued() {
 		}
 		if h.isQueued() && !h.isPaused() {
 			e.activateDownload(h)
-			active++
+			// Only count it against the cap if it actually occupies a slot. A
+			// COMPLETE seed can be queued (queued while the cap was full, then
+			// completed by the background verify); activating it clears the
+			// queued flag but leaves it isActive()==false, so an unconditional
+			// active++ would waste the freed slot and starve a genuinely-queued
+			// download ordered after it. countActive()/isActive() both exclude
+			// seeds; this counter must too.
+			if h.isActive() {
+				active++
+			}
 		}
 	}
 }

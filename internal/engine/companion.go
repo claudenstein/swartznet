@@ -170,6 +170,36 @@ func validateCompanionInfo(info *metainfo.Info) error {
 	return nil
 }
 
+// retainCompanionFetch registers an in-flight fetch for infohash so a concurrent
+// fetcher's exit does not drop the shared companion torrent out from under this
+// one.
+func (e *Engine) retainCompanionFetch(ih [20]byte) {
+	e.companionFetchMu.Lock()
+	if e.companionFetchRefs == nil {
+		e.companionFetchRefs = make(map[[20]byte]int)
+	}
+	e.companionFetchRefs[ih]++
+	e.companionFetchMu.Unlock()
+}
+
+// releaseCompanionFetch drops the shared companion torrent only when the LAST
+// concurrent fetcher for infohash exits, so overlapping fetches never tear down
+// each other's in-progress download.
+func (e *Engine) releaseCompanionFetch(ih [20]byte) {
+	e.companionFetchMu.Lock()
+	n := e.companionFetchRefs[ih] - 1
+	last := n <= 0
+	if last {
+		delete(e.companionFetchRefs, ih)
+	} else {
+		e.companionFetchRefs[ih] = n
+	}
+	e.companionFetchMu.Unlock()
+	if last {
+		_ = e.DropCompanionTorrent(ih)
+	}
+}
+
 // FetchCompanionTorrent adds an untrusted companion infohash, waits for
 // metadata, enforces the fail-closed bounds, downloads the single file, and
 // returns its on-disk path. Satisfies companion.CompanionFetcher.
@@ -191,8 +221,13 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infohash [20]byte) (
 	// Drop the fetched torrent on EVERY exit path (success, timeout, bad bounds)
 	// so a subscriber re-syncing hourly cannot accumulate handles/goroutines and
 	// the shared on-disk path is not held by a stale torrent. T.Drop keeps the
-	// downloaded file on disk for the caller to read.
-	defer func() { _ = e.DropCompanionTorrent(infohash) }()
+	// downloaded file on disk for the caller to read. Reference-counted: two
+	// concurrent fetches of the same infohash (concurrent aggregate lookups
+	// resolving one publisher) share one handle, so the drop must wait for the
+	// LAST fetcher — an unconditional per-fetcher drop would stall the other's
+	// still-running download and degrade a valid lookup to no-results.
+	e.retainCompanionFetch(infohash)
+	defer e.releaseCompanionFetch(infohash)
 
 	select {
 	case <-h.T.GotInfo():

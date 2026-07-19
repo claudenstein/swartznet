@@ -34,6 +34,32 @@ CI-mirror gate. Building and running it caught three real bugs, now fixed:
   wired (e.g. under `--no-dht`), so clients can disable the control rather than
   show a spurious error.
 
+### Adversarial bug-hunt hardening (2026-07-19)
+
+Multi-round adversarial bug hunts (each finding verified with a concrete repro
+and fixed with a neutralize-to-fail regression test) hardened the untrusted-input
+and concurrency surfaces:
+
+- **Security — `sn_search` decode DoS (HIGH).** Every `sn_search` peer-wire
+  decoder (`contracts/ltepwire`) used an unbounded bencode decode, so a ~32-byte
+  frame declaring a huge inner string forced a ~128 MiB allocation before failing
+  — a remotely-reachable memory-exhaustion DoS on every inbound frame. Decodes are
+  now bounded to the payload size (`decodeBounded`), matching the BEP-44 side.
+- **Security — untrusted pre-allocation (LOW).** `contracts/snagg` leaf/interior
+  page decoders no longer pre-allocate from an unauthenticated uint16 count; the
+  hint is capped against the remaining bytes.
+- **Queue accounting.** A queued but already-complete seed no longer consumes a
+  download slot in `promoteQueued`, which previously starved a real download.
+- **Companion seed accounting.** A pointer-put failure after a content change no
+  longer leaks the freshly-seeded companion torrent; and the publisher's snapshot
+  timestamp is now monotonic, so a backward clock step can't drop new content.
+- **Runtime indexing.** Re-enabling per-torrent indexing now re-writes the
+  torrent-level document (previously it stayed unsearchable by name until restart).
+- **Concurrency.** Concurrent companion fetches of the same infohash are
+  reference-counted so one finishing can't tear down the other's in-progress
+  download; `persistAdd` can no longer resurrect a torrent removed mid-add; and an
+  `Unfollow` racing a companion sync no longer resurrects dedup state.
+
 ### Whitepaper (2026-07-19)
 
 - Added `docs/whitepaper.md` — a concise (~2.5k words), Bitcoin-whitepaper-styled

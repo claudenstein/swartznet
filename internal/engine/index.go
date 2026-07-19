@@ -55,6 +55,20 @@ func (e *Engine) SetTorrentIndexing(ihHex string, enabled bool) error {
 	h.setIndexing(enabled)
 	e.log.Info("engine.torrent_indexing_set", "info_hash", h.InfoHashHex(), "enabled", enabled)
 	e.persistState(h)
+	// Enabling indexing AFTER metadata already arrived must write the torrent-
+	// level doc that autoIndex skipped while indexing was off. autoIndex runs
+	// once per handle and is never re-spawned, and neither the content-file
+	// ingest nor the hourly rescan ever writes the torrent-level doc — so without
+	// this, a torrent enabled at runtime stays unsearchable by name until a
+	// restart. If metadata has NOT arrived yet, the still-waiting autoIndex will
+	// write it (isIndexing() is now true), so we only act on the ready case.
+	if enabled && !h.companion {
+		select {
+		case <-h.T.GotInfo():
+			e.writeTorrentDoc(h)
+		default:
+		}
+	}
 	return nil
 }
 
@@ -91,6 +105,15 @@ func (e *Engine) autoIndex(h *Handle) {
 	// suppress network-visible publication.
 	e.publishTorrent(h)
 
+	e.writeTorrentDoc(h)
+}
+
+// writeTorrentDoc writes this torrent's Layer-L document when the index is open
+// and per-torrent indexing is on. Called by autoIndex once metadata arrives, and
+// again by SetTorrentIndexing when indexing is re-enabled at runtime. The
+// underlying IndexTorrent is an idempotent upsert, so a redundant call (both
+// paths firing on a metadata/enable race) is harmless.
+func (e *Engine) writeTorrentDoc(h *Handle) {
 	idx, _ := e.index()
 	if idx == nil || !h.isIndexing() {
 		return

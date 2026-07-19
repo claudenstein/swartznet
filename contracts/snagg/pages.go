@@ -56,7 +56,13 @@ func DecodeLeaf(page []byte) ([]Record, error) {
 	}
 	n := binary.LittleEndian.Uint16(p)
 	p = p[2:]
-	out := make([]Record, 0, n)
+	// Cap the pre-allocation against the remaining bytes: each record needs at
+	// least a 1-byte length varint, so a payload of len(p) bytes can hold at most
+	// len(p) records. A hostile count (up to 65535) in a structurally-
+	// unauthenticated page would otherwise pre-allocate ~10 MB before the loop
+	// discovers there are no record bytes (CWE-789). The loop still errors on the
+	// first missing byte; this only bounds the speculative make.
+	out := make([]Record, 0, capHint(int(n), len(p)))
 	for i := 0; i < int(n); i++ {
 		rl, adv := binary.Uvarint(p)
 		if adv <= 0 {
@@ -74,6 +80,17 @@ func DecodeLeaf(page []byte) ([]Record, error) {
 		p = p[rl:]
 	}
 	return out, nil
+}
+
+// capHint bounds a slice pre-allocation hint (an untrusted element count) by the
+// number of bytes that could actually encode that many elements, so a hostile
+// count can never drive a large speculative allocation before the decode loop
+// validates the bytes.
+func capHint(n, remaining int) int {
+	if n > remaining {
+		return remaining
+	}
+	return n
 }
 
 // InteriorChild is one child pointer: Separator = the min RecordKey of the
@@ -140,7 +157,10 @@ func DecodeInterior(page []byte) ([]InteriorChild, error) {
 	}
 	n := binary.LittleEndian.Uint16(p)
 	p = p[2:]
-	out := make([]InteriorChild, 0, n)
+	// Cap the pre-allocation against the remaining bytes (see DecodeLeaf): each
+	// child needs at least a 1-byte separator-length varint, so len(p) bounds the
+	// child count. Prevents a hostile uint16 count from pre-allocating ~2 MB.
+	out := make([]InteriorChild, 0, capHint(int(n), len(p)))
 	for i := 0; i < int(n); i++ {
 		sl, adv := binary.Uvarint(p)
 		if adv <= 0 {
