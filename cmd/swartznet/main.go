@@ -66,6 +66,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdCrawlProbe(args[1:], stdout, stderr)
 	case "companion":
 		return cmdCompanion(args[1:], stdout, stderr)
+	case "aggregate":
+		return cmdAggregate(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -105,6 +107,9 @@ Commands:
   crawl-probe --addr <host:port>
                        One-shot BEP-51 sample_infohashes probe of a DHT node
                        (ops diagnostic; no daemon). --target, --timeout-ms, --json.
+  aggregate <build|inspect|find>
+                       Offline Aggregate (PPMI + SNAGG B-tree) ops tooling: sign+
+                       pack JSONL records, inspect a signed index, or prefix-query it.
   version              Print the version.
   help                 Show this help.
 
@@ -168,6 +173,20 @@ Flags for 'crawl-probe':
   --json               Emit JSON (samples/nodes as hex, interval, num-tracked).
 
   Example: swartznet crawl-probe --addr 127.0.0.1:6881 --json
+
+Flags for 'aggregate build' (offline; no daemon/DHT):
+
+  --in <path>          JSONL input ({"kw":..,"ih":<40-hex>,"t":<unix>}); '-' = stdin.
+  --out <path>         Output signed SNAGG B-tree file (required, mode 0644).
+  --key <path>         ed25519 identity (default: the node's identity.key).
+  --seq <n>            Trailer sequence number (monotonic per publisher; default 1).
+  --piece-size <n>     Piece size, MUST match the wrapping .torrent (default 16384).
+  --pow-bits <n>       Hashcash difficulty (0 = none; refused above 40).
+
+  aggregate inspect <file>        Print trailer metadata (fails on bad magic/sig).
+  aggregate find [--verify] <file> <prefix>   Prefix query (--verify re-derives fingerprint).
+
+  Example: swartznet aggregate build --in=recs.jsonl --out=idx.snagg --seq=7 --pow-bits=20
 
 Flags for 'companion':
 
