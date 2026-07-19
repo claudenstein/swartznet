@@ -101,24 +101,18 @@ func companionFollow(action string, args []string, stdout, stderr io.Writer) int
 	fs.SetOutput(stderr)
 	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	label := fs.String("label", "", "optional human label for the followed publisher (follow only)")
-	// Go's flag package stops at the first positional, so pop a leading pubkey
-	// to accept both "follow <pubkey> --label x" and "follow --label x <pubkey>".
-	var leading string
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		leading, args = args[0], args[1:]
-	}
-	if err := fs.Parse(args); err != nil {
+	// Accept the pubkey before OR after flags, and collect ALL positionals so an
+	// extra one (a second pubkey) is a usage error rather than silently dropped
+	// along with any post-positional flags (which would then hit the default API).
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
 		return exitUsage
 	}
-	pubkey := leading
-	if pubkey == "" {
-		if fs.NArg() != 1 {
-			fmt.Fprintf(stderr, "usage: swartznet companion %s <pubkey-hex> [--label <name>]\n", action)
-			return exitUsage
-		}
-		pubkey = fs.Arg(0)
+	if len(pos) != 1 {
+		fmt.Fprintf(stderr, "usage: swartznet companion %s <pubkey-hex> [--label <name>]\n", action)
+		return exitUsage
 	}
-	pubkey = strings.ToLower(strings.TrimSpace(pubkey))
+	pubkey := strings.ToLower(strings.TrimSpace(pos[0]))
 	if len(pubkey) != 64 {
 		fmt.Fprintln(stderr, "swartznet: pubkey must be 64 hex characters")
 		return exitUsage

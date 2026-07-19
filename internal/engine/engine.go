@@ -321,8 +321,11 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	sess, err := loadSession(cfg.DataDir)
 	if sess == nil {
 		// Only the torrents-dir mkdir fails this hard — persistence would be
-		// impossible for the whole run, which is fatal (legacy shape).
+		// impossible for the whole run, which is fatal (legacy shape). Close the
+		// swarm too (its announceWorker goroutine is otherwise leaked — bgCancel
+		// does not stop it; only swarm.Close closes p.done).
 		bgCancel()
+		swarm.Close()
 		_ = cl.Close()
 		return nil, err
 	}

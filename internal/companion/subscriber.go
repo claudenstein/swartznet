@@ -178,6 +178,16 @@ func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 	return res
 }
 
+// Forget drops a publisher's dedup state (last imported GeneratedAt + last
+// pointer infohash) so an Unfollow does not leak these maps for the daemon's
+// whole lifetime. A later refollow starts fresh.
+func (s *Subscriber) Forget(pubkey [32]byte) {
+	s.mu.Lock()
+	delete(s.imported, pubkey)
+	delete(s.lastIH, pubkey)
+	s.mu.Unlock()
+}
+
 func (s *Subscriber) decodeFile(path string) (CompanionIndex, error) {
 	f, err := os.Open(path)
 	if err != nil {

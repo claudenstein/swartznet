@@ -57,6 +57,7 @@ func (w *SubscriberWorker) Unfollow(pubkey [32]byte) {
 	delete(w.follows, pubkey)
 	delete(w.lastSync, pubkey)
 	w.mu.Unlock()
+	w.sub.Forget(pubkey) // prune the Subscriber's dedup maps (no unbounded leak)
 }
 
 // Following returns a snapshot of the follow-set.
