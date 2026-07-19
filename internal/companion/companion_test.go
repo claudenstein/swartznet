@@ -308,6 +308,36 @@ func TestPublisherDropsPreviousSeed(t *testing.T) {
 	}
 }
 
+// TestPublisherReusesInfohashWhenCorpusUnchanged is the regression for the
+// refetch-every-interval bug: republishing an UNCHANGED corpus must reuse the
+// prior timestamp so the companion infohash is identical (followers' pointer
+// dedup fires), instead of stamping a fresh GeneratedAt and forcing a new
+// infohash every interval.
+func TestPublisherReusesInfohashWhenCorpusUnchanged(t *testing.T) {
+	t.Parallel()
+	pub := keypair(5)
+	src := &fakeCorpus{torrents: []indexer.TorrentDoc{{InfoHash: strings.Repeat("a", 40), Name: "x", FilePaths: []string{"f"}}}}
+	p, _, seeder := newTestPublisher(t, src, pub)
+
+	p.refreshOnce(context.Background())
+	p.refreshOnce(context.Background()) // corpus unchanged
+
+	seeder.mu.Lock()
+	defer seeder.mu.Unlock()
+	if len(seeder.seen) < 2 {
+		t.Fatalf("seeded %d times, want 2", len(seeder.seen))
+	}
+	first := seeder.seen[0].HashInfoBytes()
+	for i, mi := range seeder.seen {
+		if mi.HashInfoBytes() != first {
+			t.Errorf("publish #%d changed the infohash on an unchanged corpus (re-fetch churn)", i)
+		}
+	}
+	if len(seeder.dropped) != 0 {
+		t.Errorf("dropped %d seeds on unchanged content, want 0 (same infohash)", len(seeder.dropped))
+	}
+}
+
 func TestPublisherRefreshNowThrottle(t *testing.T) {
 	t.Parallel()
 	pub := keypair(3)

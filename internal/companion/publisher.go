@@ -2,13 +2,35 @@ package companion
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 )
+
+// contentFingerprint hashes a companion index's CORPUS (its torrent records,
+// which carry the extracted content) while ignoring the top-level GeneratedAt +
+// Publisher fields. Per-torrent hashes are XORed so the result is independent of
+// the torrent order the corpus source yields (infohashes are unique, so no two
+// cancel out). Two rebuilds of the same corpus produce the same fingerprint.
+func contentFingerprint(idx CompanionIndex) [32]byte {
+	var fp [32]byte
+	for _, tr := range idx.Torrents {
+		raw, err := json.Marshal(tr)
+		if err != nil {
+			continue
+		}
+		h := sha256.Sum256(raw)
+		for i := range fp {
+			fp[i] ^= h[i]
+		}
+	}
+	return fp
+}
 
 // ErrTooSoon is returned by RefreshNow when a manual refresh is throttled.
 var ErrTooSoon = errors.New("companion: refresh throttled (too soon since last refresh)")
@@ -62,6 +84,15 @@ type Publisher struct {
 	lastError      string
 	publishedCount int
 	lastSeededIH   [20]byte // the companion seed torrent currently held (zero = none)
+	// lastContentFP fingerprints the last-published CORPUS (torrents + content,
+	// excluding the timestamp); lastGeneratedAt is the timestamp that went with
+	// it. When a rebuild's content is unchanged, the publisher reuses that
+	// timestamp so the payload — and thus the companion infohash — is byte-
+	// identical, so followers' pointer dedup fires and they do not re-fetch +
+	// re-ingest an unchanged snapshot every interval. The pointer is still re-put
+	// (BEP-44 TTL refresh), just at the SAME infohash.
+	lastContentFP   [32]byte
+	lastGeneratedAt int64
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -180,6 +211,20 @@ func (p *Publisher) refreshOnce(parent context.Context) {
 		p.recordFailure(errors.New("nothing to publish (empty local index)"))
 		return
 	}
+	// If the corpus is unchanged since the last publish, reuse the prior
+	// timestamp so the payload (and infohash) is identical — the pointer still
+	// re-publishes (TTL refresh) but at the SAME infohash, so followers do not
+	// re-download + re-ingest the unchanged snapshot.
+	fp := contentFingerprint(idx)
+	p.mu.Lock()
+	if fp == p.lastContentFP && p.lastGeneratedAt != 0 {
+		idx.GeneratedAt = p.lastGeneratedAt
+	} else {
+		p.lastContentFP = fp
+		p.lastGeneratedAt = idx.GeneratedAt
+	}
+	p.mu.Unlock()
+
 	jsonPath, mi, err := WriteCompanionFiles(p.opts.Dir, idx)
 	if err != nil {
 		p.recordFailure(fmt.Errorf("write: %w", err))
