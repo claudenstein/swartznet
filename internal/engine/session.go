@@ -213,9 +213,14 @@ func (e *Engine) persistAdd(h *Handle, via, magnetURI, torrentFile string) {
 	}
 }
 
-// persistState records a paused/indexing/queue-order mutation.
+// persistState records a paused/indexing/queue-order mutation. It uses
+// updateExisting, NOT update: a pause/resume/set-indexing request can race a
+// concurrent RemoveTorrent (RemoveTorrent releases e.mu between deleting the
+// handle and removing the session row), and an unconditional upsert here would
+// resurrect the just-removed entry — which then re-adds the torrent on the next
+// restart, silently rejoining a swarm the user explicitly left.
 func (e *Engine) persistState(h *Handle) {
-	if err := e.sess.update(h.InfoHashHex(), func(ent *sessionEntry) {
+	if _, err := e.sess.updateExisting(h.InfoHashHex(), func(ent *sessionEntry) {
 		ent.Paused = h.isPaused()
 		ent.Indexing = h.isIndexing()
 		ent.QueueOrder = h.getQueueOrder()

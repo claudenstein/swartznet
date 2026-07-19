@@ -79,7 +79,7 @@ func DecodePPMI(payload []byte) (PPMIValue, error) {
 		return PPMIValue{}, fmt.Errorf("dhtschema: PPMI value %d bytes exceeds BEP-44 cap %d", len(payload), MaxPPMIValueBytes)
 	}
 	var v PPMIValue
-	if err := bencode.Unmarshal(payload, &v); err != nil {
+	if err := decodeBounded(payload, &v); err != nil {
 		return v, fmt.Errorf("dhtschema: decode PPMI: %w", err)
 	}
 	if len(v.IH) != 20 {

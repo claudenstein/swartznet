@@ -18,12 +18,26 @@
 package dhtschema
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 )
+
+// decodeBounded unmarshals an UNTRUSTED bencode payload with the parsed string
+// length bounded to MaxValueBytes. anacrolix bencode.Unmarshal defaults to a
+// ~128 MiB MaxStrLen and allocates make([]byte, declaredLen) BEFORE reading, so
+// a tiny hostile value declaring a huge inner string (e.g. an "ih"/"next_pk"
+// length near 2^27) forces a ~128 MiB transient allocation even though the outer
+// payload is ≤1000 bytes. Since the whole payload is already ≤ MaxValueBytes, no
+// legitimate field can exceed that, so this bound never rejects a valid value.
+func decodeBounded(payload []byte, v any) error {
+	d := bencode.NewDecoder(bytes.NewReader(payload))
+	d.MaxStrLen = MaxValueBytes
+	return d.Decode(v)
+}
 
 // MaxSaltBytes is BEP-44's hard cap on the salt field. A keyword whose UTF-8
 // form exceeds this is dropped rather than truncated: truncation could make
@@ -114,7 +128,7 @@ func DecodeValue(payload []byte) (KeywordValue, error) {
 			len(payload), MaxValueBytes)
 	}
 	var v KeywordValue
-	if err := bencode.Unmarshal(payload, &v); err != nil {
+	if err := decodeBounded(payload, &v); err != nil {
 		return v, fmt.Errorf("dhtschema: decode value: %w", err)
 	}
 	return v, nil

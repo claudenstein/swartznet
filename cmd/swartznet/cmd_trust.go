@@ -85,15 +85,19 @@ func trustAdd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("trust add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	filePath := fs.String("file", "", "override the trust.json path")
-	if err := fs.Parse(args); err != nil {
+	// Accept --file before OR after the positional pubkey/label. Without this,
+	// `trust add <pubkey> --file X` stops flag parsing at the pubkey and absorbs
+	// "--file X" into the label, silently writing to the DEFAULT store.
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
 		return exitUsage
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(stderr, "usage: swartznet trust add <pubkey> [<label>]")
 		return exitUsage
 	}
-	pub := strings.ToLower(strings.TrimSpace(fs.Arg(0)))
-	label := strings.Join(fs.Args()[1:], " ")
+	pub := strings.ToLower(strings.TrimSpace(pos[0]))
+	label := strings.Join(pos[1:], " ")
 	store, err := openTrustStore(fs, *filePath)
 	if err != nil {
 		return reportRunErr(err, stderr)
