@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/swartznet/swartznet/internal/admission"
+	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
@@ -66,6 +67,11 @@ type Daemon struct {
 	// the /aggregate counts. Its live feeder channels arrive with the
 	// Aggregate slices; here it is correctly empty.
 	admission *admission.AdmissionEngine
+	// CompPub / CompSub are the companion index publisher / subscriber worker
+	// (Slice 10); nil when their independent gates were unmet or a degraded
+	// (non-fatal) start failed.
+	CompPub *companion.Publisher
+	CompSub *companion.SubscriberWorker
 
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
@@ -168,6 +174,45 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		eng.SetSigner(d.Identity.PrivateKey, pub)
 	}
 
+	// Companion index (Slice 10): publisher and subscriber are independent
+	// legs, each with its own gate; a failure in one never blocks the other or
+	// the daemon (all companion setup failures are warnings, never fatal). Both
+	// require the index; the publisher additionally needs a pointer putter (DHT
+	// + identity) and an identity for its namespace/Publisher field.
+	if d.Idx != nil && opts.Cfg.CompanionDir != "" {
+		if putter := eng.PointerPutter(); putter != nil && d.Identity != nil {
+			cpOpts := companion.DefaultPublisherOptions()
+			if opts.Cfg.Regtest {
+				cpOpts = companion.RegtestPublisherOptions()
+			}
+			cpOpts.Dir = opts.Cfg.CompanionDir
+			copy(cpOpts.PublisherKey[:], d.Identity.PublicKey)
+			if pub, err := companion.NewPublisher(d.Idx, putter, eng, cpOpts, log); err != nil {
+				fmt.Fprintf(opts.stderr(), "warning: companion publisher start failed: %v\n", err)
+			} else {
+				pub.Start()
+				d.CompPub = pub
+			}
+		}
+		if getter := eng.PointerGetter(); getter != nil {
+			if sub, err := companion.NewSubscriber(getter, eng, d.Idx, companion.DefaultSubscriberOptions(), log); err != nil {
+				fmt.Fprintf(opts.stderr(), "warning: companion subscriber start failed: %v\n", err)
+			} else if worker, err := companion.NewSubscriberWorker(sub); err != nil {
+				fmt.Fprintf(opts.stderr(), "warning: companion subscriber worker failed: %v\n", err)
+			} else {
+				if opts.Cfg.CompanionFollowFile != "" {
+					if n, err := LoadFollowFile(worker, opts.Cfg.CompanionFollowFile, log); err != nil {
+						log.Warn("daemon.companion.load_follow_file_err", "err", err, "path", opts.Cfg.CompanionFollowFile)
+					} else if n > 0 {
+						log.Info("daemon.companion.follows_loaded", "count", n)
+					}
+				}
+				worker.Start()
+				d.CompSub = worker
+			}
+		}
+	}
+
 	// Session restore runs before the HTTP API so restored torrents are
 	// visible to the first request (and their autoIndex finds the index).
 	// Per-entry failures only warn.
@@ -192,6 +237,9 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		}
 		apiOpts.Search = adapter.search(mux)
 		apiOpts.PublisherStatus = adapter.publisherStatus
+		// The adapter is constructed unconditionally — even when both legs are
+		// nil — so the /companion routes always exist and degrade gracefully.
+		apiOpts.Companion = newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile)
 		if d.Idx != nil {
 			apiOpts.IndexStats = adapter.indexStats
 			apiOpts.LocalDocCount = adapter.localDocCount
@@ -260,8 +308,17 @@ func (d *Daemon) Close() error {
 			_ = d.API.Stop(shutdown)
 			d.Log.Info("httpapi.stopped")
 		}
-		// (companion subscriber → companion publisher → indexer teardown
-		// lands here, each with its own log line.)
+		// Companion workers stop BEFORE the index they write into and the
+		// engine they seed/fetch through: subscriber first (its Sync writes to
+		// the index), then publisher.
+		if d.CompSub != nil {
+			d.CompSub.Stop()
+			d.Log.Info("companion.subscriber.stopped")
+		}
+		if d.CompPub != nil {
+			d.CompPub.Stop()
+			d.Log.Info("companion.publisher.stopped")
+		}
 		if d.Eng != nil {
 			if err := d.Eng.Close(); err != nil {
 				d.closeErr = err

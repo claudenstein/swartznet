@@ -41,6 +41,7 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 	var dhtBootstrap stringSliceFlag
 	fs.Var(&dhtBootstrap, "dht-bootstrap", "host:port of a DHT node to bootstrap against (repeat for multiple; empty uses anacrolix defaults)")
 	dhtInsecure := fs.Bool("dht-insecure", false, "disable BEP-42 node-ID security (TESTING ONLY; needed for private DHTs)")
+	regtest := fs.Bool("regtest", false, "accelerated companion/Layer-D publisher timings (TESTING ONLY — never run against mainnet)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -52,6 +53,10 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 
 	if *dhtInsecure && !config.UnsafeAuthorized(false) {
 		fmt.Fprintln(stderr, "swartznet: --dht-insecure disables BEP-42 node-ID security and is testing-only (set SWARTZNET_UNSAFE=1 to enable)")
+		return exitUsage
+	}
+	if *regtest && !config.UnsafeAuthorized(false) {
+		fmt.Fprintln(stderr, "swartznet: --regtest is a testing-only flag (set SWARTZNET_UNSAFE=1 to enable)")
 		return exitUsage
 	}
 
@@ -73,6 +78,7 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 	cfg.NoUpload = *leechOnly
 	cfg.DHTBootstrapAddrs = dhtBootstrap
 	cfg.DHTInsecure = *dhtInsecure
+	cfg.Regtest = *regtest
 
 	log := newLogger(stderr)
 	d, err := daemon.New(ctx, daemon.Options{
@@ -94,6 +100,12 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 	}
 	if d.API != nil {
 		fmt.Fprintf(stdout, "HTTP API listening on %s\n", d.API.Addr())
+	}
+	if d.CompPub != nil {
+		fmt.Fprintf(stdout, "Companion publisher started, dir=%s\n", cfg.CompanionDir)
+	}
+	if d.CompSub != nil {
+		fmt.Fprintln(stdout, "Companion subscriber started")
 	}
 
 	// Input dispatch: magnet | stdin | bare 40-hex infohash | .torrent path.

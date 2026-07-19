@@ -41,6 +41,14 @@ type Config struct {
 	// the full hit list this node re-announces on every refresh. Empty keeps
 	// the manifest in memory only (a fresh process re-publishes from scratch).
 	PublisherPath string
+	// CompanionDir holds the companion content-index payload (*.json.gz) and
+	// its wrapping .torrent (Slice 10). Empty disables BOTH the companion
+	// publisher and subscriber.
+	CompanionDir string
+	// CompanionFollowFile is the JSON array of followed publisher pubkeys the
+	// subscriber loads at startup and persists on follow/unfollow. Empty keeps
+	// follows in memory only (added at runtime, lost on restart).
+	CompanionFollowFile string
 	// SeedListPath locates the reputation seed list (seeds.json). Empty
 	// skips it.
 	SeedListPath string
@@ -122,6 +130,9 @@ func Default() Config {
 		ReputationPath: filepath.Join(root, "reputation.json"),
 		PublisherPath:  filepath.Join(root, "publisher.json"),
 		SeedListPath:   filepath.Join(root, "seeds.json"),
+
+		CompanionDir:        filepath.Join(root, "companion"),
+		CompanionFollowFile: filepath.Join(root, "companion-follows.json"),
 		ListenPort:     42069,
 		Seed:           true,
 		// Default sharing: full local index, file + content hits on.

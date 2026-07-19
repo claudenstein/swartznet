@@ -17,6 +17,7 @@ type Handle struct {
 	paused     bool
 	queued     bool
 	indexing   bool // per-torrent indexing toggle, default on
+	companion  bool // a companion-index bookkeeping torrent: never indexed, minted, or Layer-D published
 	queueOrder int64
 	signedBy   string
 
@@ -144,21 +145,31 @@ func (h *Handle) FileEvents() <-chan FileCompleteEvent { return h.SubscribeFileE
 // can never race its index/download goroutines with the restore overrides —
 // pass restore for a session restore, nil for a fresh add.
 func (e *Engine) registerLocked(t *torrent.Torrent, paused bool) (h *Handle, existed bool) {
-	return e.registerLockedRestore(t, paused, nil)
+	return e.registerLockedRestore(t, paused, nil, false)
 }
 
-func (e *Engine) registerLockedRestore(t *torrent.Torrent, paused bool, restore *sessionEntry) (h *Handle, existed bool) {
+// registerLockedCompanion registers a companion-index bookkeeping torrent: it
+// is seeded/fetched like any torrent but is NEVER indexed, minted, or Layer-D
+// published (autoIndex early-returns on the companion flag), so a node's own
+// companion torrents cannot pollute its published corpus or leak
+// "swartznet-content-index-*" filenames onto the public DHT keyword index.
+func (e *Engine) registerLockedCompanion(t *torrent.Torrent) (h *Handle, existed bool) {
+	return e.registerLockedRestore(t, false, nil, true)
+}
+
+func (e *Engine) registerLockedRestore(t *torrent.Torrent, paused bool, restore *sessionEntry, companion bool) (h *Handle, existed bool) {
 	if h, ok := e.handles[t.InfoHash()]; ok {
 		return h, true
 	}
 	h = &Handle{
-		T:        t,
-		eng:      e,
-		paused:   paused,
-		indexing: true,
-		removed:  make(chan struct{}),
-		pieceSub: startPieceSubscription(t, e.log),
-		fileSub:  startFileTracker(t, e.bgCtx, e.log),
+		T:         t,
+		eng:       e,
+		paused:    paused,
+		indexing:  !companion,
+		companion: companion,
+		removed:   make(chan struct{}),
+		pieceSub:  startPieceSubscription(t, e.log),
+		fileSub:   startFileTracker(t, e.bgCtx, e.log),
 	}
 	if restore != nil {
 		h.indexing = restore.Indexing

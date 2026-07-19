@@ -102,7 +102,7 @@ func (e *Engine) restoreEntry(ent sessionEntry) error {
 	// cached-metainfo restore (GotInfo already closed) can't race autoIndex
 	// into indexing an OFF torrent or writing a blank signed_by.
 	e.mu.Lock()
-	h, existed := e.registerLockedRestore(t, ent.Paused, &ent)
+	h, existed := e.registerLockedRestore(t, ent.Paused, &ent, false)
 	e.mu.Unlock()
 	if existed {
 		return nil

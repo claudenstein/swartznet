@@ -62,6 +62,12 @@ func (e *Engine) SetTorrentIndexing(ihHex string, enabled bool) error {
 // per handle; also fires for restored torrents, which is how a schema
 // rebuild repopulates torrent docs.
 func (e *Engine) autoIndex(h *Handle) {
+	// Companion bookkeeping torrents are never indexed, minted, or Layer-D
+	// published — they would otherwise pollute this node's own published corpus
+	// and leak "swartznet-content-index-*" filenames onto the DHT keyword index.
+	if h.companion {
+		return
+	}
 	select {
 	case <-h.T.GotInfo():
 	case <-e.bgCtx.Done():

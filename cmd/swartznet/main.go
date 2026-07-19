@@ -64,6 +64,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdFlag(args[1:], stdout, stderr)
 	case "crawl-probe":
 		return cmdCrawlProbe(args[1:], stdout, stderr)
+	case "companion":
+		return cmdCompanion(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "swartznet: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -97,6 +99,9 @@ Commands:
                        Manage the publisher allowlist (offline; no daemon).
   confirm <infohash>   Mark a hit as good (adds it to the known-good filter).
   flag <infohash>      Report a hit as bad (demotes its attributed indexers).
+  companion <status|follow|unfollow|refresh>
+                       Manage the companion content-index: show publish/follow
+                       state, follow/unfollow a publisher pubkey, or re-publish.
   crawl-probe --addr <host:port>
                        One-shot BEP-51 sample_infohashes probe of a DHT node
                        (ops diagnostic; no daemon). --target, --timeout-ms, --json.
@@ -117,6 +122,7 @@ Flags for 'add':
                        under your identity (privacy; leech-only Layer D).
   --dht-bootstrap <hp> DHT bootstrap node host:port (repeatable).
   --dht-insecure       Disable BEP-42 node-ID security (testing only; gated).
+  --regtest            Accelerated companion/Layer-D timings (testing only; gated).
   --leech-only         Disable uploading (debug).
   --no-index           Don't index downloaded content at all.
 
@@ -162,6 +168,19 @@ Flags for 'crawl-probe':
   --json               Emit JSON (samples/nodes as hex, interval, num-tracked).
 
   Example: swartznet crawl-probe --addr 127.0.0.1:6881 --json
+
+Flags for 'companion':
+
+  status  [--api-addr <addr>] [--json]   Show publisher + follow state.
+  follow   <pubkey-hex> [--label <name>] [--api-addr <addr>]   Follow a publisher.
+  unfollow <pubkey-hex> [--api-addr <addr>]                    Unfollow a publisher.
+  refresh [--api-addr <addr>]            Force an immediate re-publish.
+
+  The companion publisher/subscriber run automatically inside 'add' when a
+  companion dir is configured (the default). Followed publishers persist in
+  ~/.local/share/swartznet/companion-follows.json.
+
+  Example: swartznet companion follow 0123…def --label official-seed
 
 Environment:
 

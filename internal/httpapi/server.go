@@ -78,6 +78,9 @@ type Options struct {
 	// the /status publisher block; nil ⇒ empty publisher state (the PubKey
 	// still renders from PublisherPubKey when an identity is loaded).
 	PublisherStatus func() PublisherStatus
+	// Companion is the companion pub/sub collaborator (Slice 10); nil ⇒ the
+	// /companion routes answer 503.
+	Companion CompanionController
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -196,6 +199,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	s.searchRoutes(mux)
 	s.confirmFlagRoutes(mux)
 	s.capabilitiesRoutes(mux)
+	s.companionRoutes(mux)
 
 	if assetsFS, err := fs.Sub(web.Assets(), "."); err == nil {
 		mux.Handle("GET /static/", http.FileServer(http.FS(assetsFS)))

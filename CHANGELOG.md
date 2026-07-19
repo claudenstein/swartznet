@@ -14,6 +14,32 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 10 — Companion content-index publish/subscribe (2026-07-19)
+
+A node now publishes a compact companion content-index (a gzip-JSON snapshot of
+its indexed torrents + extracted text) as a single-file torrent advertised by a
+BEP-46 pointer, and a follower imports a followed publisher's index into its own
+local search — verified end-to-end between two real engines over BitTorrent.
+
+- New `internal/companion`: the `CompanionIndex` gzip-JSON codec (bounded
+  decompression, format/version refuse), the corpus builder, the single-file
+  trackerless `.torrent` wrapper, the `Publisher` (rebuild+republish on a ≤1h
+  ticker; an empty index is a failure; `lastRefresh` advances only on success),
+  and the `Subscriber` + worker. The package talks to the DHT/engine only
+  through narrow ports (it consumes the Slice-9 BEP-46 pointer primitive).
+- The subscriber is fail-closed and closes three legacy defects: it **rejects a
+  snapshot not authored by the followed publisher**, **stamps imported records
+  with `SignedBy` = the publisher** (so `search --signed-by` attributes them),
+  and **dedups on `GeneratedAt`** so an unchanged snapshot is not re-imported.
+- The companion fetch (in the engine) is fail-closed on the untrusted infohash:
+  exactly one file, ≤32 MiB checked before any piece, and a safe filename.
+- Daemon wiring: independent publisher/subscriber legs, all failures non-fatal,
+  teardown before the index; a persisted follow file (atomic, size-capped).
+- New `GET /companion` + `POST /companion/{refresh,follow,unfollow}` HTTP routes
+  and a new `swartznet companion <status|follow|unfollow|refresh>` CLI command
+  (closing a legacy discoverability gap), plus a gated `add --regtest` flag.
+- Config: `CompanionDir`, `CompanionFollowFile`.
+
 ### Slice 9 — Layer D: BEP-44 keyword index (2026-07-19)
 
 A node now publishes its own torrents' name-keywords as signed BEP-44 mutable
