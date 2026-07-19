@@ -20,6 +20,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"golang.org/x/time/rate"
 
+	"github.com/swartznet/swartznet/contracts/ltepwire"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/indexer"
 	"github.com/swartznet/swartznet/internal/reputation"
@@ -96,6 +97,12 @@ type Engine struct {
 	// ckptWG joins the checkpoint goroutine so Close's final flush is the
 	// authoritative last write (no late ticker save clobbers it).
 	ckptWG sync.WaitGroup
+
+	// sharing is the operator's runtime sn_search sharing prefs (Slice 6),
+	// seeded from cfg at New and mutated via PATCH /capabilities. Guarded by
+	// shareMu; runtime-only (not persisted), like the rate limits.
+	shareMu sync.Mutex
+	sharing ltepwire.Sharing
 }
 
 // defaultRescanInterval is the production hourly cadence.
@@ -190,6 +197,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 		rescanInterval:     cfg.IndexRescanInterval,
 		checkpointInterval: cfg.CheckpointInterval,
 		sources:            reputation.NewSourceTracker(0),
+		// cfg is Validate()d above, so ShareLocal ∈ 0..2 fits uint8.
+		sharing: ltepwire.Sharing{
+			ShareLocal:  uint8(cfg.ShareLocal),
+			FileHits:    cfg.ShareFileHits,
+			ContentHits: cfg.ShareContentHits,
+		},
 	}
 	if e.rescanInterval <= 0 {
 		e.rescanInterval = defaultRescanInterval

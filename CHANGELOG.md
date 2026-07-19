@@ -14,6 +14,35 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Slice 6 — capability mask: the single services-bit producer (2026-07-19)
+
+- New `contracts/ltepwire`: the frozen 64-bit `sn_search` services bitfield
+  (bits 0–9, append-only; unknown bits ignored never rejected) and the SINGLE
+  pure producer `Announced(Sharing, RuntimeFacts) uint64`, pinned by a golden
+  vector table. `Announced` derives every bit purely from its inputs — there is
+  no static default floor — so an operator downgrade actually clears its bit.
+- **Type split** (`Sharing` = operator prefs, bits 0–3; `RuntimeFacts` = daemon
+  facts, bits 4–9). The Publisher bit is a daemon-owned `RuntimeFact`; the
+  `PATCH /capabilities` body has no publisher field, so a partial "save sharing"
+  can never clobber it.
+- Engine: `Sharing`/`SetSharing` (runtime-mutable, seeded from config),
+  `RuntimeFacts` (computed live — `Publishing = !--no-index && !--no-dht-publish`,
+  so `--no-index` zeroes the Publisher bit), and `ServicesMask()` — the one call
+  site both the HTTP readout and (later) the wire announce use.
+- HTTP: `GET /capabilities` (sharing prefs + read-only `publisher` + live
+  `services`), `PATCH /capabilities` (preserve-unset merge, clamps
+  `share_local` 0..2) with a `POST` alias, and `GET /aggregate` `services` now
+  the **live** mask (16 lowercase hex, big-endian) instead of the static
+  `0x2ED`. New config fields: `share_local` (0..2), `share_file_hits`,
+  `share_content_hits`.
+- Fixes three legacy §6 defects: the static `/aggregate` mask and the
+  Publisher-bit clobber are fully closed; capability downgrades now reach the
+  readout (the wire half lands in Slice 7). Regtest (bit 8) is now actually
+  advertised when in regtest mode — the "loud" announce the legacy never set.
+- `scripts/dod-slice6.sh`: 17 checks — live `0x2FD`/`0x2E0` masks, the
+  Publisher-bit-untouched PATCH, clamp, POST alias, CSRF, and the `--no-index`
+  `→ 0x2ED` cascade.
+
 ### Slice 5 — trust, reputation, Bloom, confirm/flag (2026-07-18)
 
 - New `internal/reputation`: the frozen FNV-64a Kirsch-Mitzenmacher

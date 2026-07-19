@@ -132,10 +132,12 @@ FJ=$(curl -s -X POST -H 'Origin: http://localhost' -d "{\"infohash\":\"$IH\"}" "
 "$BIN" --help | grep -q "'confirm' and 'flag'" && ok "--help documents --api-addr for confirm/flag" || fail "--help omits confirm/flag api-addr"
 
 # /aggregate: a quiet fresh node answers 200 with a well-formed bootstrap
-# block (distinguishable from a 503 "not configured" / starved node)
+# block (distinguishable from a 503 "not configured" / starved node). Since
+# Slice 6 the services field is the LIVE 16-hex mask (no longer a static
+# placeholder) — assert its shape, not a fixed value.
 AGG=$(curl -s -o "$WORK/agg.json" -w '%{http_code}' "http://$ADDR/aggregate")
-{ [ "$AGG" = "200" ] && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["services"]=="0000000000000000"; assert set(d["bootstrap"])=={"anchors","admitted","pending"}; assert "known_indexers" in d' "$WORK/agg.json"; } \
-  && ok "/aggregate reports a well-formed quiet-node snapshot" || fail "/aggregate ($AGG): $(cat "$WORK/agg.json")"
+{ [ "$AGG" = "200" ] && python3 -c 'import json,sys,re; d=json.load(open(sys.argv[1])); assert re.fullmatch(r"[0-9a-f]{16}", d["services"]), d["services"]; assert set(d["bootstrap"])=={"anchors","admitted","pending"}; assert "known_indexers" in d' "$WORK/agg.json"; } \
+  && ok "/aggregate reports a well-formed quiet-node snapshot (live 16-hex services)" || fail "/aggregate ($AGG): $(cat "$WORK/agg.json")"
 
 # durability: kill -9 mid-run, restart, confirmed state must persist
 POP_LIVE=$(pop_bits "$ADDR")

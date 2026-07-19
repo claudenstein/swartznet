@@ -273,11 +273,46 @@ type AggregateBootstrap struct {
 }
 
 // AggregateStatusResponse is the GET /aggregate document. The services field
-// is a static placeholder until Slice 6 makes it live.
+// is the LIVE 64-bit sn_search mask (16 lowercase hex, big-endian, no 0x),
+// filled by the server from ServicesReporter — never a static constant (the
+// §6 static-0x2ED fix).
 type AggregateStatusResponse struct {
 	KnownIndexers int                `json:"known_indexers"`
-	Services      string             `json:"services"` // 16-hex, static until Slice 6
+	Services      string             `json:"services"`
 	Bootstrap     AggregateBootstrap `json:"bootstrap"`
+}
+
+// SharingPrefs is the operator-controlled half of the sn_search capability
+// set. ShareLocal is a tri-state (0 don't answer / 1 in-swarm only / 2 full
+// local index); FileHits/ContentHits are on/off. There is deliberately NO
+// publisher field here — it is a daemon-owned runtime fact (the §6 clobber
+// fix: an operator "save sharing" cannot reach it).
+type SharingPrefs struct {
+	ShareLocal  int
+	FileHits    bool
+	ContentHits bool
+}
+
+// CapabilitiesResponse is the GET /capabilities document. publisher and
+// services are READ-ONLY: publisher is the daemon-owned Publishing runtime
+// fact; services is the live mask so the operator-vs-daemon split is visible.
+type CapabilitiesResponse struct {
+	ShareLocal  int    `json:"share_local"`
+	FileHits    bool   `json:"file_hits"`
+	ContentHits bool   `json:"content_hits"`
+	Publisher   bool   `json:"publisher"`
+	Services    string `json:"services"`
+}
+
+// CapabilitiesPatch is the PATCH/POST /capabilities request body. Every field
+// is a pointer so an absent field leaves that pref untouched (preserve-unset
+// merge, mirroring /config/rate-limit). There is NO publisher field: the
+// daemon-owned bit is unrepresentable in the setter path, so a partial save
+// can never clobber it.
+type CapabilitiesPatch struct {
+	ShareLocal  *int  `json:"share_local"`
+	FileHits    *bool `json:"file_hits"`
+	ContentHits *bool `json:"content_hits"`
 }
 
 // IndexStats is the GET /index/stats document.

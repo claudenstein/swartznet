@@ -75,5 +75,9 @@ func (s *Server) handleAggregate(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "aggregate not configured", http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, s.opts.Aggregate())
+	resp := s.opts.Aggregate()
+	// The services mask has a single render path: the live reporter, never a
+	// static constant (the §6 static-0x2ED fix).
+	resp.Services = s.servicesHex()
+	writeJSON(w, resp)
 }

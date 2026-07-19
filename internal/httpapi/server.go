@@ -61,8 +61,16 @@ type Options struct {
 	// omitted.
 	BloomStat      func() *BloomStatus
 	ReputationStat func() *ReputationStat
-	// Aggregate feeds GET /aggregate; nil ⇒ 503.
+	// Aggregate feeds GET /aggregate; nil ⇒ 503. Its Services field is
+	// overwritten from ServicesReporter so the mask has a single render path.
 	Aggregate func() AggregateStatusResponse
+	// ServicesReporter reports the LIVE 64-bit sn_search services mask,
+	// rendered as 16-hex for /capabilities and /aggregate. Nil ⇒ all-zero.
+	// This is the single readout of the one mask producer (Slice 6).
+	ServicesReporter func() uint64
+	// Capabilities is the sn_search sharing-prefs collaborator; nil ⇒
+	// /capabilities answers 503.
+	Capabilities CapabilitiesController
 }
 
 // Server is the HTTP API server. It is reusable across Start/Stop cycles.
@@ -179,6 +187,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	s.torrentRoutes(mux)
 	s.searchRoutes(mux)
 	s.confirmFlagRoutes(mux)
+	s.capabilitiesRoutes(mux)
 
 	if assetsFS, err := fs.Sub(web.Assets(), "."); err == nil {
 		mux.Handle("GET /static/", http.FileServer(http.FS(assetsFS)))

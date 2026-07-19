@@ -82,6 +82,14 @@ type Config struct {
 	// window is observable in seconds.
 	CheckpointInterval time.Duration
 
+	// Sharing prefs — the operator-controlled half of the sn_search
+	// capability mask (Slice 6). Runtime-mutable via PATCH /capabilities;
+	// these are the STARTUP defaults. ShareLocal is a tri-state (0 = don't
+	// answer, 1 = in-swarm only, 2 = full local index).
+	ShareLocal       int  // 0..2, default 2
+	ShareFileHits    bool // default true
+	ShareContentHits bool // default true
+
 	// Regtest and DHTInsecure are test-only knobs, refused outside test
 	// binaries unless SWARTZNET_UNSAFE=1 (the single unsafe gate).
 	Regtest     bool
@@ -101,6 +109,10 @@ func Default() Config {
 		SeedListPath:   filepath.Join(root, "seeds.json"),
 		ListenPort:     42069,
 		Seed:           true,
+		// Default sharing: full local index, file + content hits on.
+		ShareLocal:       2,
+		ShareFileHits:    true,
+		ShareContentHits: true,
 	}
 }
 
@@ -126,6 +138,9 @@ func (c Config) Validate() error {
 	}
 	if c.ListenPort < 0 || c.ListenPort > 65535 {
 		return fmt.Errorf("config: ListenPort %d out of range", c.ListenPort)
+	}
+	if c.ShareLocal < 0 || c.ShareLocal > 2 {
+		return fmt.Errorf("config: ShareLocal %d out of range (0..2)", c.ShareLocal)
 	}
 	if err := c.checkUnsafe(testing.Testing()); err != nil {
 		return err

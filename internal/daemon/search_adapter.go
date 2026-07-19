@@ -116,12 +116,12 @@ func (a *controllerAdapter) reputationStat() *httpapi.ReputationStat {
 	return out
 }
 
-// aggregate reports the admission counts (and a static services placeholder
-// until Slice 6). Distinguishes a starved node from a quiet one.
+// aggregate reports the admission counts. The Services field is filled by the
+// httpapi server from ServicesReporter (the single live-mask render path), so
+// it is deliberately left unset here. Distinguishes a starved node from a
+// quiet one.
 func (a *controllerAdapter) aggregate() httpapi.AggregateStatusResponse {
-	resp := httpapi.AggregateStatusResponse{
-		Services: "0000000000000000", // static until Slice 6's live producer
-	}
+	resp := httpapi.AggregateStatusResponse{}
 	if t := a.eng.ReputationTracker(); t != nil {
 		resp.KnownIndexers = len(t.Snapshot())
 	}

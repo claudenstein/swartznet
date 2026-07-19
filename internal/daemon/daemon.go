@@ -184,6 +184,8 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		apiOpts.BloomStat = adapter.bloomStat
 		apiOpts.ReputationStat = adapter.reputationStat
 		apiOpts.Aggregate = adapter.aggregate
+		apiOpts.ServicesReporter = eng.ServicesMask
+		apiOpts.Capabilities = adapter
 		if !opts.Cfg.DisableDHT {
 			apiOpts.DHTStats = eng.DHTRoutingTableSize
 		}
