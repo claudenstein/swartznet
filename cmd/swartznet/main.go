@@ -6,11 +6,13 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
@@ -96,8 +98,9 @@ Commands:
   files <infohash> [<idx> <prio>]
                        List a torrent's files, or set one file's priority
                        (none/normal/high).
-  search <query...>    Full-text search the local index (Layer L). --signed-by,
-                       --swarm, --dht route through the daemon.
+  search <query...>    Full-text search the local index (Layer L). Works with or
+                       without a running daemon (falls back to it if the index is
+                       locked). --signed-by, --swarm, --dht route through the daemon.
   index [<ih> on|off]  Show index stats, or toggle a torrent's indexing.
   trust <list|add|remove>
                        Manage the publisher allowlist (offline; no daemon).
@@ -272,6 +275,30 @@ func signalContext(parent context.Context) (context.Context, context.CancelFunc)
 		}
 	}()
 	return ctx, cancel
+}
+
+// parseFlagsAllowingLeadingPositionals parses fs while accepting a command's
+// positional argument(s) either BEFORE or AFTER its flags. Go's flag package
+// stops at the first non-flag argument, so `cmd <positional> --flag v` would
+// leave --flag unparsed and the flag ignored (or a usage error). This pops the
+// leading run of non-flag arguments, parses the remaining flags, and returns
+// every positional (leading + trailing) in order — so `swartznet files <ih>
+// --json` and `swartznet files --json <ih>` behave identically, matching what
+// the commands' own usage strings show. Mirrors the earlier `companion follow`
+// fix and applies it uniformly.
+func parseFlagsAllowingLeadingPositionals(fs *flag.FlagSet, args []string) ([]string, error) {
+	i := 0
+	for i < len(args) && (args[i] == "" || !strings.HasPrefix(args[i], "-")) {
+		i++
+	}
+	leading := args[:i]
+	if err := fs.Parse(args[i:]); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(leading)+fs.NArg())
+	out = append(out, leading...)
+	out = append(out, fs.Args()...)
+	return out, nil
 }
 
 // reportRunErr maps a command's terminal error to an exit code: nil → 0,

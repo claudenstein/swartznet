@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -26,6 +27,41 @@ func (f *fakeCompanion) Follow(pk [32]byte, label string) error {
 	return f.followErr
 }
 func (f *fakeCompanion) Unfollow(pk [32]byte) error { f.lastFollow = pk; return f.followErr }
+
+// TestCompanionFollowStatusCodes proves the follow/refresh error mapping: a
+// "feature not wired" error (wrapping ErrCompanionUnavailable) is 503 so a
+// client disables the control, while a genuine failure stays 500 — the fix for
+// follow returning 500 when the subscriber is simply not configured (e.g.
+// --no-dht), which a web/CLI client cannot distinguish from a real error.
+func TestCompanionFollowStatusCodes(t *testing.T) {
+	t.Parallel()
+	body := func() *bytes.Reader {
+		b, _ := json.Marshal(followRequestBody{PubKey: strings.Repeat("ab", 32)})
+		return bytes.NewReader(b)
+	}
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"unavailable → 503", fmt.Errorf("subscriber not configured: %w", ErrCompanionUnavailable), http.StatusServiceUnavailable},
+		{"generic failure → 500", errors.New("disk on fire"), http.StatusInternalServerError},
+		{"success → 200", nil, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := startSearchServer(t, Options{Companion: &fakeCompanion{followErr: tc.err}})
+			resp, err := http.Post("http://"+addr+"/companion/follow", "application/json", body())
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("follow status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
 
 func TestCompanionStatusRoute(t *testing.T) {
 	t.Parallel()

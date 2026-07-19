@@ -30,14 +30,15 @@ func confirmFlag(action string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
 		return exitUsage
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		fmt.Fprintf(stderr, "usage: swartznet %s <infohash>\n", action)
 		return exitUsage
 	}
-	ih := strings.ToLower(strings.TrimSpace(fs.Arg(0)))
+	ih := strings.ToLower(strings.TrimSpace(pos[0]))
 	if !validInfoHash(ih) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage

@@ -97,7 +97,7 @@ func (a *companionAdapter) PublisherStatus() httpapi.CompanionPublisherStatus {
 
 func (a *companionAdapter) RefreshNow() error {
 	if a.pub == nil {
-		return fmt.Errorf("companion publisher not configured")
+		return fmt.Errorf("companion publisher not configured: %w", httpapi.ErrCompanionUnavailable)
 	}
 	return a.pub.RefreshNow()
 }
@@ -133,7 +133,7 @@ func (a *companionAdapter) SubscriberStatus() []httpapi.CompanionFollowStatus {
 
 func (a *companionAdapter) Follow(pubkey [32]byte, label string) error {
 	if a.sub == nil {
-		return fmt.Errorf("companion subscriber not configured")
+		return fmt.Errorf("companion subscriber not configured: %w", httpapi.ErrCompanionUnavailable)
 	}
 	a.sub.Follow(pubkey, label)
 	return a.persistFollows()
@@ -141,7 +141,7 @@ func (a *companionAdapter) Follow(pubkey [32]byte, label string) error {
 
 func (a *companionAdapter) Unfollow(pubkey [32]byte) error {
 	if a.sub == nil {
-		return fmt.Errorf("companion subscriber not configured")
+		return fmt.Errorf("companion subscriber not configured: %w", httpapi.ErrCompanionUnavailable)
 	}
 	a.sub.Unfollow(pubkey)
 	return a.persistFollows()

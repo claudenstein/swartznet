@@ -32,14 +32,15 @@ func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	signFlag := fs.Bool("sign", false, "sign the .torrent file with our ed25519 identity so downloaders running SwartzNet can verify the publisher")
 	identityPath := fs.String("identity", "", "path to the ed25519 identity.key file (load-only unless it is the default path, which is auto-created)")
 	noDHT := fs.Bool("no-dht", false, "with --seed, disable the DHT and gateway port mapping (direct peers only)")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
 		return exitUsage
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		fmt.Fprintln(stderr, "usage: swartznet create <file-or-folder> -o <output.torrent>")
 		return exitUsage
 	}
-	root := fs.Arg(0)
+	root := pos[0]
 	if *out == "" {
 		fmt.Fprintln(stderr, "swartznet: -o <output.torrent> is required")
 		return exitUsage

@@ -22,28 +22,29 @@ func cmdFiles(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
 	asJSON := fs.Bool("json", false, "emit JSON instead of a table")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
 		return exitUsage
 	}
-	if n := fs.NArg(); n != 1 && n != 3 {
+	if n := len(pos); n != 1 && n != 3 {
 		fmt.Fprintln(stderr, "usage:")
 		fmt.Fprintln(stderr, "  swartznet files <infohash>                    # list files")
 		fmt.Fprintln(stderr, "  swartznet files <infohash> <index> <priority> # set priority (none|normal|high)")
 		return exitUsage
 	}
-	ih := strings.ToLower(strings.TrimSpace(fs.Arg(0)))
+	ih := strings.ToLower(strings.TrimSpace(pos[0]))
 	if !validInfoHash(ih) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}
 
-	if fs.NArg() == 3 {
-		idx, err := strconv.Atoi(strings.TrimSpace(fs.Arg(1)))
+	if len(pos) == 3 {
+		idx, err := strconv.Atoi(strings.TrimSpace(pos[1]))
 		if err != nil || idx < 0 {
 			fmt.Fprintln(stderr, "swartznet: file index must be a non-negative integer")
 			return exitUsage
 		}
-		prio := strings.ToLower(strings.TrimSpace(fs.Arg(2)))
+		prio := strings.ToLower(strings.TrimSpace(pos[2]))
 		if prio != "none" && prio != "normal" && prio != "high" {
 			fmt.Fprintln(stderr, "swartznet: priority must be none/normal/high")
 			return exitUsage

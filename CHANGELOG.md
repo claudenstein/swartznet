@@ -14,6 +14,26 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### Test environment + CLI fixes (2026-07-19)
+
+A unified test harness (`scripts/run-all-tests.sh`) now runs the whole suite from
+one entry point — both binaries, the race unit set, every per-slice DoD, the
+web-client DoD, a new whole-CLI end-to-end (`scripts/e2e-cli.sh`), and the
+CI-mirror gate. Building and running it caught three real bugs, now fixed:
+
+- **CLI arg ordering.** `create`, `files`, `confirm`, and `flag` now accept their
+  positional argument before or after flags (e.g. `swartznet files <ih>
+  --api-addr X` and `swartznet create ./dir -o out.torrent`), matching what their
+  usage strings show — previously the flag was silently ignored or the command
+  errored.
+- **`search` with a running daemon.** A plain `search <query>` no longer fails
+  with "index locked" when a daemon is running; it transparently falls back to a
+  local search routed through the daemon, so it works with or without one.
+- **Companion status codes.** `follow`/`unfollow`/`refresh` now return HTTP 503
+  (feature unavailable) instead of 500/429 when the companion subsystem is not
+  wired (e.g. under `--no-dht`), so clients can disable the control rather than
+  show a spurious error.
+
 ### Whitepaper (2026-07-19)
 
 - Added `docs/whitepaper.md` — a concise (~2.5k words), Bitcoin-whitepaper-styled

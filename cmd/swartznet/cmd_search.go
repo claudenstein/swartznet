@@ -18,7 +18,10 @@ import (
 
 // cmdSearch searches Layer L. It runs against the daemon's HTTP API when any
 // networked layer (--swarm/--dht) or the --signed-by filter is requested;
-// otherwise it opens the Bleve index directly (works with no daemon running).
+// otherwise it opens the Bleve index directly (works with no daemon running),
+// and if that index is locked by a running daemon it transparently falls back
+// to a local-only search routed through that daemon — so a plain `search
+// <query>` works in both cases.
 func cmdSearch(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -45,23 +48,23 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 	if *swarm || *dht || *signedBy != "" {
 		return searchViaAPI(*apiAddr, query, *limit, *signedBy, *swarm, *dht, *swarmTimeout, *dhtTimeout, *asJSON, stdout, stderr)
 	}
-	return searchDirect(*indexDir, query, *limit, *asJSON, stdout, stderr)
+	return searchDirect(*apiAddr, *indexDir, query, *limit, *swarmTimeout, *dhtTimeout, *asJSON, stdout, stderr)
 }
 
-func searchDirect(indexDir, query string, limit int, asJSON bool, stdout, stderr io.Writer) int {
+func searchDirect(apiAddr, indexDir, query string, limit, swarmTimeout, dhtTimeout int, asJSON bool, stdout, stderr io.Writer) int {
 	cfg := config.Default()
 	if indexDir != "" {
 		cfg.IndexDir = indexDir
 	}
-	// Bleve's on-disk index is single-writer: a running daemon holds the
-	// lock and a direct open would block forever. Bound the open and fail
-	// closed with a route hint rather than hang.
+	// Bleve's on-disk index is single-writer: a running daemon holds the lock
+	// and a direct open would block forever. Bound the open; if it times out a
+	// daemon is holding the index, so fall back to a LOCAL-only search routed
+	// through that daemon — this way `search <query>` works whether or not a
+	// daemon is running, instead of failing in the common (daemon-up) case.
 	idx, err := openIndexWithTimeout(cfg.IndexDir, 3*time.Second)
 	if err != nil {
 		if err == errIndexOpenTimeout {
-			fmt.Fprintln(stderr, "swartznet: the local index is locked (a daemon is likely running)")
-			fmt.Fprintln(stderr, "route the search through the daemon: swartznet search --swarm <query>")
-			return exitRuntime
+			return searchViaAPI(apiAddr, query, limit, "", false, false, swarmTimeout, dhtTimeout, asJSON, stdout, stderr)
 		}
 		return reportRunErr(err, stderr)
 	}

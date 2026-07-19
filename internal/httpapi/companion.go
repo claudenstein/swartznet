@@ -18,6 +18,23 @@ type CompanionController interface {
 	Unfollow(pubkey [32]byte) error
 }
 
+// ErrCompanionUnavailable signals that a companion operation cannot proceed
+// because the relevant leg (publisher or subscriber) is not wired on this node
+// — e.g. when the DHT is disabled. Handlers map it to 503 (feature unavailable),
+// distinct from 500 (a real failure of a wired subsystem), so a client can
+// disable the control instead of surfacing it as an error. The daemon adapter
+// wraps this sentinel when a leg is absent.
+var ErrCompanionUnavailable = errors.New("companion feature not available on this node")
+
+// companionErrStatus maps a controller error to an HTTP status: 503 when the
+// feature is simply not wired, 500 for a genuine failure.
+func companionErrStatus(err error) int {
+	if errors.Is(err, ErrCompanionUnavailable) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusInternalServerError
+}
+
 // CompanionPublisherStatus reports the companion publisher.
 type CompanionPublisherStatus struct {
 	LastRefresh    time.Time `json:"last_refresh"`
@@ -79,7 +96,11 @@ func (s *Server) handleCompanionRefresh(w http.ResponseWriter, _ *http.Request) 
 		return
 	}
 	if err := s.opts.Companion.RefreshNow(); err != nil {
-		// A throttled refresh carries the ErrTooSoon text verbatim (429).
+		if errors.Is(err, ErrCompanionUnavailable) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		// Otherwise the refresh was throttled (ErrTooSoon), the common case.
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
@@ -102,7 +123,7 @@ func (s *Server) handleCompanionFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.opts.Companion.Follow(pub, body.Label); err != nil {
-		http.Error(w, "follow: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "follow: "+err.Error(), companionErrStatus(err))
 		return
 	}
 	s.log.Info("httpapi.companion_follow", "pubkey", body.PubKey, "label", body.Label)
@@ -125,7 +146,7 @@ func (s *Server) handleCompanionUnfollow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.opts.Companion.Unfollow(pub); err != nil {
-		http.Error(w, "unfollow: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "unfollow: "+err.Error(), companionErrStatus(err))
 		return
 	}
 	s.log.Info("httpapi.companion_unfollow", "pubkey", body.PubKey)
