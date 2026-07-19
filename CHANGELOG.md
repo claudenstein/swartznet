@@ -45,6 +45,10 @@ and concurrency surfaces:
   frame declaring a huge inner string forced a ~128 MiB allocation before failing
   — a remotely-reachable memory-exhaustion DoS on every inbound frame. Decodes are
   now bounded to the payload size (`decodeBounded`), matching the BEP-44 side.
+- **Security — BEP-46 pointer decode.** The companion pointer decoder now bounds
+  its bencode string length, so a tiny malicious pointer from a followed publisher
+  can no longer force a ~128 MiB allocation on every sync — closing the last site
+  of the allocation-amplification class (matching the DHT/wire/tree decoders).
 - **GUI responsiveness.** The Status tab now computes its index statistics off the
   UI thread, so a node with a large corpus no longer freezes the whole GUI every
   couple of seconds.

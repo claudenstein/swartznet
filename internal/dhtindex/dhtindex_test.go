@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -540,6 +541,28 @@ func TestDecodePointerValueBadLength(t *testing.T) {
 	raw := []byte("d2:ih10:0123456789e")
 	if _, err := decodePointerValue(raw); err == nil {
 		t.Error("pointer with non-20-byte ih must be rejected")
+	}
+}
+
+// TestDecodePointerValueBoundsAlloc pins the round-10 fix: a tiny hostile pointer
+// value declaring a huge inner string (ih length near the ~128 MiB bencode
+// default) must NOT drive that allocation before failing. The outer 1000-byte cap
+// does not catch it (the payload is 16 bytes); the MaxStrLen bound does.
+func TestDecodePointerValueBoundsAlloc(t *testing.T) {
+	raw := []byte("d2:ih134217727:e") // declares ih string of 128 MiB, no body
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := decodePointerValue(raw)
+	runtime.ReadMemStats(&after)
+
+	if err == nil {
+		t.Fatal("hostile pointer (ih declares ~128 MiB) decoded without error")
+	}
+	const cap = 32 << 20 // 32 MiB — far below 128 MiB, well above a bounded decode
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > cap {
+		t.Fatalf("decodePointerValue allocated %d bytes for a %d-byte value — not bounded", grew, len(raw))
 	}
 }
 

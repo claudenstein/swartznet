@@ -1,6 +1,7 @@
 package dhtindex
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -229,7 +230,20 @@ func decodePointerValue(raw []byte) (PointerInfo, error) {
 		return zero, fmt.Errorf("dhtindex: pointer value %d bytes exceeds BEP-44 cap of %d", len(raw), dhtschema.MaxValueBytes)
 	}
 	var v bep46Pointer
-	if err := bencode.Unmarshal(raw, &v); err != nil {
+	// Bound the parsed string length: the outer len(raw) cap above does NOT stop
+	// alloc amplification, because anacrolix bencode.Unmarshal leaves MaxStrLen at
+	// its ~128 MiB default and does make([]byte, declaredLen) BEFORE reading — so
+	// a tiny signed value like `d2:ih134217727:e` (declares a 128 MiB ih string)
+	// passes the 1000-byte cap yet forces a ~128 MiB transient allocation. A
+	// bencoded string can't exceed its payload, so MaxStrLen = len(raw) rejects
+	// only impossible/hostile lengths. Same defense as contracts/dhtschema (the
+	// keyword-value decoder) and contracts/ltepwire; this pointer decoder is a
+	// sibling site that shipped without the bound.
+	d := bencode.NewDecoder(bytes.NewReader(raw))
+	if n := int64(len(raw)); n > 0 {
+		d.MaxStrLen = n
+	}
+	if err := d.Decode(&v); err != nil {
 		return zero, fmt.Errorf("dhtindex: decode pointer: %w", err)
 	}
 	if len(v.IH) != 20 {
