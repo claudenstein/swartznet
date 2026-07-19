@@ -38,6 +38,12 @@ run_go seammode ./internal/engine/ 'TestLayerDCompositeModeBuilds|TestLayerDAggr
   "engine selects composite / aggregatePPMI LayerDMode with zero app change (ship default stays legacy)"
 run_go cfgmode ./internal/config/ 'TestValidateLayerDMode' \
   "config.Validate accepts legacy|composite|aggregatePPMI, rejects unknown modes"
+run_go admission ./internal/admission/ \
+  'TestUnknownCandidateDenied|TestThreeFreshEndorsersDoNotClearBar|TestSeededCandidateAdmitted|TestAnchorAdmittedSeededAndCapExempt' \
+  "deny-by-default admission (§6 fix: 3 fresh Sybils don't clear the bar; seeds/anchors admitted + cap-exempt)"
+run_go seeds ./internal/reputation/ \
+  'TestTrackerLoadSeedList|TestTrackerSeededBypassesThreshold|TestLoadSeedListNormalizesUppercaseHex|TestLoadSeedListUnsupportedVersion' \
+  "seeds.json → MarkSeeded (lowercase-normalized, version-gated) applies the seed bonus"
 
 # ======================================================================
 # Part 2 — the offline aggregate tooling against the real binary
