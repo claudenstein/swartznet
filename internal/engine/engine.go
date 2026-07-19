@@ -556,7 +556,12 @@ func (e *Engine) RemoveTorrent(ihHex string) error {
 	if _, pipeline := e.index(); pipeline != nil {
 		pipeline.ForgetSubmitted(h.InfoHashHex())
 	}
-	e.sess.remove(h.InfoHashHex())
+	if err := e.sess.remove(h.InfoHashHex()); err != nil {
+		// The torrent is stopped in-memory, but the removal did not persist — on a
+		// restart, restore would re-add it. Surface it rather than silently
+		// swallowing (a durability failure the user should see + retry).
+		e.log.Warn("engine.session_remove_not_persisted", "info_hash", h.InfoHashHex(), "err", err)
+	}
 	e.log.Info("engine.torrent_removed", "info_hash", h.InfoHashHex())
 	go e.promoteQueued()
 	return nil

@@ -51,6 +51,12 @@ const BloomDefaultFalsePositiveRate = 0.01
 const bloomFileMagic = "SBLM" // "SwartzNet BLooM"
 const bloomFileVersion uint16 = 1
 
+// maxBloomBits caps the bit count m parsed from an untrusted/corrupt bloom file
+// header, bounding readBloom's allocation to a recoverable error instead of an
+// OOM/panic. ~2.1 billion bits (~256 MiB of words) is ~200x the ~9.6M-bit
+// default filter — far above any legitimate file.
+const maxBloomBits uint64 = 1 << 31
+
 // NewBloomFilter creates an empty in-memory Bloom filter sized for
 // the given expected item count and target false-positive rate.
 // Pass 0 for either argument to use the package defaults; fpRate
@@ -279,6 +285,18 @@ func readBloom(r io.Reader) (*BloomFilter, error) {
 	// otherwise panic with a divide-by-zero on the next Test/Add.
 	if m == 0 || k == 0 {
 		return nil, fmt.Errorf("reputation: invalid bloom params m=%d k=%d", m, k)
+	}
+	// Cap m from the UNTRUSTED header before the make() below. Without this, a
+	// crafted or bit-rot-corrupted file whose header is internally consistent
+	// (e.g. m=2^60, bitsLen=(2^60+63)/64) passes every other guard and reaches
+	// make([]uint64, bitsLen) — a multi-terabyte alloc → runtime OOM, or a
+	// makeslice-len-out-of-range panic. Neither is an error return, so it bypasses
+	// loadSpamResistance's fail-safe (which only downgrades ERRORS) and crash-loops
+	// the daemon on startup. Returning an error here keeps it fail-SAFE. The cap
+	// (~2.1 billion bits, ~256 MiB) is ~200x the ~9.6M-bit default filter — far
+	// above any legitimate file.
+	if m > maxBloomBits {
+		return nil, fmt.Errorf("reputation: bloom m=%d exceeds cap %d (corrupt file)", m, maxBloomBits)
 	}
 	// The writer always emits exactly (m+63)/64 words. Anything else —
 	// undersized (truncated/corrupt file, would panic out-of-bounds on

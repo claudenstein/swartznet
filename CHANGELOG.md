@@ -45,6 +45,17 @@ and concurrency surfaces:
   frame declaring a huge inner string forced a ~128 MiB allocation before failing
   — a remotely-reachable memory-exhaustion DoS on every inbound frame. Decodes are
   now bounded to the payload size (`decodeBounded`), matching the BEP-44 side.
+- **Security — PDF extractor OOM (DoS).** A downloaded PDF whose content stream
+  decompresses (flate) to gigabytes of text no longer OOM-crashes the daemon: the
+  extractor now bounds accumulation page-by-page and skips any page whose
+  decompressed content exceeds the budget, instead of materializing the whole
+  document's text before the size limiter ran.
+- **Security — corrupt bloom-filter header.** A corrupted or crafted
+  `known-good.bloom` with an absurd declared size no longer crashes the daemon on
+  startup; the bit count is capped and a bad file fails safe (runs bloom-less).
+- **Durability.** A torrent removal whose session-file write fails is now logged
+  instead of silently swallowed (it previously could resurrect the torrent on the
+  next restart without any indication).
 - **Security — untrusted pre-allocation.** `contracts/snagg` no longer
   over-allocates from unauthenticated inputs: leaf/interior page decoders cap the
   element-count hint against the remaining bytes, and `DecodeRecord` bounds its

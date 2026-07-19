@@ -143,17 +143,22 @@ func (s *session) updateGuarded(infoHash string, abort func() bool, mut func(*se
 }
 
 // remove deletes the entry, saves, and best-effort removes the .torrent copy.
-func (s *session) remove(infoHash string) {
+// It RETURNS the save error (rather than swallowing it) so the caller can surface
+// a non-durable removal: if the on-disk session cannot be rewritten (ENOSPC, a
+// read-only remount) the in-memory removal still holds for this run, but the
+// stale entry survives on disk and would resurrect the torrent on the next
+// restart — the caller must at least log that.
+func (s *session) remove(infoHash string) error {
 	s.mu.Lock()
 	ent, ok := s.entries[infoHash]
 	delete(s.entries, infoHash)
 	err := s.saveLocked()
 	dir := s.torrentsDir
 	s.mu.Unlock()
-	_ = err
 	if ok && ent.TorrentFile != "" && dir != "" {
 		_ = os.Remove(filepath.Join(dir, ent.TorrentFile))
 	}
+	return err
 }
 
 // saveLocked rewrites the whole file atomically (.tmp+rename). No-op for
