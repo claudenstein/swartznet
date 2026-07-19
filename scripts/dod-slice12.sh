@@ -46,6 +46,12 @@ run_go aggdist ./internal/dhtindex/ \
 run_go aggadapter ./internal/engine/ \
   'TestAggTreePublisherWritesSeedsPuts|TestAggTreeResolverFetchesAndVerifies|TestAggTreeResolverSkipsSelf' \
   "engine live adapters: TreePublisher writes+seeds+puts the PPMI pointer (infohash==seed, commit==fingerprint), drops the stale seed on republish + RetractTree; TreeResolver fetches+commit-verifies, rejects a mismatched commit / malformed pointer, and SKIPS a self-lookup (never tears down the node's own seed)"
+run_go crawler ./internal/dhtindex/ \
+  'TestCrawlOnce' \
+  "BEP-51 crawler worker-pool: bounded BFS discovers+expands the frontier, cycle-dedups (each node sampled once), honors MaxFrontier + MaxInfohashes caps, counts errors, short-circuits a cancelled ctx, skips address-less neighbours"
+run_go crawlcli ./cmd/swartznet/ \
+  'TestCrawlReachesNodeAndDiscovers|TestCrawlJSON|TestCrawlUnreachableExitsNonZero|TestCrawlWorkersGuard|TestResolveCrawlSeeds' \
+  "swartznet crawl CLI: reaches a loopback BEP-51 node + discovers its infohashes, --json stats, fail-on-all-fail exit 1 on a dead network, seed dedup + bad-seed counting"
 run_go seammode ./internal/engine/ 'TestLayerDCompositeModeBuilds|TestLayerDAggregateModeBuilds' \
   "engine selects composite / aggregatePPMI LayerDMode with zero app change (ship default stays legacy)"
 run_go cfgmode ./internal/config/ 'TestValidateLayerDMode' \
@@ -96,6 +102,12 @@ head -c 49152 /dev/zero > "$WORK/garbage.snagg"
 # --help discoverability.
 "$BIN" --help 2>&1 | grep -q 'aggregate <build|inspect|find>' \
   && ok "--help lists the aggregate command" || fail "--help missing aggregate"
+"$BIN" --help 2>&1 | grep -q 'crawl \[flags\]' \
+  && ok "--help lists the crawl command" || fail "--help missing crawl"
+
+# crawl fail-on-all-fail: a crawl that reaches no node exits 1 (not silent success).
+"$BIN" crawl --seed 127.0.0.1:1 --timeout-ms 200 --duration-ms 900 >/dev/null 2>&1; [ $? -eq 1 ] \
+  && ok "crawl exits 1 when it reaches no DHT nodes" || fail "crawl did not fail-closed on a dead network"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

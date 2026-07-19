@@ -52,6 +52,14 @@ by default — the ship default stays `LayerDMode=legacy`.
   verifies it against the pointer's commit before returning hits. An unreachable
   or unknown publisher degrades to no hits — never a query error — so one
   offline publisher can't fail a search. Still off by default (`legacy`).
+- **`swartznet crawl` — bounded BEP-51 DHT crawler.** A new ops command performs
+  a bounded breadth-first crawl of the mainline DHT (over the standard
+  `sample_infohashes` verb — no new verb/bit/port), sampling infohashes from the
+  nodes it reaches and expanding its frontier from their neighbours. Bounded by
+  `--workers`, `--max-infohashes`, `--max-nodes`, per-sample `--timeout-ms`, and
+  an overall `--duration-ms`; `--json` for structured output. It only discovers
+  and prints infohashes — it never fetches, indexes, or downloads. Exits non-zero
+  if the crawl reaches no node (dead network / all seeds unreachable).
 
 ### Slice 11 — Native Fyne GUI (2026-07-19)
 

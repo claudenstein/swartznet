@@ -64,6 +64,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdFlag(args[1:], stdout, stderr)
 	case "crawl-probe":
 		return cmdCrawlProbe(args[1:], stdout, stderr)
+	case "crawl":
+		return cmdCrawl(args[1:], stdout, stderr)
 	case "companion":
 		return cmdCompanion(args[1:], stdout, stderr)
 	case "aggregate":
@@ -107,6 +109,9 @@ Commands:
   crawl-probe --addr <host:port>
                        One-shot BEP-51 sample_infohashes probe of a DHT node
                        (ops diagnostic; no daemon). --target, --timeout-ms, --json.
+  crawl [flags]        Bounded BEP-51 crawl of the mainline DHT: sample infohashes
+                       from reached nodes, expand the frontier, print discoveries
+                       (ops tooling; no daemon; fetches/indexes nothing).
   aggregate <build|inspect|find>
                        Offline Aggregate (PPMI + SNAGG B-tree) ops tooling: sign+
                        pack JSONL records, inspect a signed index, or prefix-query it.
@@ -173,6 +178,19 @@ Flags for 'crawl-probe':
   --json               Emit JSON (samples/nodes as hex, interval, num-tracked).
 
   Example: swartznet crawl-probe --addr 127.0.0.1:6881 --json
+
+Flags for 'crawl' (ops tooling; no daemon; fetches/indexes nothing):
+
+  --seed <host:port>   Seed DHT node (repeatable; default: public bootstrap routers).
+  --workers <n>        Concurrent sample queries (default: 8).
+  --max-infohashes <n> Stop after N unique infohashes (default: 1000; 0 = until drained).
+  --max-nodes <n>      Hard cap on total nodes visited (default: 2048).
+  --timeout-ms <n>     Per-sample query timeout (default: 8000).
+  --duration-ms <n>    Overall crawl time budget (default: 30000).
+  --json               Emit JSON (stats + infohashes) instead of streaming hex.
+
+  Exit 1 if the crawl reached no DHT nodes (dead network / all seeds unreachable).
+  Example: swartznet crawl --max-infohashes 200 --duration-ms 15000 --json
 
 Flags for 'aggregate build' (offline; no daemon/DHT):
 
