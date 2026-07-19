@@ -271,6 +271,88 @@ func TestAggregateRetractToEmptyDropsSeed(t *testing.T) {
 	}
 }
 
+// gatedPublisher blocks inside PublishTree on a chosen call number so a test can
+// interleave a concurrent Retract with an in-flight (off-lock) distribution — the
+// exact TOCTOU window the aggregate generation guard closes.
+type gatedPublisher struct {
+	net      *memTreeNet
+	owner    [32]byte
+	mu       sync.Mutex
+	calls    int
+	retracts int
+	blockOn  int           // block PublishTree when its call count reaches this
+	entered  chan struct{} // closed once the blocked call is entered
+	release  chan struct{} // the blocked call waits for this to close
+}
+
+func (p *gatedPublisher) PublishTree(_ context.Context, _ string, snaggBytes []byte, commit [32]byte) error {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.mu.Unlock()
+	if n == p.blockOn {
+		close(p.entered)
+		<-p.release
+	}
+	p.net.put(p.owner, memBlob{bytes: append([]byte(nil), snaggBytes...), commit: commit})
+	return nil
+}
+
+func (p *gatedPublisher) RetractTree(_ context.Context) error {
+	p.mu.Lock()
+	p.retracts++
+	p.mu.Unlock()
+	p.net.del(p.owner)
+	return nil
+}
+
+// TestAggregateRefreshTOCTOURetractRace pins the generation-guard fix: a Refresh
+// whose PublishTree is still in flight (off-lock) when a concurrent Retract
+// empties the record set must NOT leave the stale (now-retracted) tree published.
+// The post-distribute generation re-check has to observe the advanced generation
+// and re-distribute the CURRENT (empty) state via RetractTree.
+func TestAggregateRefreshTOCTOURetractRace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	net := newMemTreeNet()
+	privA, pubA := mustPub(t)
+	a := newAggregatePPMI(privA, pubA, nil)
+	pub := &gatedPublisher{
+		net: net, owner: pubA, blockOn: 1,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	a.SetDistribution(pub, nil)
+
+	var ih20 [20]byte
+	copy(ih20[:], ihFor(0x40))
+	if err := a.Publish(ctx, []string{"ubuntu"}, dhtschema.KeywordHit{IH: ih20[:]}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Refresh in the background; its PublishTree (the non-empty ubuntu tree) blocks
+	// mid-put, holding the distribution open off-lock.
+	done := make(chan error, 1)
+	go func() { done <- a.Refresh(ctx) }()
+	<-pub.entered
+
+	// Concurrently retract the only record: the tree rebuilds to empty and the
+	// generation advances while the stale put is still blocked.
+	if err := a.Retract(ctx, ih20); err != nil {
+		t.Fatal(err)
+	}
+	close(pub.release) // let the stale put land
+	if err := <-done; err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if _, ok := net.get(pubA); ok {
+		t.Error("stale tree left published after a concurrent retract-to-empty")
+	}
+	if pub.retracts != 1 {
+		t.Errorf("RetractTree called %d times, want 1 (TOCTOU re-distribute)", pub.retracts)
+	}
+}
+
 // TestAggregateNoPublisherIsLocalOnly proves that without a TreePublisher,
 // Refresh builds the tree (self-lookup works) but distributes nothing.
 func TestAggregateNoPublisherIsLocalOnly(t *testing.T) {

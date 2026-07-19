@@ -56,6 +56,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			DHTTimeoutMS:   req.DHTTimeout,
 		})
 		if res.LocalErr != nil {
+			if res.LocalBadRequest {
+				// The query itself is malformed — the caller's fault, not a
+				// server fault. 400, not 500.
+				http.Error(w, "bad query: "+res.LocalErr.Error(), http.StatusBadRequest)
+				return
+			}
 			s.log.Warn("httpapi.local_err", "err", res.LocalErr)
 			http.Error(w, "local search failed: "+res.LocalErr.Error(), http.StatusInternalServerError)
 			return

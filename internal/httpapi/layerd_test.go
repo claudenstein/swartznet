@@ -40,6 +40,25 @@ func postSearch(t *testing.T, addr string, body SearchRequestBody) *http.Respons
 	return resp
 }
 
+// TestSearchLocalBadRequestIs400 pins the client-vs-server split: a Layer-L
+// error the collaborator flags as the caller's fault (a malformed query) must
+// render as 400, not 500 — the index is healthy, the query is not.
+func TestSearchLocalBadRequestIs400(t *testing.T) {
+	t.Parallel()
+	addr := startSearchServer(t, Options{Search: func(SearchParams) SearchResult {
+		return SearchResult{LocalErr: errors.New("malformed query: syntax error"), LocalBadRequest: true}
+	}})
+	resp := postSearch(t, addr, SearchRequestBody{Q: "(unbalanced"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed-query status = %d, want 400", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "bad query") {
+		t.Errorf("body = %q, want it to mention 'bad query'", body)
+	}
+}
+
 // TestSearchLayerErrorAsymmetry pins §5.9: a Layer-L error is fatal (500),
 // while a Layer-D error is surfaced inline (200 with dht.error), never a 5xx.
 func TestSearchLayerErrorAsymmetry(t *testing.T) {

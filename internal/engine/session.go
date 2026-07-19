@@ -124,6 +124,24 @@ func (s *session) updateExisting(infoHash string, mut func(*sessionEntry)) (bool
 	return true, s.saveLocked()
 }
 
+// updateGuarded upserts the entry for infoHash UNLESS abort reports the add was
+// cancelled (the handle removed). The abort check runs UNDER s.mu, atomically
+// with the upsert; RemoveTorrent closes h.removed before its own s.mu-guarded
+// remove(), so a create here can never resurrect an entry a concurrent
+// RemoveTorrent already deleted. Reports whether the entry was written.
+func (s *session) updateGuarded(infoHash string, abort func() bool, mut func(*sessionEntry)) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if abort != nil && abort() {
+		return false, nil
+	}
+	ent := s.entries[infoHash]
+	ent.InfoHash = infoHash
+	mut(&ent)
+	s.entries[infoHash] = ent
+	return true, s.saveLocked()
+}
+
 // remove deletes the entry, saves, and best-effort removes the .torrent copy.
 func (s *session) remove(infoHash string) {
 	s.mu.Lock()
@@ -194,7 +212,11 @@ func (s *session) writeTorrentCopy(infoHash string, raw []byte) (string, error) 
 // persistAdd records an add. MagnetURI/TorrentFile are written only when
 // non-empty so a raced magnet→metainfo upgrade is never clobbered with "".
 func (e *Engine) persistAdd(h *Handle, via, magnetURI, torrentFile string) {
-	if err := e.sess.update(h.InfoHashHex(), func(ent *sessionEntry) {
+	// updateGuarded, NOT update: persistAdd runs after Add releases e.mu, so a
+	// concurrent RemoveTorrent on the same infohash can delete the row (or be
+	// about to) before this create runs — an unconditional upsert would resurrect
+	// it and silently rejoin, on the next restart, a swarm the user left.
+	if _, err := e.sess.updateGuarded(h.InfoHashHex(), h.isRemoved, func(ent *sessionEntry) {
 		ent.AddedVia = via
 		if magnetURI != "" {
 			ent.MagnetURI = magnetURI

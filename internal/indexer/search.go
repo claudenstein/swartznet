@@ -10,6 +10,12 @@ import (
 	"github.com/blevesearch/bleve/v2/search/query"
 )
 
+// ErrBadQuery marks a request whose free-form Query is not valid Bleve
+// query-string syntax (unbalanced parentheses, a dangling field operator, …).
+// It is a CLIENT error: callers crossing an API boundary should map it to a
+// 400, never a 500 — the index is healthy, the query is not.
+var ErrBadQuery = errors.New("indexer: malformed query")
+
 // MaxSearchLimit is a defensive upper bound on SearchRequest.Limit —
 // an order of magnitude above the largest legitimate caller (the httpapi
 // /search cap is 500, sn_search's is 100), so no realistic user hits it,
@@ -118,7 +124,14 @@ func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
 
 	var q query.Query
 	if req.Query != "" {
-		q = bleve.NewQueryStringQuery(req.Query)
+		qs := bleve.NewQueryStringQuery(req.Query)
+		// Parse the query string up front so a syntax error (unbalanced parens,
+		// dangling field op) is a typed client error rather than an opaque 500
+		// surfacing from deep inside bleve.Search below.
+		if _, perr := qs.Parse(); perr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadQuery, perr)
+		}
+		q = qs
 	}
 	if req.SignedBy != "" {
 		signedQ := bleve.NewTermQuery(strings.ToLower(req.SignedBy))

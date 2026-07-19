@@ -310,7 +310,10 @@ func (e *Engine) persistSeedAdd(h *Handle, addedVia string, raw []byte, dataPath
 	}
 	e.persistAdd(h, addedVia, "", tname)
 	if dataPath != "" {
-		if err := e.sess.update(h.InfoHashHex(), func(ent *sessionEntry) {
+		// updateExisting, NOT update: this only refines the row persistAdd just
+		// created. If persistAdd was suppressed by a racing removal, there is
+		// nothing to refine — a blind upsert here would resurrect the deleted row.
+		if _, err := e.sess.updateExisting(h.InfoHashHex(), func(ent *sessionEntry) {
 			ent.DataPath = dataPath
 			ent.ContentName = contentName
 		}); err != nil {

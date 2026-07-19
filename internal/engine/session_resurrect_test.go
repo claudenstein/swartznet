@@ -49,3 +49,50 @@ func TestSessionUpdateExistingDoesNotResurrect(t *testing.T) {
 		t.Error("sanity: update should upsert")
 	}
 }
+
+// TestSessionUpdateGuardedSuppressesResurrect is the regression for #4: persistAdd
+// runs AFTER Add releases e.mu, so a concurrent RemoveTorrent on the same infohash
+// can delete the row before this create. updateGuarded must NOT create the entry
+// when its abort predicate (the handle's removed flag) reports the add was
+// cancelled — otherwise the removed torrent silently rejoins its swarm on restart.
+func TestSessionUpdateGuardedSuppressesResurrect(t *testing.T) {
+	s, err := loadSession(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ih := strings.Repeat("b", 40)
+
+	// abort=true (handle already removed) → the create is suppressed.
+	written, err := s.updateGuarded(ih, func() bool { return true }, func(e *sessionEntry) {
+		e.AddedVia = "magnet"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written {
+		t.Error("updateGuarded reported a write despite abort")
+	}
+	s.mu.Lock()
+	_, present := s.entries[ih]
+	s.mu.Unlock()
+	if present {
+		t.Error("HIGH: persistAdd resurrected a removed torrent's session entry")
+	}
+
+	// abort=false (live add) → the create proceeds (no over-suppression).
+	written, err = s.updateGuarded(ih, func() bool { return false }, func(e *sessionEntry) {
+		e.AddedVia = "magnet"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !written {
+		t.Error("updateGuarded suppressed a live add")
+	}
+	s.mu.Lock()
+	_, present = s.entries[ih]
+	s.mu.Unlock()
+	if !present {
+		t.Error("live add was not persisted")
+	}
+}

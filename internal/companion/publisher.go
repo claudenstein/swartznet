@@ -220,6 +220,16 @@ func (p *Publisher) refreshOnce(parent context.Context) {
 	if fp == p.lastContentFP && p.lastGeneratedAt != 0 {
 		idx.GeneratedAt = p.lastGeneratedAt
 	} else {
+		// Keep GeneratedAt strictly monotonic across content changes. Followers
+		// reject a snapshot whose GeneratedAt regressed (replay defense), so if
+		// the wall clock stepped backward (NTP correction, VM migration) we must
+		// still advance past the last published timestamp — otherwise legitimate
+		// new content would be silently dropped by every follower until the clock
+		// caught back up. The bump only triggers under clock regression; normal
+		// forward time already satisfies now > lastGeneratedAt.
+		if p.lastGeneratedAt != 0 && idx.GeneratedAt <= p.lastGeneratedAt {
+			idx.GeneratedAt = p.lastGeneratedAt + 1
+		}
 		p.lastContentFP = fp
 		p.lastGeneratedAt = idx.GeneratedAt
 	}
@@ -237,26 +247,29 @@ func (p *Publisher) refreshOnce(parent context.Context) {
 		p.log.Debug("companion.publisher.seed_warn", "err", err)
 	}
 	infoHash := mi.HashInfoBytes()
-	// Drop the previously-seeded companion torrent (its infohash differs from
-	// this one because GeneratedAt changed the payload) so companion seeds do
-	// not accumulate in the engine over the node's lifetime.
-	p.mu.Lock()
-	prev := p.lastSeededIH
-	p.mu.Unlock()
-	if prev != ([20]byte{}) && prev != [20]byte(infoHash) {
-		if err := p.seeder.DropTorrent(prev); err != nil {
-			p.log.Debug("companion.publisher.drop_warn", "err", err)
-		}
-	}
-	p.mu.Lock()
-	p.lastSeededIH = [20]byte(infoHash)
-	p.mu.Unlock()
 
+	// Publish the pointer BEFORE dropping the previous seed. If the put fails, the
+	// live BEP-46 pointer still resolves to the PREVIOUS infohash, so we must keep
+	// seeding it — dropping it first would leave a new follower unable to fetch
+	// the still-advertised (old) index until the next successful refresh.
 	ctx, cancel := context.WithTimeout(parent, p.opts.PutTimeout)
 	defer cancel()
 	if err := p.putter.PutInfohashPointer(ctx, []byte(SaltContentIndex), infoHash); err != nil {
 		p.recordFailure(fmt.Errorf("put pointer: %w", err))
 		return
+	}
+
+	// Put succeeded — now it is safe to drop the previously-seeded companion
+	// torrent (its infohash differs because the content changed) so companion
+	// seeds do not accumulate in the engine over the node's lifetime.
+	p.mu.Lock()
+	prev := p.lastSeededIH
+	p.lastSeededIH = [20]byte(infoHash)
+	p.mu.Unlock()
+	if prev != ([20]byte{}) && prev != [20]byte(infoHash) {
+		if err := p.seeder.DropTorrent(prev); err != nil {
+			p.log.Debug("companion.publisher.drop_warn", "err", err)
+		}
 	}
 	p.recordSuccess(infoHash.HexString())
 	p.log.Info("companion.publisher.refreshed", "infohash", infoHash.HexString(), "torrents", len(idx.Torrents))

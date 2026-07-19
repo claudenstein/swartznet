@@ -223,10 +223,16 @@ type LocalBlock struct {
 // optional swarm/dht blocks (a Layer-S or Layer-D failure is surfaced INLINE,
 // never a 500).
 type SearchResult struct {
-	Local    LocalBlock
-	LocalErr error
-	Swarm    *SwarmBlock
-	Dht      *DHTBlock
+	Local LocalBlock
+	// LocalErr, when non-nil, is a fatal Layer-L failure. By default it renders
+	// as a 500; when LocalBadRequest is also set, the collaborator has classified
+	// it as the caller's fault (e.g. a malformed query string) and it renders as
+	// a 400 instead. httpapi imports no indexer types — the daemon adapter does
+	// the classification and reports it through this flag.
+	LocalErr        error
+	LocalBadRequest bool
+	Swarm           *SwarmBlock
+	Dht             *DHTBlock
 }
 
 // SearchResponse is the POST /search document. The swarm/dht blocks appear only

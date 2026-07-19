@@ -55,6 +55,12 @@ type Subscriber struct {
 	mu       sync.Mutex
 	imported map[[32]byte]int64    // pubkey → last successfully-imported GeneratedAt
 	lastIH   map[[32]byte][20]byte // pubkey → last successfully-imported companion infohash
+	// epoch counts Forget calls per pubkey. A Sync captures the epoch when it
+	// starts and only commits its dedup state if the epoch is unchanged at the
+	// end — so an Unfollow (Forget) that races an in-flight Sync is never
+	// resurrected by that Sync's late write. Never deleted (keeping it monotonic
+	// avoids a re-follow colliding with a still-in-flight older Sync's snapshot).
+	epoch map[[32]byte]uint64
 }
 
 // NewSubscriber validates its ports and defaults its options.
@@ -88,6 +94,7 @@ func NewSubscriber(getter PointerGetter, fetcher CompanionFetcher, ingester Inge
 		log:      log,
 		imported: make(map[[32]byte]int64),
 		lastIH:   make(map[[32]byte][20]byte),
+		epoch:    make(map[[32]byte]uint64),
 	}, nil
 }
 
@@ -96,6 +103,13 @@ func NewSubscriber(getter PointerGetter, fetcher CompanionFetcher, ingester Inge
 func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 	pubHex := hex.EncodeToString(pubkey[:])
 	res := SyncResult{Publisher: pubHex}
+
+	// Snapshot the Forget epoch at the start. Any dedup-state commit below is
+	// suppressed if this changes mid-Sync (an Unfollow raced us), so an in-flight
+	// Sync never resurrects state for a publisher we no longer follow.
+	s.mu.Lock()
+	startEpoch := s.epoch[pubkey]
+	s.mu.Unlock()
 
 	getCtx, cancel := context.WithTimeout(ctx, s.opts.PointerTimeout)
 	ih, err := s.getter.GetInfohashPointer(getCtx, pubkey, []byte(SaltContentIndex))
@@ -154,9 +168,7 @@ func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 	s.mu.Unlock()
 	if ok && idx.GeneratedAt != 0 && idx.GeneratedAt < prev {
 		res.Deduped = true
-		s.mu.Lock()
-		s.lastIH[pubkey] = ih
-		s.mu.Unlock()
+		s.commitDedup(pubkey, startEpoch, 0, ih, false)
 		s.log.Debug("companion.subscriber.rollback_ignored", "publisher", pubHex,
 			"generated_at", idx.GeneratedAt, "last_imported", prev)
 		return res
@@ -169,10 +181,7 @@ func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 		res.Err = fmt.Errorf("ingest: %w", err)
 		return res
 	}
-	s.mu.Lock()
-	s.imported[pubkey] = idx.GeneratedAt
-	s.lastIH[pubkey] = ih
-	s.mu.Unlock()
+	s.commitDedup(pubkey, startEpoch, idx.GeneratedAt, ih, true)
 	s.log.Info("companion.subscriber.synced", "publisher", pubHex,
 		"infohash", fmt.Sprintf("%x", ih), "torrents_imported", tCount, "content_imported", cCount)
 	return res
@@ -185,7 +194,26 @@ func (s *Subscriber) Forget(pubkey [32]byte) {
 	s.mu.Lock()
 	delete(s.imported, pubkey)
 	delete(s.lastIH, pubkey)
+	s.epoch[pubkey]++ // invalidate any in-flight Sync's pending dedup commit
 	s.mu.Unlock()
+}
+
+// commitDedup records dedup state for pubkey after a successful import (or a
+// rollback-reject, which advances only lastIH). It NO-OPs when a Forget bumped
+// the epoch since the Sync began — an Unfollow that raced this Sync must win, so
+// the maps are not resurrected for a publisher we no longer follow. Returns
+// false when the commit was suppressed.
+func (s *Subscriber) commitDedup(pubkey [32]byte, startEpoch uint64, generatedAt int64, ih [20]byte, setImported bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epoch[pubkey] != startEpoch {
+		return false
+	}
+	if setImported {
+		s.imported[pubkey] = generatedAt
+	}
+	s.lastIH[pubkey] = ih
+	return true
 }
 
 func (s *Subscriber) decodeFile(path string) (CompanionIndex, error) {

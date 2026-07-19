@@ -57,6 +57,7 @@ type aggregatePPMI struct {
 	tree    []byte                    // built SNAGG file (nil until first build)
 	fp      [32]byte                  // fingerprint of the last built tree (PPMI commit)
 	dirty   bool
+	gen     uint64 // bumped every time rebuildLocked mutates tree (TOCTOU guard)
 
 	// Distribution ports (nil ⇒ local-only). Set once at construction via
 	// setDistribution before the backend goes live, so no lock is needed to
@@ -147,13 +148,38 @@ func (a *aggregatePPMI) Refresh(ctx context.Context) error {
 	fp := a.fp
 	pub := a.publisher
 	name := a.treeName()
+	gen := a.gen
 	a.mu.Unlock()
 	if pub == nil {
 		return nil
 	}
+	if err := a.distribute(ctx, pub, name, tree, fp); err != nil {
+		return err
+	}
+	// TOCTOU guard: PublishTree/RetractTree run off-lock (a DHT put can take
+	// seconds). A concurrent Retract may have rebuilt — even emptied — the tree
+	// while we were distributing, so the bytes we just put could be stale (e.g. a
+	// retracted infohash left discoverable). If the generation advanced,
+	// re-distribute the CURRENT state once so the window shrinks from a full
+	// refresh interval to a single extra put. A subsequent Retract is caught by
+	// the next refresh tick.
+	a.mu.Lock()
+	tree2 := a.tree
+	fp2 := a.fp
+	changed := a.gen != gen
+	a.mu.Unlock()
+	if changed {
+		return a.distribute(ctx, pub, name, tree2, fp2)
+	}
+	return nil
+}
+
+// distribute publishes a built tree, or retracts the seed when the tree is nil
+// (records empty or read-only). Caller must NOT hold mu — the put runs off-lock.
+func (a *aggregatePPMI) distribute(ctx context.Context, pub TreePublisher, name string, tree []byte, fp [32]byte) error {
 	if tree == nil {
-		// Nothing to distribute (records empty or read-only): drop any seed we
-		// still hold so a retracted-to-empty publisher stops serving stale bytes.
+		// Nothing to distribute: drop any seed we still hold so a retracted-to-
+		// empty publisher stops serving stale bytes.
 		return pub.RetractTree(ctx)
 	}
 	if err := pub.PublishTree(ctx, name, tree, fp); err != nil {
@@ -187,6 +213,7 @@ func (a *aggregatePPMI) rebuildLocked() {
 		return
 	}
 	a.dirty = false
+	a.gen++ // the tree is about to change (empty or rebuilt); signal Refresh's TOCTOU re-check
 	if len(a.records) == 0 || a.priv == nil {
 		a.tree = nil
 		a.fp = [32]byte{}

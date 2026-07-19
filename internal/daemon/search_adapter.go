@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/swartznet/swartznet/internal/dhtindex"
@@ -86,7 +87,13 @@ func (a *controllerAdapter) search(mux *searchmux.Mux) func(httpapi.SearchParams
 			DHT:       p.DHT,
 		})
 		if res.LocalErr != nil {
-			return httpapi.SearchResult{LocalErr: res.LocalErr}
+			// A malformed query string is the caller's fault (→ 400), not a
+			// Layer-L failure (→ 500). Classify it here — httpapi imports no
+			// indexer types, so the translation lives at this seam.
+			return httpapi.SearchResult{
+				LocalErr:        res.LocalErr,
+				LocalBadRequest: errors.Is(res.LocalErr, indexer.ErrBadQuery),
+			}
 		}
 		out := httpapi.SearchResult{Local: localBlock(res.Local)}
 		if p.Swarm {

@@ -123,6 +123,19 @@ func (h *Handle) markRemoved() {
 	h.removeOnce.Do(func() { close(h.removed) })
 }
 
+// isRemoved reports whether RemoveTorrent has marked this handle removed. It is
+// the abort predicate for persistAdd: RemoveTorrent closes h.removed BEFORE its
+// own session-lock-guarded remove, so a create checked under the same lock never
+// resurrects an entry a concurrent removal deleted (or is about to).
+func (h *Handle) isRemoved() bool {
+	select {
+	case <-h.removed:
+		return true
+	default:
+		return false
+	}
+}
+
 // PieceEvents returns the piece-state change stream (buffer 64,
 // drop-on-full). Readers must drain.
 func (h *Handle) PieceEvents() <-chan int { return h.pieceSub.events }
