@@ -130,7 +130,12 @@ func (cp *companionTab) showFollowDialog() {
 		}
 		var pub [32]byte
 		copy(pub[:], raw)
-		cp.d.CompSub.Follow(pub, strings.TrimSpace(labelEntry.Text))
+		// Route through the PERSISTING daemon path (writes the follow file), so a
+		// GUI follow survives a restart — CompSub.Follow alone is in-memory only.
+		if err := cp.d.FollowPublisher(pub, strings.TrimSpace(labelEntry.Text)); err != nil {
+			cp.showErr(err)
+			return
+		}
 		cp.refresh()
 	}, cp.window()).Show()
 }

@@ -131,6 +131,26 @@ func (a *companionAdapter) SubscriberStatus() []httpapi.CompanionFollowStatus {
 	return out
 }
 
+// FollowPublisher follows a companion publisher through the PERSISTING
+// controller (writes the atomic follow file), so a follow added by ANY frontend
+// — including the native GUI — survives a restart. The GUI must call this rather
+// than CompSub.Follow directly, which only mutates the in-memory follow set.
+func (d *Daemon) FollowPublisher(pubkey [32]byte, label string) error {
+	if d.compController == nil {
+		return fmt.Errorf("companion controller not configured")
+	}
+	return d.compController.Follow(pubkey, label)
+}
+
+// UnfollowPublisher unfollows through the persisting controller (see
+// FollowPublisher). Removes the publisher from the follow file too.
+func (d *Daemon) UnfollowPublisher(pubkey [32]byte) error {
+	if d.compController == nil {
+		return fmt.Errorf("companion controller not configured")
+	}
+	return d.compController.Unfollow(pubkey)
+}
+
 func (a *companionAdapter) Follow(pubkey [32]byte, label string) error {
 	if a.sub == nil {
 		return fmt.Errorf("companion subscriber not configured: %w", httpapi.ErrCompanionUnavailable)

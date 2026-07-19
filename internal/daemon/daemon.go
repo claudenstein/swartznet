@@ -72,6 +72,11 @@ type Daemon struct {
 	// (non-fatal) start failed.
 	CompPub *companion.Publisher
 	CompSub *companion.SubscriberWorker
+	// compController is the PERSISTING companion follow/unfollow/refresh path
+	// (writes the atomic follow file). Every frontend — HTTP API and native GUI —
+	// mutates follows through it, so a GUI follow survives a restart just like an
+	// API follow. Constructed unconditionally (nil legs degrade gracefully).
+	compController *companionAdapter
 
 	// mux is the shared three-layer search fan-out (Layer L/S/D). Every
 	// frontend routes search through it via Search, never its own logic.
@@ -217,6 +222,10 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		}
 	}
 
+	// The persisting companion controller is built unconditionally so BOTH the
+	// HTTP API and the GUI mutate follows through the same file-persisting path.
+	d.compController = newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile)
+
 	// Session restore runs before the HTTP API so restored torrents are
 	// visible to the first request (and their autoIndex finds the index).
 	// Per-entry failures only warn.
@@ -242,9 +251,9 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		adapter := &controllerAdapter{eng: eng, adm: d.admission}
 		apiOpts.Search = adapter.search(d.mux)
 		apiOpts.PublisherStatus = adapter.publisherStatus
-		// The adapter is constructed unconditionally — even when both legs are
-		// nil — so the /companion routes always exist and degrade gracefully.
-		apiOpts.Companion = newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile)
+		// Reuse the same persisting controller the GUI uses, so the /companion
+		// routes always exist and both frontends share one follow-file writer.
+		apiOpts.Companion = d.compController
 		if d.Idx != nil {
 			apiOpts.IndexStats = adapter.indexStats
 			apiOpts.LocalDocCount = adapter.localDocCount
