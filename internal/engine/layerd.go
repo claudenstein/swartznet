@@ -28,7 +28,7 @@ func (e *Engine) setupLayerDLookup() {
 	// Read-only backend: getter + in-memory manifest, no putter. Lookup only
 	// ever calls backend.Lookup, which touches the getter alone.
 	mem, _ := dhtindex.LoadOrCreateManifest("")
-	readBackend, err := dhtindex.NewBackend(e.cfg.LayerDMode, nil, getter, mem, dhtindex.PublisherOptions{}, e.log)
+	readBackend, err := dhtindex.NewBackend(e.cfg.LayerDMode, nil, nil, getter, mem, dhtindex.PublisherOptions{}, e.log)
 	if err != nil {
 		e.log.Warn("engine.layerd.backend_err", "err", err)
 		return
@@ -90,7 +90,7 @@ func (e *Engine) setupLayerDPublisher(priv ed25519.PrivateKey, pub [32]byte) {
 	if e.cfg.Regtest {
 		opts = dhtindex.RegtestPublisherOptions()
 	}
-	backend, err := dhtindex.NewBackend(e.cfg.LayerDMode, putter, getter, manifest, opts, e.log)
+	backend, err := dhtindex.NewBackend(e.cfg.LayerDMode, priv, putter, getter, manifest, opts, e.log)
 	if err != nil {
 		e.log.Warn("engine.layerd.backend_err", "err", err)
 		return

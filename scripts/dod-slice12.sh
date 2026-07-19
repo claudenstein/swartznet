@@ -31,6 +31,13 @@ run_go ppmi ./contracts/dhtschema/ \
 run_go aggcli ./cmd/swartznet/ \
   'TestAggregateBuildInspectFindRoundTrip|TestAggregateBuildRefusesHighPoW|TestAggregateBuildRequiresOut|TestAggregateBuildRejectsBadRecords|TestAggregateInspectFailsOnGarbage|TestAggregateFindVerifyFailsOnTamperedFingerprint' \
   "aggregate CLI: build→inspect→find round-trip, pow>40 refused, bad-record reject, inspect integrity gate, --verify fingerprint"
+run_go seam ./internal/dhtindex/ \
+  'TestAggregatePPMISelfLookup|TestAggregatePPMIReadOnlyInert|TestAggregatePPMIRetract|TestCompositeDualWriteLegacyReadable|TestCompositeSecondaryErrorTolerated' \
+  "RecordBackend seam: aggregatePPMI self-lookup over its SNAGG tree; composite dual-write → legacy-only read still returns hits; secondary errors tolerated"
+run_go seammode ./internal/engine/ 'TestLayerDCompositeModeBuilds|TestLayerDAggregateModeBuilds' \
+  "engine selects composite / aggregatePPMI LayerDMode with zero app change (ship default stays legacy)"
+run_go cfgmode ./internal/config/ 'TestValidateLayerDMode' \
+  "config.Validate accepts legacy|composite|aggregatePPMI, rejects unknown modes"
 
 # ======================================================================
 # Part 2 — the offline aggregate tooling against the real binary

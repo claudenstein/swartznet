@@ -2,6 +2,7 @@ package dhtindex
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"log/slog"
 	"time"
@@ -62,12 +63,32 @@ type PublisherKeywordStatus struct {
 
 // NewBackend selects a RecordBackend by mode — the single seam keyed on
 // config.LayerDMode. "legacy" (or empty) is the shipping per-keyword BEP-44
-// backend; the Slice-12 Aggregate modes widen this switch. put may be nil for
-// a read-only (lookup) backend.
-func NewBackend(mode string, put Putter, get Getter, manifest *Manifest, opts PublisherOptions, log *slog.Logger) (RecordBackend, error) {
+// backend; "aggregatePPMI" is the signed SNAGG B-tree backend; "composite"
+// dual-writes legacy (primary) + aggregate (secondary) so a migration is pure
+// adapter-selection with zero data loss. put may be nil for a read-only
+// (lookup) backend; priv is the signer (nil for a read-only aggregate, which is
+// then inert).
+func NewBackend(mode string, priv ed25519.PrivateKey, put Putter, get Getter, manifest *Manifest, opts PublisherOptions, log *slog.Logger) (RecordBackend, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	selfPub := func() [32]byte {
+		if put != nil {
+			return put.PublicKey()
+		}
+		return [32]byte{}
+	}
 	switch mode {
 	case "", "legacy":
 		return NewLegacyKeyword(put, get, manifest, opts, log), nil
+	case "aggregatePPMI":
+		return newAggregatePPMI(priv, selfPub(), log), nil
+	case "composite":
+		return &composite{
+			primary:   NewLegacyKeyword(put, get, manifest, opts, log),
+			secondary: newAggregatePPMI(priv, selfPub(), log),
+			log:       log,
+		}, nil
 	default:
 		return nil, fmt.Errorf("dhtindex: unsupported LayerDMode %q", mode)
 	}

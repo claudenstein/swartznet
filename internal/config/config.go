@@ -102,10 +102,10 @@ type Config struct {
 	ShareFileHits    bool // default true
 	ShareContentHits bool // default true
 
-	// LayerDMode selects the Layer-D RecordBackend (Slice 9). Only "legacy"
-	// (the per-keyword BEP-44 index) is valid this slice; the Slice-12
-	// Aggregate backends ("composite"/"aggregatePPMI") widen Validate later.
-	// Empty is treated as "legacy".
+	// LayerDMode selects the Layer-D RecordBackend: "legacy" (the shipping
+	// per-keyword BEP-44 index, the default), "aggregatePPMI" (the signed SNAGG
+	// B-tree), or "composite" (dual-write legacy+aggregate, legacy-then-aggregate
+	// dual-read — the zero-data-loss migration mode). Empty is "legacy".
 	LayerDMode string
 	// MinIndexerScore is the minimum reputation an indexer must have before
 	// Layer-D lookups query it (SPEC §5.7). Zero (default) disables the gate;
@@ -171,9 +171,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: ShareLocal %d out of range (0..2)", c.ShareLocal)
 	}
 	switch c.LayerDMode {
-	case "", "legacy":
+	case "", "legacy", "composite", "aggregatePPMI":
 	default:
-		return fmt.Errorf("config: LayerDMode %q unsupported (only \"legacy\" this release)", c.LayerDMode)
+		return fmt.Errorf("config: LayerDMode %q unsupported (legacy|composite|aggregatePPMI)", c.LayerDMode)
 	}
 	if err := c.checkUnsafe(testing.Testing()); err != nil {
 		return err

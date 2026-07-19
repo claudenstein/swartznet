@@ -264,3 +264,22 @@ func moduleRoot(t *testing.T) string {
 		dir = parent
 	}
 }
+
+func TestValidateLayerDMode(t *testing.T) {
+	for _, m := range []string{"", "legacy", "composite", "aggregatePPMI"} {
+		c := Default()
+		c.DataDir = t.TempDir()
+		c.IndexDir = ""
+		c.LayerDMode = m
+		if err := c.Validate(); err != nil {
+			t.Errorf("LayerDMode %q rejected: %v", m, err)
+		}
+	}
+	c := Default()
+	c.DataDir = t.TempDir()
+	c.IndexDir = ""
+	c.LayerDMode = "bogus"
+	if err := c.Validate(); err == nil {
+		t.Error("bogus LayerDMode accepted")
+	}
+}

@@ -131,3 +131,26 @@ func TestPublishTorrentNoopWithoutPublisher(t *testing.T) {
 	// Reaches the nil-publisher guard without panicking.
 	e.publishTorrent(&Handle{})
 }
+
+// TestLayerDCompositeModeBuilds confirms the engine constructs the composite
+// (legacy+aggregate) backend when LayerDMode=composite — the Slice-12 seam is
+// selectable with no app change.
+func TestLayerDCompositeModeBuilds(t *testing.T) {
+	t.Parallel()
+	e := layerDEngine(t, func(c *config.Config) { c.LayerDMode = "composite" })
+	setTestSigner(t, e)
+	if e.DHTPublisher() == nil {
+		t.Fatal("composite publisher not built")
+	}
+	// Status is safe to read (comes from the legacy primary).
+	_ = e.PublisherStatus()
+}
+
+func TestLayerDAggregateModeBuilds(t *testing.T) {
+	t.Parallel()
+	e := layerDEngine(t, func(c *config.Config) { c.LayerDMode = "aggregatePPMI" })
+	setTestSigner(t, e)
+	if e.DHTPublisher() == nil {
+		t.Fatal("aggregatePPMI publisher not built")
+	}
+}
