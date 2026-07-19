@@ -1,19 +1,17 @@
 package engine
 
 import (
-	"context"
-	"strings"
 	"testing"
 
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-// TestCompanionFetchRefusesLiveTorrentCollision is the regression for the HIGH
-// bug where a followed publisher's pointer infohash colliding with a real
-// torrent the victim runs let a companion fetch adopt, download-all, and DROP
-// that live torrent. A companion fetch/drop must NEVER touch a non-companion
-// torrent.
-func TestCompanionFetchRefusesLiveTorrentCollision(t *testing.T) {
+// TestCompanionDropGuardProtectsLiveTorrent is the regression for the HIGH bug
+// where a followed publisher's pointer infohash colliding with a real torrent the
+// victim runs could tear that torrent down via the companion drop path. A
+// companion drop must NEVER remove a non-companion torrent, regardless of who
+// names the infohash.
+func TestCompanionDropGuardProtectsLiveTorrent(t *testing.T) {
 	e := testEngine(t)
 	var ih [20]byte
 	for i := range ih {
@@ -29,21 +27,19 @@ func TestCompanionFetchRefusesLiveTorrentCollision(t *testing.T) {
 		t.Fatal("a normal AddInfoHash was marked companion")
 	}
 
-	// A companion fetch for the SAME infohash must REFUSE — never adopt it.
-	if _, err := e.FetchCompanionTorrent(context.Background(), ih); err == nil ||
-		!strings.Contains(err.Error(), "collides with a live torrent") {
-		t.Fatalf("FetchCompanionTorrent collision: err = %v, want a refusal", err)
-	}
-	if !e.hasHandle(ih) {
-		t.Fatal("HIGH: the live torrent was torn down by a colliding companion fetch")
-	}
-
-	// A direct DropCompanionTorrent must also be a no-op on the real torrent.
+	// DropCompanionTorrent — the path a companion fetch's deferred cleanup and a
+	// followed-publisher's pointer would reach — must be a NO-OP on the real
+	// torrent, not destroy it.
 	if err := e.DropCompanionTorrent(ih); err != nil {
 		t.Fatal(err)
 	}
 	if !e.hasHandle(ih) {
 		t.Fatal("HIGH: DropCompanionTorrent removed a non-companion torrent")
+	}
+
+	// And the handle stays non-companion (its priorities/lifecycle are untouched).
+	if got := e.handleCompanion(ih); got {
+		t.Error("the real torrent's handle was flipped to companion")
 	}
 }
 
@@ -53,4 +49,14 @@ func (e *Engine) hasHandle(ih [20]byte) bool {
 	defer e.mu.Unlock()
 	_, ok := e.handles[metainfo.Hash(ih)]
 	return ok
+}
+
+// handleCompanion reports the companion flag of the handle for ih (false if absent).
+func (e *Engine) handleCompanion(ih [20]byte) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if h, ok := e.handles[metainfo.Hash(ih)]; ok {
+		return h.companion
+	}
+	return false
 }

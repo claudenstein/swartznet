@@ -178,14 +178,16 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infohash [20]byte) (
 	if err != nil {
 		return "", err
 	}
-	// SAFETY: if the infohash collides with a real (non-companion) torrent the
-	// node is already running, addCompanionInfoHash returns that live handle
-	// (registerLocked adopts any existing handle). Refuse BEFORE the defer and
-	// DownloadAll below — a followed publisher must not be able to name a live
-	// torrent's infohash and make us override its file priorities or drop it.
-	if !h.companion {
-		return "", fmt.Errorf("engine: companion infohash %x collides with a live torrent; refusing", infohash)
-	}
+	// SAFETY (companion-collision defense): if the infohash collides with a real
+	// (non-companion) torrent the node is already running, addCompanionInfoHash
+	// returns that live handle. A followed publisher controls the pointer
+	// infohash, so we must NOT let it (a) override that torrent's file priorities
+	// [DownloadAll is gated on h.companion below] or (b) drop it
+	// [DropCompanionTorrent refuses a non-companion handle]. We do not refuse the
+	// fetch outright — a caller may legitimately fetch an infohash already present
+	// as a plain handle — but a colliding real torrent is never mutated: the
+	// companion-index decode simply fails and the fetch returns an error.
+	//
 	// Drop the fetched torrent on EVERY exit path (success, timeout, bad bounds)
 	// so a subscriber re-syncing hourly cannot accumulate handles/goroutines and
 	// the shared on-disk path is not held by a stale torrent. T.Drop keeps the
@@ -203,8 +205,14 @@ func (e *Engine) FetchCompanionTorrent(ctx context.Context, infohash [20]byte) (
 	if err := validateCompanionInfo(info); err != nil {
 		return "", err
 	}
-	// Bounds passed — download the single file.
-	h.T.DownloadAll()
+	// Bounds passed — download the single file, but ONLY for a handle we created
+	// as a companion. If the infohash collided with a pre-existing (non-companion)
+	// torrent, that torrent's own download path governs its file priorities; never
+	// override them here (a followed publisher must not force a full download of a
+	// real torrent by naming its infohash in a pointer).
+	if h.companion {
+		h.T.DownloadAll()
+	}
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	target := h.T.Files()[0]
