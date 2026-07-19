@@ -190,16 +190,18 @@ func (e *Engine) registerLockedRestore(t *torrent.Torrent, paused bool, restore 
 	return h, false
 }
 
-// autoDownload waits for metadata (≤5 min) then activates the torrent under
-// the queue cap.
+// autoDownload waits for metadata then activates the torrent under the queue
+// cap. It waits WITHOUT a wall-clock cap — the goroutine's lifetime is already
+// bounded by engine close (bgCtx) and torrent removal (h.removed). A prior 5-min
+// timeout abandoned activation, so a magnet whose metadata resolved later (a
+// poorly-seeded infohash) was left permanently un-downloadable (priorities stuck
+// at None) with no automatic recovery.
 func (e *Engine) autoDownload(h *Handle) {
 	select {
 	case <-h.T.GotInfo():
 	case <-e.bgCtx.Done():
 		return
 	case <-h.removed:
-		return
-	case <-time.After(5 * time.Minute):
 		return
 	}
 	e.mu.Lock()

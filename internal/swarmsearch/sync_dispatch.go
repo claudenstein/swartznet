@@ -54,6 +54,20 @@ func (p *Protocol) releaseSyncSession(addr string, txid uint32) {
 	}
 }
 
+// releaseAllSyncSessions stops the pump and forgets EVERY sync session for a
+// peer. Called on disconnect so an in-flight responder pump does not keep
+// producing symbols to a dead PeerToken until the lazy reaper happens to run —
+// no sync_end is sent because the peer is already gone. StopPump is idempotent.
+func (p *Protocol) releaseAllSyncSessions(addr string) {
+	p.syncMu.Lock()
+	m := p.syncSessions[addr]
+	delete(p.syncSessions, addr)
+	p.syncMu.Unlock()
+	for _, s := range m {
+		s.StopPump()
+	}
+}
+
 // registerSyncSessionIfUnderCap atomically checks the per-peer session cap and
 // registers, so concurrent sync_begin frames cannot both pass a separate check
 // and blow the cap (TOCTOU). A re-begin on the same txid replaces (not counted).

@@ -192,13 +192,17 @@ func (p *Protocol) OnRemoteHandshake(addr string, supported bool, remoteExtID in
 	}
 }
 
-// OnPeerClosed drops per-peer state (keeps bans) on disconnect.
+// OnPeerClosed drops per-peer state (keeps bans) on disconnect, and releases any
+// in-flight sync sessions so their symbol pumps stop immediately instead of
+// running to budget exhaustion against a dead connection + lingering until the
+// lazy reaper.
 func (p *Protocol) OnPeerClosed(addr string) {
 	p.mu.Lock()
 	delete(p.peers, addr)
 	p.mu.Unlock()
 	p.limiter.forget(addr)
 	p.ban.Forget(addr)
+	p.releaseAllSyncSessions(addr)
 }
 
 // KnownPeers returns the number of peers we have any state for.

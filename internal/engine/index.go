@@ -68,14 +68,15 @@ func (e *Engine) autoIndex(h *Handle) {
 	if h.companion {
 		return
 	}
+	// Wait for metadata WITHOUT a wall-clock cap (bounded by engine close +
+	// torrent removal): a prior 5-min timeout meant a magnet whose metadata
+	// arrived later was never indexed/minted/published, mirroring the
+	// autoDownload late-metadata bug.
 	select {
 	case <-h.T.GotInfo():
 	case <-e.bgCtx.Done():
 		return
 	case <-h.removed:
-		return
-	case <-time.After(5 * time.Minute):
-		e.log.Warn("indexer.autoindex.timeout", "info_hash", h.InfoHashHex())
 		return
 	}
 	// Mint Aggregate records from the torrent name-keywords BEFORE the Layer-L
