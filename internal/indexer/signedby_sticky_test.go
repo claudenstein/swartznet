@@ -183,6 +183,38 @@ func TestIndexContentPreserveExistingBlocksOverwrite(t *testing.T) {
 	}
 }
 
+// TestIndexTorrentPreserveExistingBlocksUnsignedRelabel closes the R4 gap: a
+// followed publisher must not relabel a torrent the node already holds even when
+// that torrent is UNSIGNED (the common magnet case, stored signer "").
+func TestIndexTorrentPreserveExistingBlocksUnsignedRelabel(t *testing.T) {
+	t.Parallel()
+	idx, err := indexer.Open(filepath.Join(t.TempDir(), "idx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	const attacker = "b000000000000000000000000000000000000000000000000000000000000000"
+	const ih = "6666666666666666666666666666666666666666"
+
+	// The node holds an UNSIGNED torrent (local magnet → SignedBy "").
+	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih, Name: "ubuntuisorealname"}); err != nil {
+		t.Fatal(err)
+	}
+	// A followed publisher lists it with a bogus name → must be rejected.
+	if err := idx.IndexTorrent(indexer.TorrentDoc{InfoHash: ih, Name: "freemoneyscamname", SignedBy: attacker, PreserveExistingSigner: true}); !errors.Is(err, indexer.ErrForeignTorrent) {
+		t.Fatalf("unsigned-torrent relabel returned %v, want ErrForeignTorrent", err)
+	}
+	if got := signedByOf(t, idx, ih); got != "" {
+		t.Errorf("SignedBy = %q, want empty — an unsigned torrent was hijacked", got)
+	}
+	if countHits(t, idx, "ubuntuisorealname") == 0 {
+		t.Error("the original name was lost (relabeled)")
+	}
+	if countHits(t, idx, "freemoneyscamname") != 0 {
+		t.Error("the attacker's name was indexed (relabel succeeded)")
+	}
+}
+
 func countHits(t *testing.T, idx *indexer.Index, q string) int {
 	t.Helper()
 	res, err := idx.Search(indexer.SearchRequest{Query: q, Limit: 10})

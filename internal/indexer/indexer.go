@@ -231,15 +231,17 @@ func (i *Index) IndexTorrent(doc TorrentDoc) error {
 			doc.SignedBy = stored
 		}
 	} else if doc.PreserveExistingSigner {
-		// A companion import must not hijack a torrent already attributed to a
-		// DIFFERENT publisher: the snapshot proves the publisher authored the
-		// LIST, not that it owns this torrent. Skip the ENTIRE write (not just
-		// SignedBy — also Name/FilePaths/Size, else the publisher could relabel a
-		// torrent the node holds) and signal the caller to skip its content too. A
-		// new torrent (no stored signer) or one already attributed to the same
-		// publisher is stamped normally.
-		if stored := i.storedSignedByLocked(doc.docID()); stored != "" && stored != strings.ToLower(doc.SignedBy) {
-			return ErrForeignTorrent
+		// A companion import must not hijack a torrent the node ALREADY HOLDS: the
+		// snapshot proves the publisher authored the LIST, not that it owns this
+		// torrent. If a doc already exists under a DIFFERENT signer — including an
+		// UNSIGNED local torrent (stored ""), the common case — skip the ENTIRE
+		// write (Name/FilePaths/Size + attribution) and signal the caller to skip
+		// its content too. A new torrent (no existing doc) or one already
+		// attributed to the SAME publisher is stamped normally.
+		if d, err := i.bleve.Document(doc.docID()); err == nil && d != nil {
+			if stored := i.storedSignedByLocked(doc.docID()); stored != strings.ToLower(doc.SignedBy) {
+				return ErrForeignTorrent
+			}
 		}
 	}
 	return i.bleve.Index(doc.docID(), doc.toBleve())
