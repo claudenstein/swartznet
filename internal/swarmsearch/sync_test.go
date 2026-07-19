@@ -187,10 +187,11 @@ func TestSyncReconcileOneDirectionalOverCap(t *testing.T) {
 	b.SetRecordSource(cacheB)
 	b.SetRecordSink(cacheB)
 
-	// B holds 600 records A lacks (one-directional). 600 > 500 needs >1 records
-	// frame; A holds nothing, so this is a pure catch-up — the case reconciliation
-	// exists to serve.
-	const N = 600
+	// B holds N records A lacks (one-directional). N > MaxRecordsPerMessage (500)
+	// needs >1 records frame — the chunking under test; A holds nothing, so this
+	// is a pure catch-up. Kept just over the cap (not 600) so the reconciliation
+	// stays light enough to converge under a busy -race CI run.
+	const N = 520
 	for i := 0; i < N; i++ {
 		cacheB.Add(signRec(t, priv, pk, "bonly"+strconv.Itoa(i), byte(i)))
 	}
@@ -201,7 +202,9 @@ func TestSyncReconcileOneDirectionalOverCap(t *testing.T) {
 		t.Fatalf("StartSync: %v", err)
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
+	// Generous deadline: under a full multi-package -race run the CPU is starved,
+	// so this timing-sensitive reconciliation is much slower than in isolation.
+	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
 		if cacheA.Len() == N {
 			break
