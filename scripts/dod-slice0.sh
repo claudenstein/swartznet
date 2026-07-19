@@ -79,7 +79,11 @@ C4=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Host: evil.example' "htt
 [ "$C4" = "403" ] && ok "POST non-loopback Host -> 403" || fail "POST non-loopback Host -> 403 (got $C4)"
 
 # web stub
-curl -s "http://$ADDR/" | grep -q "<h1>SwartzNet</h1>" && ok "GET / serves stub page" || fail "GET / serves stub page"
+# The stub index.html was replaced by the full web-client SPA (Task 1); assert the
+# SPA shell is served (brand + module entry) rather than the old placeholder.
+curl -s "http://$ADDR/" | grep -q 'SwartzNet' \
+  && curl -s "http://$ADDR/" | grep -q '/static/app.js' \
+  && ok "GET / serves the web-client SPA shell" || fail "GET / serves the web-client SPA shell"
 C5=$(curl -s -o /dev/null -w '%{http_code}' "http://$ADDR/nope")
 [ "$C5" = "404" ] && ok "unknown path 404 (no SPA fallback)" || fail "unknown path 404 (got $C5)"
 curl -s -o /dev/null -w '%{http_code}' "http://$ADDR/static/style.css" | grep -q 200 && ok "static asset served" || fail "static asset served"
