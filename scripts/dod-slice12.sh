@@ -37,6 +37,9 @@ run_go seam ./internal/dhtindex/ \
 run_go ppmidht ./internal/dhtindex/ \
   'TestPPMIClusterRoundTrip|TestPutFailsClosedOnZeroNodes' \
   "PPMI BEP-44 primitive: real 2-node DHT round-trip at SHA1(pubkey||SHA256(\"snet.index\")); PutPPMI fails closed on zero nodes"
+run_go aggtorrent ./internal/dhtindex/ \
+  'TestWrapSnaggTorrentPieceLengthAligns|TestWrapSnaggTorrentRejectsMisaligned|TestOpenVerifiedTreeCommitBinding' \
+  "aggregate distribution core: SNAGG tree wraps to a piece-aligned torrent; OpenVerifiedTree binds the fetched tree to the PPMI commit + rejects a corrupt trailer"
 run_go seammode ./internal/engine/ 'TestLayerDCompositeModeBuilds|TestLayerDAggregateModeBuilds' \
   "engine selects composite / aggregatePPMI LayerDMode with zero app change (ship default stays legacy)"
 run_go cfgmode ./internal/config/ 'TestValidateLayerDMode' \
