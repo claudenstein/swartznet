@@ -43,6 +43,9 @@ run_go tolerance ./contracts/ltepwire/ \
 run_go rejectcode ./internal/swarmsearch/ \
   'Scope|Reject' \
   "sn_search reject code 2 (unsupported_scope) on a scope the peer does not share"
+run_go silence ./internal/swarmsearch/ \
+  'TestVanillaPeerNeverReceivesFrames|TestBannedPeerNeverMintsToken' \
+  "vanilla-silence (deterministic, CI): a non-advertising peer receives ZERO sn_search frames (no token minted)"
 
 # ======================================================================
 # Part 3 — docs + licenses reconciled with the code (§6 doc-drift fixes)
