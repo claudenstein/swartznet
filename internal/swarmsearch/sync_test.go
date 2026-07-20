@@ -33,15 +33,16 @@ func reconCaps() Capabilities {
 // waitRecon blocks until both peers have processed each other's peer_announce
 // and see the reconciliation capability.
 //
-// Generous ceiling: this is a pre-condition wait for the peer_announce
-// round-trip, and under a full multi-package `-race` run the CI runner's CPU is
-// starved (the indexer/extractor packages alone can pin every core for minutes),
-// so the round-trip that finishes in milliseconds locally can take seconds. The
-// loop returns the instant both sides see the capability, so the high ceiling
-// only ever costs wall-clock when the machine is genuinely overloaded.
+// The announce is delivered off an async worker, so this is a small tolerance
+// for that goroutine's scheduling latency (a few ms locally, more on a loaded
+// -race runner). It is NOT a workaround for a lost announce: connect() calls
+// NotePeerAdded on both sides first, so the anti-zombie guard in
+// handlePeerAnnounce always finds its peer entry and never drops the frame. If
+// this ever times out again, the announce is genuinely not arriving — look
+// there, not here.
 func waitRecon(t *testing.T, a, b *Protocol, aAddr, bAddr string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if a.peerHasReconciliation(bAddr) && b.peerHasReconciliation(aAddr) {
 			return

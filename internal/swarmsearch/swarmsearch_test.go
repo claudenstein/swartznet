@@ -55,10 +55,24 @@ func (t *htTransport) SendExtension(peer PeerToken, frame []byte) error {
 }
 
 // connect makes a and b mutually aware + capable (both advertised sn_search).
+//
+// NotePeerAdded MUST run for both sides before either OnRemoteHandshake: the
+// latter enqueues an outbound peer_announce on an async worker, and
+// handlePeerAnnounce drops any announce for a peer it has no entry for (the
+// anti-zombie guard in handler.go). In production that entry always exists —
+// NotePeerAdded is called synchronously on connection add, before the LTEP
+// handshake that triggers any announce. If connect() skipped it and relied on
+// OnRemoteHandshake to create the entry, A's async announce could reach B in the
+// window between the two OnRemoteHandshake calls — before B.peers[A] exists — and
+// B would silently drop it, so B never learns A's capabilities. That window is
+// only hit under true parallelism + scheduler pressure, which is exactly why it
+// surfaced as a flaky CI failure (loaded -race runner) and never locally.
 func (h *harness) connect(a, b string) {
 	pa, pb := h.peers[a], h.peers[b]
 	pa.SetTransport(&htTransport{h: h, selfAddr: a})
 	pb.SetTransport(&htTransport{h: h, selfAddr: b})
+	pa.NotePeerAdded(b)
+	pb.NotePeerAdded(a)
 	pa.OnRemoteHandshake(b, true, 1)
 	pb.OnRemoteHandshake(a, true, 1)
 }
