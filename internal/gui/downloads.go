@@ -70,10 +70,11 @@ func newDownloadsTab(ctx context.Context, d *daemon.Daemon) *downloadsTab {
 	}
 
 	addBtn := widget.NewButtonWithIcon("Add magnet / .torrent", theme.ContentAddIcon(), dl.showAddDialog)
+	createBtn := widget.NewButtonWithIcon("Create torrent", theme.DocumentCreateIcon(), dl.showCreateDialog)
 	pauseBtn := widget.NewButtonWithIcon("Pause", theme.MediaPauseIcon(), func() { dl.act("pause") })
 	resumeBtn := widget.NewButtonWithIcon("Resume", theme.MediaPlayIcon(), func() { dl.act("resume") })
 	removeBtn := widget.NewButtonWithIcon("Remove", theme.DeleteIcon(), dl.removeSelected)
-	toolbar := container.NewHBox(addBtn, pauseBtn, resumeBtn, removeBtn)
+	toolbar := container.NewHBox(addBtn, createBtn, pauseBtn, resumeBtn, removeBtn)
 
 	dl.content = container.NewBorder(toolbar, nil, nil, nil, dl.list)
 	dl.refresh()

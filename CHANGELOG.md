@@ -14,6 +14,17 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
+### GUI: create a torrent from a file or folder (2026-07-20)
+
+The native GUI's Downloads tab gained a **Create torrent** button — previously
+this was CLI-only (`swartznet create`). It opens a dialog with **File…** /
+**Folder…** pickers, an auto-derived (editable) output `.torrent` path, optional
+trackers/comment/private (BEP-27), an opt-in **Sign with my identity** (when an
+identity is loaded), and **Seed the content after creating**.
+Hashing runs off the UI thread behind a progress indicator; when seeding is
+chosen the new torrent is added to the running engine and appears in the list
+immediately.
+
 ### Test environment + CLI fixes (2026-07-19)
 
 A unified test harness (`scripts/run-all-tests.sh`) now runs the whole suite from
