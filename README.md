@@ -2,7 +2,7 @@
 
 **A BitTorrent client that lets you search inside the files you share — and find torrents that other peers publish — all on the same mainline DHT every other client already uses.**
 
-[![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/claudenstein/swartznet?include_prereleases)](https://github.com/claudenstein/swartznet/releases)
+[![Go 1.24+](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/claudenstein/swartznet?include_prereleases)](https://github.com/claudenstein/swartznet/releases) [![Whitepaper](https://img.shields.io/badge/whitepaper-PDF-b31b1b)](docs/whitepaper.pdf)
 
 SwartzNet behaves like any other BitTorrent client on the wire — a vanilla peer sees a normal BEP-3/5/9/10/44 connection — but it adds full-text search across the content you've downloaded, optional keyword search across every SwartzNet peer you're connected to, and a DHT-backed discovery layer that lets you find torrents by topic rather than just by infohash.
 
@@ -47,7 +47,7 @@ The CLI binary is fully static (no CGo, no glibc dependency). The GUI binary req
 
 ### Build from source
 
-Requires Go 1.22 or later (1.24+ recommended).
+Requires Go 1.24 or later (pinned in `go.mod`).
 
 ```bash
 # CLI only — pure Go, cross-compiles to every platform.
@@ -57,7 +57,7 @@ go build -o swartznet ./cmd/swartznet
 # Linux:   sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
 # macOS:   xcode-select --install
 # Windows: MSYS2 with mingw-w64-x86_64-toolchain
-./scripts/build-gui.sh v0.3.0-dev
+./scripts/build-gui.sh dev
 ```
 
 For cross-platform GUI release builds use [fyne-cross](https://github.com/fyne-io/fyne-cross) (Docker-based). Details in [docs/08-operations.md](docs/08-operations.md#native-gui-v030).
@@ -159,6 +159,7 @@ Read [`docs/05-integration-design.md`](docs/05-integration-design.md) for the ar
 
 The [`docs/` directory](docs/) is organized by audience. Start with [`docs/README.md`](docs/README.md) for a guide, or jump straight to:
 
+- **Whitepaper:** [`docs/whitepaper.pdf`](docs/whitepaper.pdf) (rendered) or [`docs/whitepaper.md`](docs/whitepaper.md) (source) — the design vision, the three search layers, and the compatibility argument in one document.
 - **Using SwartzNet:** [`docs/08-operations.md`](docs/08-operations.md)
 - **Porting `sn_search` to another client:** [`docs/06-bep-sn_search-draft.md`](docs/06-bep-sn_search-draft.md) and [`docs/07-bep-dht-keyword-index-draft.md`](docs/07-bep-dht-keyword-index-draft.md)
 - **Architecture:** [`docs/05-integration-design.md`](docs/05-integration-design.md)

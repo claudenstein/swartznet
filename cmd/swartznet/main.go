@@ -26,7 +26,7 @@ const (
 
 // Version is stamped by release builds via -ldflags "-X main.Version=...";
 // dev builds keep this placeholder.
-var Version = "v0.9.0-dev"
+var Version = "v0.9.1-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

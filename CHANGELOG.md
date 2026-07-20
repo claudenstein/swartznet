@@ -7,6 +7,35 @@ format follows [Keep a Changelog][kac]; the project follows
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 
+## v0.9.0 — 2026-07-20 (preview release)
+
+First tagged build of the from-scratch rebuild. Pre-1.0 preview — the wire
+protocol is compatibility-frozen but the local APIs are still in motion. The
+rebuild log below (Phase 4) has the slice-by-slice detail; the headlines:
+
+- **Three frontends, one daemon.** A pure-Go static CLI (`swartznet`), an
+  embedded single-page **web UI** at `http://localhost:7654/`, and a native
+  cross-platform **Fyne GUI** (`swartznet-gui`) all drive the same
+  `internal/daemon` node.
+- **Create a torrent from any frontend.** `swartznet create` on the CLI, a
+  Create-torrent dialog in the native GUI, and `POST /torrents/create` behind a
+  create form in the web UI — with optional identity-signing and seed-in-place.
+- **Three search layers.** Layer L (local Bleve full-text), Layer S (`sn_search`
+  BEP-10 peer-wire), Layer D (BEP-44 DHT keyword index) — all mainline-compatible
+  (no new reserved bit, DHT verb, or UDP port).
+- **Spam resistance.** Known-good Bloom filter, Bayesian-smoothed per-publisher
+  reputation, and a targeted spam-flag gesture.
+- **Copyable publisher id** in both UIs; **whitepaper** shipped as
+  [`docs/whitepaper.pdf`](docs/whitepaper.pdf).
+- Hardened against the bencode alloc-amplification class and a batch of
+  concurrency/TOCTOU issues found by adversarial review; the full tree is
+  race-clean under `go test -race ./...`.
+
+Binaries (CLI for linux/darwin/windows × amd64/arm64, plus a linux-amd64 GUI)
+and `SHA256SUMS` are attached to the [GitHub release][rel-0-9-0].
+
+[rel-0-9-0]: https://github.com/claudenstein/swartznet/releases/tag/v0.9.0
+
 ## Rebuild (in progress — Phase 4)
 
 The tree is being rebuilt from scratch against `SPEC.md` /
