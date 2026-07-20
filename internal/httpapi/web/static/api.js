@@ -54,6 +54,7 @@ export const getCompanion = () => get('/companion');
 
 // ---- writes ----
 export const addTorrent = (uri) => req('POST', '/torrent', { uri });
+export const createTorrent = (body) => req('POST', '/torrents/create', body);
 export const pauseTorrent = (ih) => req('POST', `/torrents/${ih}/pause`);
 export const resumeTorrent = (ih) => req('POST', `/torrents/${ih}/resume`);
 export const removeTorrent = (ih, forget) =>

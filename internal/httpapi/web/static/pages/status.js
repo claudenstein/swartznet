@@ -3,7 +3,7 @@
 // block means the subsystem is DISABLED; a 503 from /index/stats or /aggregate
 // means that backend is off).
 import * as api from '../api.js';
-import { el, clear, humanBytes, fmtRate, shortHex, timeAgo, section, badge } from '../util.js';
+import { el, clear, humanBytes, fmtRate, shortHex, timeAgo, section, badge, copyButton } from '../util.js';
 
 const POLL_MS = 2000;
 
@@ -63,8 +63,18 @@ export function render(container) {
 
   function publisherSection(status, publish) {
     const p = (status && !status.__err && status.publisher) || {};
+    const pubRow = p.pubkey
+      ? el('div', { class: 'kv' }, [
+          el('span', { class: 'k' }, ['pubkey']),
+          el('span', { class: 'v' }, [
+            el('span', { class: 'mono', title: p.pubkey }, [shortHex(p.pubkey, 16)]),
+            ' ',
+            copyButton(p.pubkey),
+          ]),
+        ])
+      : kv('pubkey', '(no identity)');
     const body = el('div', {}, [
-      kv('pubkey', p.pubkey ? shortHex(p.pubkey, 16) : '(no identity)'),
+      pubRow,
       kv('keywords', p.total_keywords || 0), kv('hits', p.total_hits || 0),
     ]);
     if (publish && !publish.__err && (publish.keywords || []).length) {

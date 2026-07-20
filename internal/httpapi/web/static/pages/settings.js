@@ -3,7 +3,7 @@
 // pointer-merge: only CHANGED fields are sent, and the echoed document (which may
 // clamp values) is authoritative — we repopulate from the response.
 import * as api from '../api.js';
-import { el, clear, section, toast } from '../util.js';
+import { el, clear, section, toast, copyButton } from '../util.js';
 
 export function render(container) {
   const view = el('div', { class: 'settings' }, ['Loading…']);
@@ -85,7 +85,9 @@ export function render(container) {
     try { pubkey = (await api.getStatus()).publisher?.pubkey || ''; } catch { /* ignore */ }
     return section('About', el('div', {}, [
       el('div', {}, ['SwartzNet ', el('b', {}, [version || 'unknown'])]),
-      pubkey ? el('div', {}, ['Publisher: ', el('code', {}, [pubkey])]) : el('div', { class: 'muted' }, ['No publisher identity']),
+      pubkey
+        ? el('div', { class: 'pubkey-row' }, ['Publisher: ', el('code', { class: 'selectable' }, [pubkey]), copyButton(pubkey)])
+        : el('div', { class: 'muted' }, ['No publisher identity']),
       el('div', { class: 'muted' }, ['Apache-2.0 (SwartzNet) · engine anacrolix/torrent: MPL-2.0']),
     ]));
   }

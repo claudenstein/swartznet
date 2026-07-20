@@ -14,6 +14,7 @@ export function render(container) {
   const addRow = el('div', { class: 'add-row' }, [
     el('input', { type: 'text', id: 'magnet', placeholder: 'magnet:?xt=urn:btih:… (magnet URI)', class: 'grow' }),
     el('button', { class: 'btn primary', onclick: onAdd }, ['Add']),
+    el('button', { class: 'btn', onclick: () => toggleCreate() }, ['Create torrent']),
   ]);
 
   async function onAdd() {
@@ -26,6 +27,80 @@ export function render(container) {
       toast('added ' + shortHex(r.infohash, 16), 'ok');
       await refresh();
     } catch (e) { toast(e.message, 'err'); }
+  }
+
+  // ---- create torrent (from a file/folder on the DAEMON machine) ----
+  const cSrc = el('input', { type: 'text', placeholder: '/path/to/file-or-folder', class: 'grow' });
+  const cOut = el('input', { type: 'text', placeholder: '/path/to/output.torrent', class: 'grow' });
+  const cTrk = el('input', { type: 'text', placeholder: 'optional trackers (space or comma separated)', class: 'grow' });
+  const cCmt = el('input', { type: 'text', placeholder: 'optional comment', class: 'grow' });
+  const cPriv = el('input', { type: 'checkbox' });
+  const cSign = el('input', { type: 'checkbox' });
+  const cSeed = el('input', { type: 'checkbox' });
+  cSeed.checked = true;
+  const cSignLabel = el('label', {}, [cSign, ' Sign with my identity']);
+  const createSubmit = el('button', { class: 'btn primary', onclick: onCreate }, ['Create']);
+  const createForm = el('div', { class: 'create-form', style: 'display:none' }, [
+    el('div', { class: 'muted small' }, ['Paths are on the machine running the daemon (localhost) — the daemon does the hashing.']),
+    el('div', { class: 'add-row' }, [el('span', { class: 'flabel' }, ['Source']), cSrc]),
+    el('div', { class: 'add-row' }, [el('span', { class: 'flabel' }, ['Output']), cOut]),
+    el('div', { class: 'add-row' }, [el('span', { class: 'flabel' }, ['Trackers']), cTrk]),
+    el('div', { class: 'add-row' }, [el('span', { class: 'flabel' }, ['Comment']), cCmt]),
+    el('div', { class: 'create-opts' }, [
+      el('label', {}, [cPriv, ' Private (BEP-27: no DHT/PEX)']),
+      cSignLabel,
+      el('label', {}, [cSeed, ' Seed after creating']),
+    ]),
+    el('div', { class: 'add-row' }, [createSubmit, el('button', { class: 'btn', onclick: () => toggleCreate(false) }, ['Cancel'])]),
+  ]);
+
+  // Auto-derive the output path from the source, re-deriving on change unless the
+  // user typed their own (matches the native GUI's create dialog).
+  let lastDerived = '';
+  cSrc.addEventListener('input', () => {
+    if (cOut.value !== lastDerived) return;
+    const s = cSrc.value.trim().replace(/[/\\]+$/, '');
+    lastDerived = s ? s + '.torrent' : '';
+    cOut.value = lastDerived;
+  });
+
+  let createOpen = false, signProbed = false;
+  async function toggleCreate(open) {
+    createOpen = open === undefined ? !createOpen : open;
+    createForm.style.display = createOpen ? '' : 'none';
+    if (createOpen && !signProbed) {
+      signProbed = true; // disable "Sign" when no identity is loaded
+      try {
+        const pk = (await api.getStatus()).publisher?.pubkey;
+        if (!pk) { cSign.checked = false; cSign.disabled = true; cSignLabel.appendChild(el('span', { class: 'muted small' }, [' (no identity)'])); }
+      } catch { /* leave enabled — the API fails closed on sign-without-identity */ }
+    }
+  }
+
+  async function onCreate() {
+    const root = cSrc.value.trim(), output = cOut.value.trim();
+    if (!root || !output) { toast('source and output paths are required', 'err'); return; }
+    createSubmit.disabled = true;
+    const prev = createSubmit.textContent;
+    createSubmit.textContent = 'Creating…';
+    try {
+      const r = await api.createTorrent({
+        root, output,
+        trackers: cTrk.value.split(/[\s,]+/).filter(Boolean),
+        comment: cCmt.value.trim(),
+        private: cPriv.checked, sign: cSign.checked, seed: cSeed.checked,
+      });
+      if (r.seed_error) {
+        // Created, but the seed-in-place step failed — surface it as a warning.
+        toast('created ' + shortHex(r.infohash, 16) + ' but seeding failed: ' + r.seed_error, 'err');
+      } else {
+        toast('created ' + shortHex(r.infohash, 16) + (r.seeded ? ' — seeding' : ''), 'ok');
+      }
+      cSrc.value = ''; cOut.value = ''; cTrk.value = ''; cCmt.value = ''; cPriv.checked = false; lastDerived = '';
+      toggleCreate(false);
+      await refresh();
+    } catch (e) { toast(e.message, 'err'); }
+    finally { createSubmit.disabled = false; createSubmit.textContent = prev; }
   }
 
   async function rowAction(fn, label) {
@@ -138,7 +213,7 @@ export function render(container) {
     } finally { busy = false; }
   }
 
-  clear(container).append(addRow, list);
+  clear(container).append(addRow, createForm, list);
 
   return {
     // Guard against a tab switch that calls stop() while the initial refresh()

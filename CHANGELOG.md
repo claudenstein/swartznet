@@ -14,16 +14,27 @@ The tree is being rebuilt from scratch against `SPEC.md` /
 `legacy-snapshot` branch. Entries here track rebuild slices; everything
 below "Unreleased" describes the legacy line.
 
-### GUI: create a torrent from a file or folder (2026-07-20)
+### Create a torrent from both UIs + copyable publisher id (2026-07-20)
 
-The native GUI's Downloads tab gained a **Create torrent** button — previously
-this was CLI-only (`swartznet create`). It opens a dialog with **File…** /
-**Folder…** pickers, an auto-derived (editable) output `.torrent` path, optional
-trackers/comment/private (BEP-27), an opt-in **Sign with my identity** (when an
-identity is loaded), and **Seed the content after creating**.
-Hashing runs off the UI thread behind a progress indicator; when seeding is
-chosen the new torrent is added to the running engine and appears in the list
-immediately.
+**Create torrent** is now in **both** frontends (previously CLI-only,
+`swartznet create`):
+
+- **Native GUI** — a Create torrent button on the Downloads tab opens a dialog
+  with File… / Folder… OS pickers, an auto-derived (editable) output `.torrent`
+  path, optional trackers/comment/private (BEP-27), opt-in Sign with my identity,
+  and Seed after creating. Hashing runs off the UI thread behind a progress bar.
+- **Web UI** — the same on the Downloads tab, via a new `POST /torrents/create`
+  endpoint. Because a browser can't pick server-side paths, the source/output are
+  typed paths on the machine running the daemon (which does the hashing); the
+  handler extends its write deadline so a long hash isn't cut off by the API
+  timeout. Same options, sign, and seed-in-place.
+
+Both create paths seed through the running engine when asked, so the new torrent
+appears in the list immediately.
+
+**Copyable publisher id.** The node's publisher pubkey is now copyable in both
+UIs — a Copy button in the native GUI's About dialog, and Copy buttons on the web
+UI's Status and Settings→About views (the full key is served by `/status`).
 
 ### Test environment + CLI fixes (2026-07-19)
 

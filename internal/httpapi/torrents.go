@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // TorrentAdder accepts magnet URIs. The HTTP add surface is deliberately
@@ -37,6 +39,7 @@ type TorrentController interface {
 
 func (s *Server) torrentRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /torrent", s.handleAddTorrent)
+	mux.HandleFunc("POST /torrents/create", s.handleCreateTorrent)
 	mux.HandleFunc("GET /torrents", s.handleTorrents)
 	mux.HandleFunc("GET /torrents/{infohash}/files", s.handleTorrentFiles)
 	mux.HandleFunc("POST /torrents/{infohash}/files/{index}/priority", s.handleSetFilePriority)
@@ -73,6 +76,49 @@ func (s *Server) handleAddTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("httpapi.add_torrent", "infohash", ih)
 	writeJSON(w, AddTorrentResponse{OK: true, InfoHash: ih})
+}
+
+// handleCreateTorrent builds a .torrent from a daemon-side file/folder. root and
+// output are paths on the daemon's machine (localhost operator); the collaborator
+// hashes, optionally signs with the node identity, and optionally seeds in place.
+func (s *Server) handleCreateTorrent(w http.ResponseWriter, r *http.Request) {
+	if s.opts.CreateTorrent == nil {
+		http.Error(w, "torrent creation not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req CreateTorrentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Root = strings.TrimSpace(req.Root)
+	req.Output = strings.TrimSpace(req.Output)
+	if req.Root == "" || req.Output == "" {
+		http.Error(w, "both 'root' (file/folder) and 'output' (.torrent path) are required", http.StatusBadRequest)
+		return
+	}
+	// Hashing a large folder can exceed the server WriteTimeout; extend the write
+	// deadline for THIS response so a long, legitimate create isn't cut off. Best
+	// effort — ignore the error if the platform doesn't support it.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(1 * time.Hour))
+
+	res, err := s.opts.CreateTorrent(CreateTorrentParams{
+		Root:     req.Root,
+		Output:   req.Output,
+		Trackers: req.Trackers,
+		Comment:  strings.TrimSpace(req.Comment),
+		Private:  req.Private,
+		Sign:     req.Sign,
+		Seed:     req.Seed,
+	})
+	if err != nil {
+		http.Error(w, "create: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	res.OK = true
+	res.Output = req.Output
+	s.log.Info("httpapi.create_torrent", "infohash", res.InfoHash, "output", req.Output, "seeded", res.Seeded)
+	writeJSON(w, res)
 }
 
 func (s *Server) handleTorrents(w http.ResponseWriter, _ *http.Request) {

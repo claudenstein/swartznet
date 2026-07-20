@@ -115,3 +115,35 @@ export function toast(msg, kind = '') {
 export function section(title, body) {
   return el('section', { class: 'panel' }, [el('h3', {}, [title]), body]);
 }
+
+// copyText copies a string to the clipboard, resolving true on success. Uses the
+// async Clipboard API (available over http on localhost, a secure context) and
+// falls back to a hidden textarea + execCommand for older/edge cases.
+export async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to the legacy path */ }
+  try {
+    const ta = el('textarea', {}, [String(text)]);
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch { return false; }
+}
+
+// copyButton returns a small button that copies `text` to the clipboard and
+// toasts feedback. Used to make identifiers (e.g. the publisher pubkey) copyable.
+export function copyButton(text, label = 'Copy') {
+  return el('button', { class: 'btn tiny', title: 'Copy to clipboard', onclick: async () => {
+    const ok = await copyText(text);
+    toast(ok ? 'copied to clipboard' : 'copy failed', ok ? 'ok' : 'err');
+  } }, [label]);
+}

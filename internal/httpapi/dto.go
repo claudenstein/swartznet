@@ -146,6 +146,39 @@ type AddTorrentResponse struct {
 	InfoHash string `json:"infohash"`
 }
 
+// CreateTorrentRequest is the POST /torrents/create body. root and output are
+// paths on the DAEMON's filesystem (the daemon does the hashing), so the web UI
+// asks the user to type them rather than using a browser file picker.
+type CreateTorrentRequest struct {
+	Root     string   `json:"root"`   // file or folder to hash
+	Output   string   `json:"output"` // .torrent output path
+	Trackers []string `json:"trackers,omitempty"`
+	Comment  string   `json:"comment,omitempty"`
+	Private  bool     `json:"private,omitempty"` // BEP-27: no DHT/PEX
+	Sign     bool     `json:"sign,omitempty"`    // sign with the node identity
+	Seed     bool     `json:"seed,omitempty"`    // seed the content in place after creating
+}
+
+// CreateTorrentParams is the validated request handed to the CreateTorrent
+// collaborator (httpapi imports no engine/identity types; the daemon translates).
+type CreateTorrentParams struct {
+	Root, Output, Comment string
+	Trackers              []string
+	Private, Sign, Seed   bool
+}
+
+// CreateTorrentResult is the POST /torrents/create response. A non-empty
+// SeedError means the .torrent WAS created (InfoHash is valid) but the optional
+// seed-in-place step failed — a partial success, reported 200 with the warning
+// rather than discarding the created torrent behind an error status.
+type CreateTorrentResult struct {
+	OK        bool   `json:"ok"`
+	InfoHash  string `json:"infohash"`
+	Output    string `json:"output"`
+	Seeded    bool   `json:"seeded"`
+	SeedError string `json:"seed_error,omitempty"`
+}
+
 // RateLimitRequest is the PATCH/POST /config/rate-limit body. Pointer
 // fields carry merge semantics: absent = unchanged, present ≤0 = unlimited —
 // the legacy zeroed whatever was omitted (§6).

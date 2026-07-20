@@ -260,6 +260,9 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		}
 		apiOpts.Adder = adapter
 		apiOpts.Control = adapter
+		apiOpts.CreateTorrent = func(p httpapi.CreateTorrentParams) (httpapi.CreateTorrentResult, error) {
+			return createTorrent(eng, d.Identity, opts.Version, p)
+		}
 		apiOpts.Confirm = d.Confirm
 		apiOpts.Flag = d.Flag
 		apiOpts.BloomStat = adapter.bloomStat

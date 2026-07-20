@@ -107,12 +107,30 @@ func ShowAbout(w fyne.Window, d *daemon.Daemon, version, buildDate string) {
 	items := []*widget.FormItem{
 		widget.NewFormItem("Version", widget.NewLabel(orDash(version))),
 		widget.NewFormItem("Built", widget.NewLabel(buildDate)),
-		widget.NewFormItem("Identity", widget.NewLabel(pubKey)),
+		widget.NewFormItem("Identity", identityRow(pubKey)),
 		widget.NewFormItem("BitTorrent port", widget.NewLabel(port)),
 		widget.NewFormItem("HTTP API", widget.NewLabel(api)),
 		widget.NewFormItem("License", widget.NewLabel(licenseLine)),
 	}
 	dialog.ShowForm("About SwartzNet", "Close", "", items, func(bool) {}, w)
+}
+
+// identityRow shows the node's publisher pubkey (wrapped so all 64 hex chars are
+// visible) with a Copy button, so the operator can copy their publisher id. When
+// no identity is loaded it is a plain label.
+func identityRow(pubKey string) fyne.CanvasObject {
+	lbl := widget.NewLabel(pubKey)
+	lbl.Wrapping = fyne.TextWrapBreak
+	if pubKey == "" || pubKey == "unknown" {
+		return lbl
+	}
+	copyBtn := widget.NewButton("Copy", func() {
+		if app := fyne.CurrentApp(); app != nil {
+			app.Clipboard().SetContent(pubKey)
+		}
+	})
+	copyBtn.Importance = widget.LowImportance
+	return container.NewBorder(nil, nil, nil, copyBtn, lbl)
 }
 
 func labeledRow(label string, e *widget.Entry) fyne.CanvasObject {

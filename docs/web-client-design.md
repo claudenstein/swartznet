@@ -108,6 +108,7 @@ a user gesture.
 |------|---------------|---------|------------|
 | [load]/[poll] | `GET /torrents` | — | `torrents[]` → one row each. Row = name (or `infohash[:16]` if empty) · progress bar (`progress`, 0–1) · `status` badge · `bytes_completed`/`size` (humanized) · `active_peers` · `↓ download_rate` `↑ upload_rate` /s. `paused` styles the row; `queued` shows a "queued" chip; `signed_by` present ⇒ a ✓ badge, green if `trusted_publisher`. `indexing` drives the toggle state; `indexed_files`/`index_extracted` (absent⇒0) shown as `idx N/M`. |
 | [action] Add | `POST /torrent` | `{"uri": "<magnet>"}` | On 200 (`{ok, infohash}`) close dialog, immediate `GET /torrents` refresh. On 4xx/5xx show `response.text()` (e.g. `add: <detail>`, `missing 'uri' field`). |
+| [action] Create torrent | `POST /torrents/create` | `{"root","output","trackers"?,"comment"?,"private"?,"sign"?,"seed"?}` — `root`/`output` are paths on the DAEMON machine (it does the hashing). | On 200 (`{ok, infohash, seeded, seed_error?}`) toast + `GET /torrents` refresh; a non-empty `seed_error` means the .torrent was created but the seed leg failed (warn, don't treat as failure). On 4xx show `response.text()`. Handler extends its write deadline so a long hash isn't cut off. |
 | [action] Pause | `POST /torrents/{ih}/pause` | no body | 200 ⇒ refresh. Error text inline on the row. |
 | [action] Resume | `POST /torrents/{ih}/resume` | no body | same. |
 | [action] Remove | `DELETE /torrents/{ih}` (add `?forget=1` when the "also forget index docs" box is checked) | no body | 200 (`{ok, forgot}`) ⇒ refresh + toast noting files kept on disk always. |
@@ -261,6 +262,7 @@ getStatus()                          GET  /status
 getPublish()                         GET  /publish
 getTorrents()                        GET  /torrents
 addTorrent(uri)                      POST /torrent
+createTorrent(body)                  POST /torrents/create
 getFiles(ih)                         GET  /torrents/{ih}/files
 setFilePriority(ih, index, prio)     POST /torrents/{ih}/files/{index}/priority
 pauseTorrent(ih)                     POST /torrents/{ih}/pause

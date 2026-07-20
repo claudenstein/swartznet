@@ -35,6 +35,10 @@ type Options struct {
 	PublisherPubKey func() string
 	// Adder accepts magnet adds; nil ⇒ POST /torrent answers 503.
 	Adder TorrentAdder
+	// CreateTorrent builds a .torrent from a daemon-side path (optionally signing
+	// + seeding it); nil ⇒ POST /torrents/create answers 503. Synchronous: the
+	// handler extends its write deadline so a long hash isn't cut off.
+	CreateTorrent func(CreateTorrentParams) (CreateTorrentResult, error)
 	// Control is the torrent control surface; nil ⇒ its endpoints answer
 	// 503.
 	Control TorrentController
