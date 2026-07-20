@@ -32,13 +32,21 @@ func reconCaps() Capabilities {
 
 // waitRecon blocks until both peers have processed each other's peer_announce
 // and see the reconciliation capability.
+//
+// Generous ceiling: this is a pre-condition wait for the peer_announce
+// round-trip, and under a full multi-package `-race` run the CI runner's CPU is
+// starved (the indexer/extractor packages alone can pin every core for minutes),
+// so the round-trip that finishes in milliseconds locally can take seconds. The
+// loop returns the instant both sides see the capability, so the high ceiling
+// only ever costs wall-clock when the machine is genuinely overloaded.
 func waitRecon(t *testing.T, a, b *Protocol, aAddr, bAddr string) {
 	t.Helper()
-	for i := 0; i < 200; i++ {
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
 		if a.peerHasReconciliation(bAddr) && b.peerHasReconciliation(aAddr) {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("peers never advertised reconciliation to each other")
 }
