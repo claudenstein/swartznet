@@ -47,3 +47,12 @@ Thumbs.db
 
 # Editor artifacts
 .obsidian/
+
+# LaTeX build artifacts (whitepaper). *.out and *.log already covered above.
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.bbl
+*.blg

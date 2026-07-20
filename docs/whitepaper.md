@@ -79,7 +79,7 @@ top-level fields outside the info-dictionary, so the content's identity is
 unchanged and a vanilla client downloads it exactly as before. The signature
 authenticates *who is making a claim about* a torrent, never the torrent itself.
 This separation — stable content identity, attributable claims about it — is what
-lets an untrusted, open network accumulate a index whose entries can still be
+lets an untrusted, open network accumulate an index whose entries can still be
 weighed by their source.
 
 
