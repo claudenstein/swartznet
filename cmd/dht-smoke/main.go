@@ -1,28 +1,3 @@
-// Live mainline DHT smoke test for the SwartzNet publisher path.
-//
-// Spins up an anacrolix/dht/v2 server, lets it bootstrap against
-// the public router nodes for ~10 seconds, then runs an
-// AnacrolixPutter Put cycle for a synthetic keyword and reports
-// the result. Then runs an AnacrolixGetter Get against the same
-// (pubkey, salt) target to confirm the round trip survives the
-// real network.
-//
-// Run from the SwartzNet repo root with:
-//
-//	go run ./cmd/dht-smoke            # single put/get, the original smoke
-//	go run ./cmd/dht-smoke -stress 20 # after the smoke, 20 concurrent puts
-//
-// The -stress mode addresses v1.0.0 open question #2 — "how many
-// concurrent BEP-44 mutable-item publishes can the anacrolix DHT
-// library sustain before it starts getting rate-limited by other
-// DHT nodes?". It reports per-put latency (min / p50 / p95 / max),
-// total success rate, and the get-back round trip from a sample
-// of the successful puts.
-//
-// Exits with status 0 if the single smoke Put + Get succeed. The
-// stress phase always logs results but does not fail the exit
-// status unless ALL puts fail (in which case the DHT path is
-// clearly broken).
 package main
 
 import (
@@ -32,6 +7,7 @@ import (
 	"crypto/rand"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sort"
@@ -40,289 +16,260 @@ import (
 
 	"github.com/anacrolix/dht/v2"
 
+	"github.com/swartznet/swartznet/contracts/dhtschema"
 	"github.com/swartznet/swartznet/internal/dhtindex"
 )
 
-// Command-line flags.
-var (
-	stressN          = flag.Int("stress", 0, "after the basic smoke, run N concurrent mutable-item puts against the live DHT (0 = skip)")
-	stressTimeout    = flag.Duration("stress-timeout", 60*time.Second, "bound for a single stress put")
-	stressConcurrent = flag.Int("stress-concurrent", 8, "maximum concurrent puts during -stress (0 = serial)")
-)
-
-func main() {
-	flag.Parse()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(logger); err != nil {
-		fmt.Fprintln(os.Stderr, "FAIL:", err)
-		os.Exit(1)
-	}
-	fmt.Fprintln(os.Stderr, "PASS")
+// options bundles the tunables so run() is testable without touching globals.
+type options struct {
+	stressN          int
+	stressTimeout    time.Duration
+	stressConcurrent int
+	bootstrapTimeout time.Duration
+	minGoodNodes     int
 }
 
-func run(log *slog.Logger) error {
-	cfg := dht.NewDefaultServerConfig()
-	srv, err := dht.NewServer(cfg)
+func main() {
+	stressN := flag.Int("stress", 0, "after the smoke, run N concurrent BEP-44 Puts against the live DHT (0 = skip)")
+	stressTimeout := flag.Duration("stress-timeout", 60*time.Second, "per-Put timeout during -stress")
+	stressConcurrent := flag.Int("stress-concurrent", 8, "max concurrent Puts during -stress (<=0 = serial)")
+	bootstrapTimeout := flag.Duration("bootstrap-timeout", 30*time.Second, "how long to wait for the routing table to populate")
+	minGoodNodes := flag.Int("min-nodes", 8, "good-node target that ends the bootstrap wait early")
+	flag.Usage = func() {
+		w := flag.CommandLine.Output()
+		fmt.Fprintln(w, "dht-smoke — live mainline-DHT smoke test for the SwartzNet Layer-D publisher path.")
+		fmt.Fprintln(w, "\nBootstraps a DHT server, then (under a fresh ephemeral identity) Puts a synthetic")
+		fmt.Fprintln(w, "keyword value over BEP-44 and Gets it back. Exit 0 = PASS, 1 = FAIL (no nodes, the")
+		fmt.Fprintln(w, "smoke failed, or — with -stress — EVERY stress Put failed).\n\nFlags:")
+		flag.PrintDefaults()
+		fmt.Fprintln(w, "\nExamples:")
+		fmt.Fprintln(w, "  dht-smoke                 # single Put/Get smoke test")
+		fmt.Fprintln(w, "  dht-smoke -stress 20      # then 20 concurrent Puts + latency summary")
+	}
+	flag.Parse()
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	os.Exit(run(context.Background(), log, os.Stderr, options{
+		stressN:          *stressN,
+		stressTimeout:    *stressTimeout,
+		stressConcurrent: *stressConcurrent,
+		bootstrapTimeout: *bootstrapTimeout,
+		minGoodNodes:     *minGoodNodes,
+	}))
+}
+
+// run performs the smoke (and optional stress) and returns a process exit code.
+func run(ctx context.Context, log *slog.Logger, out io.Writer, opts options) int {
+	srv, err := dht.NewServer(dht.NewDefaultServerConfig())
 	if err != nil {
-		return fmt.Errorf("dht.NewServer: %w", err)
+		fmt.Fprintln(out, "FAIL:", fmt.Errorf("dht.NewServer: %w", err))
+		return 1
 	}
 	defer srv.Close()
 
-	log.Info("dht.bootstrap_started")
-	bootstrapCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if _, err := srv.Bootstrap(); err != nil {
 		log.Warn("dht.bootstrap_warn", "err", err)
 	}
-	// Wait for the routing table to populate.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		stats := srv.Stats()
-		log.Info("dht.bootstrap_progress",
-			"good_nodes", stats.GoodNodes,
-			"nodes", stats.Nodes,
-			"outbound", stats.OutboundQueriesAttempted)
-		if stats.GoodNodes >= 8 {
-			break
-		}
-		select {
-		case <-bootstrapCtx.Done():
-		case <-time.After(2 * time.Second):
-		}
-	}
-	stats := srv.Stats()
-	log.Info("dht.bootstrap_done",
-		"good_nodes", stats.GoodNodes,
-		"nodes", stats.Nodes)
-	if stats.GoodNodes < 1 {
-		return fmt.Errorf("no good DHT nodes after bootstrap")
+	waitForNodes(ctx, log, srv, opts.bootstrapTimeout, opts.minGoodNodes)
+	if good := srv.Stats().GoodNodes; good < 1 {
+		fmt.Fprintln(out, "FAIL: no good DHT nodes after bootstrap")
+		return 1
 	}
 
-	// Generate a fresh ephemeral identity for this smoke test.
-	// We don't reuse the user's real publisher key — the goal is
-	// to validate the wire path, not to leak their identity into
-	// the live DHT.
+	// Fresh ephemeral identity — never the user's real publisher key. The goal
+	// is to validate the wire path, not to leak an identity onto the live DHT.
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return fmt.Errorf("ed25519 keygen: %w", err)
+		fmt.Fprintln(out, "FAIL:", fmt.Errorf("ed25519 keygen: %w", err))
+		return 1
 	}
 	log.Info("identity.ephemeral", "pubkey_first_8", fmt.Sprintf("%x", pub[:8]))
 
 	putter, err := dhtindex.NewAnacrolixPutter(srv, priv)
 	if err != nil {
-		return fmt.Errorf("NewAnacrolixPutter: %w", err)
+		fmt.Fprintln(out, "FAIL:", fmt.Errorf("NewAnacrolixPutter: %w", err))
+		return 1
 	}
 	getter, err := dhtindex.NewAnacrolixGetter(srv)
 	if err != nil {
-		return fmt.Errorf("NewAnacrolixGetter: %w", err)
+		fmt.Fprintln(out, "FAIL:", fmt.Errorf("NewAnacrolixGetter: %w", err))
+		return 1
 	}
 
-	keyword := fmt.Sprintf("swartznet_smoke_%d", time.Now().Unix())
-	salt, err := dhtindex.SaltForKeyword(keyword)
+	var pk [32]byte
+	copy(pk[:], pub)
+	if err := smoke(ctx, log, putter, getter, pk); err != nil {
+		fmt.Fprintln(out, "FAIL:", err)
+		return 1
+	}
+
+	if opts.stressN > 0 {
+		sum := runStress(ctx, log, putter, opts)
+		logStress(log, sum)
+		// THE fix: an all-failed stress phase is a hard failure. The legacy tool
+		// logged this as a warning and still exited 0 — a dead DHT path must exit
+		// non-zero. A partial failure is fine (it is the interesting measurement).
+		if stressFailedHard(sum) {
+			fmt.Fprintf(out, "FAIL: all %d stress Puts failed\n", sum.total)
+			return 1
+		}
+	}
+
+	fmt.Fprintln(out, "PASS")
+	return 0
+}
+
+// waitForNodes blocks until the routing table has minGood good nodes or the
+// timeout/ctx elapses, logging progress.
+func waitForNodes(ctx context.Context, log *slog.Logger, srv *dht.Server, timeout time.Duration, minGood int) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		s := srv.Stats()
+		log.Info("dht.bootstrap_progress", "good_nodes", s.GoodNodes, "nodes", s.Nodes, "outbound", s.OutboundQueriesAttempted)
+		if s.GoodNodes >= minGood {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// smoke Puts one synthetic keyword value and Gets it back, verifying the hit.
+func smoke(ctx context.Context, log *slog.Logger, putter *dhtindex.AnacrolixPutter, getter *dhtindex.AnacrolixGetter, pk [32]byte) error {
+	keyword := fmt.Sprintf("swartznet_smoke_%d", time.Now().UnixNano())
+	salt, err := dhtschema.SaltForKeyword(keyword)
 	if err != nil {
 		return fmt.Errorf("SaltForKeyword: %w", err)
 	}
+	value := dhtschema.KeywordValue{Hits: []dhtschema.KeywordHit{{
+		IH: bytes.Repeat([]byte{0xab}, 20), N: "smoke test", S: 1,
+	}}}
 
-	value := dhtindex.KeywordValue{
-		Hits: []dhtindex.KeywordHit{
-			{
-				IH: bytes.Repeat([]byte{0xab}, 20),
-				N:  "smoke test",
-				S:  1,
-			},
-		},
-	}
-
-	putCtx, putCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer putCancel()
-	log.Info("put.start", "keyword", keyword)
-	putStart := time.Now()
+	putCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	start := time.Now()
 	if err := putter.Put(putCtx, salt, value); err != nil {
 		return fmt.Errorf("put: %w", err)
 	}
-	log.Info("put.ok", "elapsed", time.Since(putStart).String())
+	log.Info("put.ok", "keyword", keyword, "elapsed", time.Since(start).String())
 
-	// Now try to read it back. The same DHT server holds the put
-	// locally, so this should succeed even if the put didn't
-	// reach distant nodes — but it also tests the get path end
-	// to end against any remote node that did accept the put.
-	getCtx, getCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer getCancel()
-	var pk32 [32]byte
-	copy(pk32[:], pub)
-	log.Info("get.start", "keyword", keyword)
-	getStart := time.Now()
-	got, err := getter.Get(getCtx, pk32, salt)
+	getCtx, cancel2 := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel2()
+	start = time.Now()
+	got, err := getter.Get(getCtx, pk, salt)
 	if err != nil {
 		return fmt.Errorf("get: %w", err)
 	}
-	log.Info("get.ok",
-		"elapsed", time.Since(getStart).String(),
-		"hits", len(got.Hits))
 	if len(got.Hits) != 1 {
 		return fmt.Errorf("get returned %d hits, want 1", len(got.Hits))
 	}
 	if got.Hits[0].N != "smoke test" {
-		return fmt.Errorf("get returned name %q, want 'smoke test'", got.Hits[0].N)
+		return fmt.Errorf("get returned name %q, want %q", got.Hits[0].N, "smoke test")
 	}
-
-	// Optional: stress phase. Publishes *stressN synthetic
-	// keywords in parallel (respecting stressConcurrent), then
-	// reports a latency summary.
-	if *stressN > 0 {
-		if err := runStress(log, srv, putter, getter, pub); err != nil {
-			log.Warn("stress.error", "err", err)
-			// Do not fail the exit status unless every put failed —
-			// a partial failure is the interesting measurement.
-		}
-	}
+	log.Info("get.ok", "elapsed", time.Since(start).String(), "hits", len(got.Hits))
 	return nil
 }
 
-// stressResult holds the outcome of one concurrent put.
-type stressResult struct {
-	keyword string
-	elapsed time.Duration
-	err     error
+// stressSummary is the aggregate outcome of the stress phase.
+type stressSummary struct {
+	total     int
+	ok        int
+	latencies []time.Duration // successful puts only, sorted ascending
+	errBucket map[string]int
+	wall      time.Duration
 }
 
-// runStress publishes stressN synthetic keywords in parallel
-// against the live DHT and reports per-put latency + success
-// rate. Addresses the v1.0.0 open question about BEP-44 behavior
-// under concurrent load.
-func runStress(
-	log *slog.Logger,
-	srv *dht.Server,
-	putter *dhtindex.AnacrolixPutter,
-	getter *dhtindex.AnacrolixGetter,
-	pub ed25519.PublicKey,
-) error {
-	total := *stressN
-	concurrency := *stressConcurrent
-	if concurrency <= 0 {
-		concurrency = 1
+// runStress issues opts.stressN concurrent Puts (bounded by stressConcurrent)
+// and returns the aggregated outcome.
+func runStress(ctx context.Context, log *slog.Logger, putter *dhtindex.AnacrolixPutter, opts options) stressSummary {
+	total := opts.stressN
+	conc := opts.stressConcurrent
+	if conc <= 0 {
+		conc = 1
 	}
-	if concurrency > total {
-		concurrency = total
+	if conc > total {
+		conc = total
 	}
-	log.Info("stress.start",
-		"total_puts", total,
-		"concurrency", concurrency,
-		"per_put_timeout", stressTimeout.String())
+	log.Info("stress.start", "total_puts", total, "concurrency", conc, "per_put_timeout", opts.stressTimeout.String())
 
-	sem := make(chan struct{}, concurrency)
-	results := make([]stressResult, total)
+	type result struct {
+		elapsed time.Duration
+		err     error
+	}
+	results := make([]result, total)
+	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	start := time.Now()
-
 	for i := 0; i < total; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
 			keyword := fmt.Sprintf("swartznet_stress_%d_%d", time.Now().UnixNano(), idx)
-			salt, err := dhtindex.SaltForKeyword(keyword)
+			salt, err := dhtschema.SaltForKeyword(keyword)
 			if err != nil {
-				results[idx] = stressResult{keyword: keyword, err: err}
+				results[idx] = result{err: err}
 				return
 			}
-			value := dhtindex.KeywordValue{
-				Hits: []dhtindex.KeywordHit{{
-					IH: bytes.Repeat([]byte{byte(idx)}, 20),
-					N:  fmt.Sprintf("stress hit %d", idx),
-					S:  1,
-				}},
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), *stressTimeout)
+			value := dhtschema.KeywordValue{Hits: []dhtschema.KeywordHit{{
+				IH: bytes.Repeat([]byte{byte(idx)}, 20), N: fmt.Sprintf("stress hit %d", idx), S: 1,
+			}}}
+			pctx, cancel := context.WithTimeout(ctx, opts.stressTimeout)
 			defer cancel()
-			putStart := time.Now()
-			err = putter.Put(ctx, salt, value)
-			results[idx] = stressResult{
-				keyword: keyword,
-				elapsed: time.Since(putStart),
-				err:     err,
-			}
+			t0 := time.Now()
+			err = putter.Put(pctx, salt, value)
+			results[idx] = result{elapsed: time.Since(t0), err: err}
 		}(i)
 	}
 	wg.Wait()
-	wallclock := time.Since(start)
 
-	// Aggregate: success count, latency distribution, error list.
-	var ok int
-	latencies := make([]time.Duration, 0, total)
-	errCounts := make(map[string]int)
+	sum := stressSummary{total: total, errBucket: map[string]int{}, wall: time.Since(start)}
 	for _, r := range results {
 		if r.err == nil {
-			ok++
-			latencies = append(latencies, r.elapsed)
+			sum.ok++
+			sum.latencies = append(sum.latencies, r.elapsed)
 		} else {
-			errCounts[r.err.Error()]++
+			sum.errBucket[r.err.Error()]++
 		}
 	}
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	sort.Slice(sum.latencies, func(i, j int) bool { return sum.latencies[i] < sum.latencies[j] })
+	return sum
+}
 
-	pick := func(p float64) time.Duration {
-		if len(latencies) == 0 {
-			return 0
+// stressFailedHard reports whether the stress phase is a HARD failure that must
+// fail the exit code: puts were attempted and every one failed. A partial
+// failure (ok > 0) is not a hard failure — it is the interesting measurement.
+// This is the §6 fix in one place: the legacy tool never applied it, so a fully
+// dead DHT path still exited 0.
+func stressFailedHard(sum stressSummary) bool {
+	return sum.total > 0 && sum.ok == 0
+}
+
+// logStress emits the stress summary + latency distribution.
+func logStress(log *slog.Logger, s stressSummary) {
+	rate := 0.0
+	if s.total > 0 {
+		rate = 100 * float64(s.ok) / float64(s.total)
+	}
+	log.Info("stress.summary", "total", s.total, "success", s.ok, "fail", s.total-s.ok,
+		"success_rate", fmt.Sprintf("%.1f%%", rate), "wall_clock", s.wall.String())
+	if len(s.latencies) > 0 {
+		pick := func(p float64) time.Duration {
+			return s.latencies[int(float64(len(s.latencies)-1)*p)]
 		}
-		idx := int(float64(len(latencies)-1) * p)
-		return latencies[idx]
+		log.Info("stress.latency", "min", s.latencies[0].String(), "p50", pick(0.50).String(),
+			"p95", pick(0.95).String(), "max", s.latencies[len(s.latencies)-1].String())
 	}
-	log.Info("stress.summary",
-		"total", total,
-		"success", ok,
-		"fail", total-ok,
-		"success_rate", fmt.Sprintf("%.1f%%", 100*float64(ok)/float64(total)),
-		"wall_clock", wallclock.String(),
-	)
-	if ok > 0 {
-		log.Info("stress.latency",
-			"min", latencies[0].String(),
-			"p50", pick(0.50).String(),
-			"p95", pick(0.95).String(),
-			"max", latencies[len(latencies)-1].String(),
-		)
-	}
-	for msg, n := range errCounts {
+	for msg, n := range s.errBucket {
 		log.Warn("stress.error_bucket", "count", n, "err", msg)
 	}
-	// Final DHT routing stats after the load, for context on
-	// whether the stress mutated the routing table visibly.
-	s := srv.Stats()
-	log.Info("stress.dht_after",
-		"good_nodes", s.GoodNodes,
-		"nodes", s.Nodes,
-		"outbound_attempted", s.OutboundQueriesAttempted,
-	)
-
-	if ok == 0 {
-		return fmt.Errorf("stress: all %d puts failed", total)
-	}
-
-	// Sanity: pick the first successful keyword and round-trip
-	// it back via Get. If this fails the item may have expired or
-	// not propagated; log but don't fail.
-	for i, r := range results {
-		if r.err != nil {
-			continue
-		}
-		salt, err := dhtindex.SaltForKeyword(r.keyword)
-		if err != nil {
-			continue
-		}
-		var pk32 [32]byte
-		copy(pk32[:], pub)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, err = getter.Get(ctx, pk32, salt)
-		cancel()
-		if err != nil {
-			log.Warn("stress.roundtrip_fail", "idx", i, "keyword", r.keyword, "err", err)
-		} else {
-			log.Info("stress.roundtrip_ok", "idx", i, "keyword", r.keyword)
-		}
-		break
-	}
-	return nil
 }

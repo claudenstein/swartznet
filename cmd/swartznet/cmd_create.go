@@ -6,136 +6,126 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
+	"path/filepath"
 
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/identity"
 )
 
-// cmdCreate implements `swartznet create <root> -o <output.torrent>`.
-// Builds a new .torrent file from the content at <root> (file or
-// directory), writes it to <output>, and prints the resulting
-// infohash.
-//
-// Unlike search/status/flag, this command does NOT talk to a
-// running daemon — piece hashing is synchronous and CPU-bound, so
-// doing it in-process is simpler and avoids shoving multi-GiB file
-// contents through a local HTTP pipe.
+// cmdCreate builds a .torrent, optionally signs it, and optionally seeds the
+// content in place. It is a one-shot tool: it never constructs daemon.New,
+// and without --seed it builds no engine at all — a pure hashing run.
 func cmdCreate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var (
-		out          string
-		name         string
-		pieceKiB     int64
-		trackers     stringSliceFlag
-		webseeds     stringSliceFlag
-		comment      string
-		private      bool
-		startSeed    bool
-		dataDir      string
-		sign         bool
-		identityPath string
-	)
-	fs.StringVar(&out, "o", "", "output .torrent path (required)")
-	fs.StringVar(&name, "name", "", "override the info.name field (default: basename of root)")
-	fs.Int64Var(&pieceKiB, "piece-kib", 0, "piece length in KiB (0 = auto)")
+	out := fs.String("o", "", "output .torrent path (required)")
+	name := fs.String("name", "", "override the info.name field (default: basename of root)")
+	pieceKiB := fs.Int64("piece-kib", 0, "piece length in KiB (0 = auto)")
+	var trackers, webseeds stringSliceFlag
 	fs.Var(&trackers, "tracker", "tracker announce URL (repeat for multiple)")
 	fs.Var(&webseeds, "webseed", "webseed URL (repeat for multiple)")
-	fs.StringVar(&comment, "comment", "", "optional torrent comment")
-	fs.BoolVar(&private, "private", false, "mark as private (BEP-27: disables DHT/PEX)")
-	fs.BoolVar(&startSeed, "seed", false, "after creation, start seeding the content")
-	fs.StringVar(&dataDir, "data-dir", "", "data directory for seeding (required if --seed, must contain the root)")
-	fs.BoolVar(&sign, "sign", false, "sign the .torrent file with our ed25519 identity so downloaders running SwartzNet can verify the publisher")
-	fs.StringVar(&identityPath, "identity", "", "path to the ed25519 identity.key file (defaults to ~/.local/share/swartznet/identity.key)")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage
+	comment := fs.String("comment", "", "optional torrent comment")
+	private := fs.Bool("private", false, "mark as private (BEP-27: disables DHT/PEX)")
+	seed := fs.Bool("seed", false, "after creation, start seeding the content")
+	dataDir := fs.String("data-dir", "", "with --seed, directory for session state (content is seeded in place from <root>; default: ~/.local/share/swartznet)")
+	signFlag := fs.Bool("sign", false, "sign the .torrent file with our ed25519 identity so downloaders running SwartzNet can verify the publisher")
+	identityPath := fs.String("identity", "", "path to the ed25519 identity.key file (load-only unless it is the default path, which is auto-created)")
+	noDHT := fs.Bool("no-dht", false, "with --seed, disable the DHT and gateway port mapping (direct peers only)")
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
+		return parseErrExit(err)
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		fmt.Fprintln(stderr, "usage: swartznet create <file-or-folder> -o <output.torrent>")
 		return exitUsage
 	}
-	root := fs.Arg(0)
-	if out == "" {
+	root := pos[0]
+	if *out == "" {
 		fmt.Fprintln(stderr, "swartznet: -o <output.torrent> is required")
 		return exitUsage
 	}
+	if *identityPath != "" && !*signFlag {
+		// Fail closed: silently ignoring would let the user believe their
+		// chosen key signed the torrent.
+		fmt.Fprintln(stderr, "swartznet: --identity is only used with --sign (pass --sign to sign, or drop --identity)")
+		return exitUsage
+	}
 
-	// Build CreateTorrentOptions.
+	// Guard the multiply: an absurd --piece-kib must fail closed, not wrap
+	// around int64 and sneak past the engine's power-of-two validation.
+	if *pieceKiB < 0 || *pieceKiB > (1<<40) {
+		fmt.Fprintln(stderr, "swartznet: --piece-kib out of range")
+		return exitUsage
+	}
+
 	opts := engine.CreateTorrentOptions{
 		Root:        root,
-		Name:        name,
-		PieceLength: pieceKiB * 1024,
-		Trackers:    []string(trackers),
-		WebSeeds:    []string(webseeds),
-		Private:     private,
-		Comment:     comment,
+		Name:        *name,
+		PieceLength: *pieceKiB * 1024,
+		Trackers:    trackers,
+		WebSeeds:    webseeds,
+		Private:     *private,
+		Comment:     *comment,
 		CreatedBy:   "swartznet " + Version,
 	}
 
-	// Load the signing identity if --sign was requested. We load
-	// BEFORE spinning up the engine so a bad key path fails fast
-	// without starting piece hashing.
-	if sign {
-		cfg := config.Default()
-		path := identityPath
-		if path == "" {
-			path = cfg.IdentityPath
+	if *signFlag {
+		// Identity loads BEFORE any hashing so a bad key path fails fast.
+		// Explicit non-default paths are load-only (never mint a key that
+		// would orphan the torrent under an untrusted pubkey).
+		idPath := *identityPath
+		if idPath == "" {
+			idPath = config.Default().IdentityPath
 		}
-		id, err := identity.LoadOrCreate(path)
+		allowCreate := filepath.Clean(idPath) == config.Default().IdentityPath
+		id, err := identity.Load(idPath, allowCreate)
 		if err != nil {
 			return reportRunErr(fmt.Errorf("load identity: %w", err), stderr)
 		}
-		opts.SignWith = id.PrivateKey
+		signer := id.Signer()
+		opts.SignWith = &signer
 		fmt.Fprintf(stdout, "Signing with identity %s\n", id.PublicKeyHex())
 	}
 
-	// We don't need a running engine for CreateTorrent, but the
-	// current API requires an *Engine receiver. Spin up a minimal
-	// one (no DHT, no index, no upload) — it's about 500 ms of
-	// overhead on my laptop, well worth the code simplicity.
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := config.Default()
-	if dataDir != "" {
-		cfg.DataDir = dataDir
+	fmt.Fprintf(stdout, "Hashing %s...\n", root)
+	ihHex, rawBytes, err := engine.CreateTorrentFile(opts, *out)
+	if err != nil {
+		return reportRunErr(err, stderr)
 	}
-	cfg.DisableDHT = true
-	cfg.ListenPort = 0
-	cfg.NoUpload = !startSeed
+	fmt.Fprintf(stdout, "✓ Created %s\n", *out)
+	fmt.Fprintf(stdout, "  InfoHash: %s\n", ihHex)
+	if !*seed {
+		return exitOK
+	}
 
-	eng, err := engine.New(context.Background(), cfg, log)
+	// --seed: a daemonless engine (no API, no indexer) with DHT + upload on
+	// so a trackerless seed is discoverable; ephemeral port so a running
+	// daemon on the default port is never clashed with.
+	cfg := config.Default()
+	if *dataDir != "" {
+		cfg.DataDir = *dataDir
+	}
+	cfg.ListenPort = 0
+	cfg.DisableDHT = *noDHT
+	cfg.DisablePortForwarding = *noDHT // a DHT-less seed is a local seed
+	cfg.NoUpload = false
+	eng, err := engine.New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		return reportRunErr(fmt.Errorf("create engine: %w", err), stderr)
 	}
 	defer eng.Close()
 
-	fmt.Fprintf(stdout, "Hashing %s...\n", root)
-	ih, mi, err := eng.CreateTorrentFile(opts, out)
-	if err != nil {
-		return reportRunErr(err, stderr)
+	// The FINAL (possibly signed) bytes are what get seeded and persisted,
+	// so the creator's own node shows SignedBy — the legacy re-marshaled the
+	// unsigned struct here and never saw its own signature.
+	if _, err := eng.AddTorrentBytesSeedFrom(rawBytes, root); err != nil {
+		fmt.Fprintf(stderr, "warning: seed start failed: %v\n", err)
+		return exitRuntime
 	}
-	fmt.Fprintf(stdout, "✓ Created %s\n", out)
-	fmt.Fprintf(stdout, "  InfoHash: %s\n", ih)
-
-	if startSeed {
-		if _, err := eng.AddTorrentMetaInfo(mi); err != nil {
-			fmt.Fprintf(stderr, "warning: seed start failed: %v\n", err)
-			return exitRuntime
-		}
-		fmt.Fprintln(stdout, "Seeding... (Ctrl-C to stop)")
-		ctx, cancel := signalContext(context.Background())
-		defer cancel()
-		<-ctx.Done()
-	}
-	return exitOK
-}
-
-// stringSliceFlag implements flag.Value for repeated string flags.
-type stringSliceFlag []string
-
-func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
-func (s *stringSliceFlag) Set(v string) error {
-	*s = append(*s, v)
-	return nil
+	fmt.Fprintln(stdout, "Seeding... (Ctrl-C to stop)")
+	ctx, cancel := signalContext(context.Background())
+	defer cancel()
+	<-ctx.Done()
+	return reportRunErr(ctx.Err(), stderr)
 }

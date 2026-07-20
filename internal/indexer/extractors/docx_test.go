@@ -14,9 +14,9 @@ import (
 //   - word/document.xml with the test paragraphs
 //
 // Real DOCX files have many more parts (styles, fonts, theme,
-// settings, web settings, footnotes, etc.). The extractor only
-// touches word/document.xml so this minimal shape exercises the
-// real code path without committing binary fixtures.
+// settings, footnotes, etc.). The extractor only touches
+// word/document.xml so this minimal shape exercises the real code
+// path without committing binary fixtures.
 func buildMinimalDOCX(t *testing.T, paragraphs []string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -156,8 +156,7 @@ func TestDOCXDispatchRoutes(t *testing.T) {
 func TestDOCXHandlesParagraphBoundaries(t *testing.T) {
 	t.Parallel()
 	// Two paragraphs should produce a paragraph boundary (i.e.
-	// the chunker can see them as distinct). Verify by checking
-	// that the extracted text contains a "\n\n" between them.
+	// the chunker can see them as distinct).
 	data := buildMinimalDOCX(t, []string{
 		"First paragraph.",
 		"Second paragraph.",

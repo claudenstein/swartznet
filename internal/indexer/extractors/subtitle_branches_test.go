@@ -63,5 +63,4 @@ func TestSubtitleExtractorScannerErrorPropagates(t *testing.T) {
 	}
 }
 
-// satisfy io import.
 var _ io.Reader = (*errReader)(nil)

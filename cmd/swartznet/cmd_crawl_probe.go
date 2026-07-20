@@ -13,20 +13,16 @@ import (
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/krpc"
+
 	"github.com/swartznet/swartznet/internal/dhtindex"
 )
 
-// cmdCrawlProbe implements `swartznet crawl-probe` — a
-// diagnostic one-shot that issues a single BEP-51
-// sample_infohashes query against a DHT address and prints the
-// response. Pure ops tooling: no running daemon needed, no state
-// touched. Useful for validating that a node supports BEP-51
-// and for hand-inspecting the samples it volunteers during
-// Channel-B crawler development.
-//
-// The node ID target defaults to a fresh random 20-byte string
-// each invocation so the sampled "slice" of the address space
-// varies between runs.
+// cmdCrawlProbe is `swartznet crawl-probe` — a diagnostic one-shot that issues
+// a single BEP-51 sample_infohashes query against a DHT address and prints the
+// response. Pure ops tooling: no running daemon, no state touched. Useful for
+// confirming a node speaks BEP-51 and for hand-inspecting the samples it
+// volunteers. The node-ID target defaults to a fresh random 20 bytes each run
+// so the sampled slice of the keyspace varies between invocations.
 func cmdCrawlProbe(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("crawl-probe", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -37,11 +33,11 @@ func cmdCrawlProbe(args []string, stdout, stderr io.Writer) int {
 		asJSON    bool
 	)
 	fs.StringVar(&addrStr, "addr", "", "DHT node address to probe (host:port, required)")
-	fs.StringVar(&targetHex, "target", "", "20-byte hex target (default: random)")
+	fs.StringVar(&targetHex, "target", "", "20-byte hex target (default: random each run)")
 	fs.IntVar(&timeoutMs, "timeout-ms", 5000, "query timeout in milliseconds")
 	fs.BoolVar(&asJSON, "json", false, "emit JSON instead of human text")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if addrStr == "" {
 		fmt.Fprintln(stderr, "swartznet crawl-probe: --addr is required")
@@ -68,19 +64,19 @@ func cmdCrawlProbe(args []string, stdout, stderr io.Writer) int {
 		copy(target[:], raw)
 	}
 
-	// Spin up a local loopback DHT server just long enough to
-	// issue the query. NoSecurity so we can use an arbitrary
-	// node ID; Passive so we don't respond to incoming queries.
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	// A throwaway loopback DHT server, just long enough to issue the query.
+	// NoSecurity so we may use an arbitrary node ID; Passive so we never
+	// answer inbound queries.
+	// Bind 0.0.0.0 (not loopback): the kernel refuses to send from a 127.0.0.1
+	// source to a non-loopback destination, so a loopback-bound socket cannot
+	// probe any real DHT node — the tool's entire purpose. (The crawl command
+	// binds 0.0.0.0 for the same reason.)
+	conn, err := net.ListenPacket("udp", "0.0.0.0:0")
 	if err != nil {
 		return reportRunErr(fmt.Errorf("bind loopback: %w", err), stderr)
 	}
 	defer conn.Close()
-	srv, err := dht.NewServer(&dht.ServerConfig{
-		Conn:       conn,
-		NoSecurity: true,
-		Passive:    true,
-	})
+	srv, err := dht.NewServer(&dht.ServerConfig{Conn: conn, NoSecurity: true, Passive: true})
 	if err != nil {
 		return reportRunErr(fmt.Errorf("dht.NewServer: %w", err), stderr)
 	}
@@ -96,8 +92,8 @@ func cmdCrawlProbe(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if asJSON {
-		// krpc.ID doesn't marshal cleanly to JSON — render
-		// samples + nodes as plain hex strings.
+		// krpc.ID does not marshal cleanly to JSON — render samples + nodes as
+		// plain hex strings.
 		out := struct {
 			Addr     string   `json:"addr"`
 			Target   string   `json:"target"`
@@ -126,9 +122,9 @@ func cmdCrawlProbe(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "BEP-51 sample_infohashes probe\n")
-	fmt.Fprintf(stdout, "  peer:       %s\n", addrStr)
-	fmt.Fprintf(stdout, "  target:     %s\n", hex.EncodeToString(target[:]))
-	fmt.Fprintf(stdout, "  interval:   %ds\n", res.Interval)
+	fmt.Fprintf(stdout, "  peer:        %s\n", addrStr)
+	fmt.Fprintf(stdout, "  target:      %s\n", hex.EncodeToString(target[:]))
+	fmt.Fprintf(stdout, "  interval:    %ds\n", res.Interval)
 	fmt.Fprintf(stdout, "  num tracked: %d\n", res.Num)
 	fmt.Fprintf(stdout, "  samples (%d):\n", len(res.Samples))
 	for _, s := range res.Samples {

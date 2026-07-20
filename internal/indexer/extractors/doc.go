@@ -1,26 +1,22 @@
 // Package extractors holds SwartzNet's pluggable text-extraction backends.
 //
-// An Extractor reads a file (as an io.Reader, so we can stream without
-// buffering entire movies into RAM) and returns a sequence of text chunks
+// An Extractor reads a file (as an io.Reader, so callers can stream without
+// buffering entire files into RAM) and returns a sequence of text chunks
 // suitable for the full-text index. Which Extractor handles a given file is
-// decided by the Dispatch function, which keys off MIME type and file
-// extension.
+// decided by Dispatch, which keys off MIME type and file extension.
 //
-// The package is deliberately minimal in M2.2a:
+// Every extractor is a self-contained file in this package; register.go
+// holds the single ordered registration list. The pipeline in
+// internal/indexer feeds completed files into Dispatch; it does not know
+// or care about specific extractor implementations.
 //
-//   - PlaintextExtractor for text files, source code, subtitles, etc.
-//   - Dispatch handles content-type detection and Extractor selection.
+// Hardening invariants every extractor must keep:
 //
-// Later milestones (M2.2b / M2.2c / M2.3) will add:
-//
-//   - Subtitle-aware extractor that strips timestamps from SRT/VTT.
-//   - Source-code extractor that preserves symbols and keeps long lines.
-//   - PDF extractor (via an external text-extraction library).
-//   - EPUB extractor (via an unzip + XHTML parse).
-//
-// Every new extractor is a self-contained file in this package that adds
-// an init() registration to the Dispatch table. The pipeline in
-// internal/indexer reads FileCompleteEvent events and fans them into
-// Dispatch; it does not know or care about specific extractor
-// implementations.
+//   - Input reads are bounded (io.LimitReader against maxBytes or a
+//     per-extractor cap); decompressed streams from zip containers are
+//     bounded separately (maxDocTextBytes) because DEFLATE amplifies.
+//   - A genuinely empty file returns (nil, nil), never an error.
+//   - Library panics are converted to errors by an in-extractor recover
+//     where the underlying parser is known to panic; the pipeline keeps
+//     its own recover as the outer net.
 package extractors

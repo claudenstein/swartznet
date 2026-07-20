@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"sync"
@@ -44,13 +45,22 @@ const BloomDefaultFalsePositiveRate = 0.01
 
 // bloomFileMagic identifies a Bloom filter file on disk. The
 // header is: magic[4] + version[2] + k[2] + m[8] + bitsLen[8],
-// followed by the raw bitset.
+// followed by the raw bitset. This on-disk format is a frozen
+// golden format; existing known-good.bloom files must remain
+// byte-compatible.
 const bloomFileMagic = "SBLM" // "SwartzNet BLooM"
 const bloomFileVersion uint16 = 1
 
+// maxBloomBits caps the bit count m parsed from an untrusted/corrupt bloom file
+// header, bounding readBloom's allocation to a recoverable error instead of an
+// OOM/panic. ~2.1 billion bits (~256 MiB of words) is ~200x the ~9.6M-bit
+// default filter — far above any legitimate file.
+const maxBloomBits uint64 = 1 << 31
+
 // NewBloomFilter creates an empty in-memory Bloom filter sized for
 // the given expected item count and target false-positive rate.
-// Pass 0 for either argument to use the package defaults.
+// Pass 0 for either argument to use the package defaults; fpRate
+// outside (0,1) also falls back to the default rate.
 func NewBloomFilter(expectedItems int, fpRate float64) *BloomFilter {
 	if expectedItems <= 0 {
 		expectedItems = BloomDefaultExpectedItems
@@ -68,7 +78,8 @@ func NewBloomFilter(expectedItems int, fpRate float64) *BloomFilter {
 
 // LoadOrCreateBloom opens an existing Bloom filter at path or
 // creates a fresh one with default parameters if the file is
-// absent. Errors only on I/O or version mismatch.
+// absent. Errors only on I/O or on a header that fails the
+// fail-closed parse guards. Empty path is rejected.
 func LoadOrCreateBloom(path string) (*BloomFilter, error) {
 	if path == "" {
 		return nil, errors.New("reputation: empty bloom path")
@@ -102,11 +113,14 @@ func (b *BloomFilter) Save() error {
 	if b.path == "" {
 		return nil
 	}
-	tmp := b.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	// A UNIQUE tempfile (not a fixed "<path>.tmp") so concurrent Save calls —
+	// e.g. the periodic checkpoint racing a user confirm/flag — never share a
+	// tmp inode and tear each other's writes into a corrupt file.
+	f, err := os.CreateTemp(filepath.Dir(b.path), filepath.Base(b.path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("reputation: write bloom: %w", err)
 	}
+	tmp := f.Name()
 	if err := writeBloom(f, b); err != nil {
 		f.Close()
 		os.Remove(tmp)
@@ -126,7 +140,7 @@ func (b *BloomFilter) Save() error {
 }
 
 // Add records the given infohash as known-good. Subsequent Test
-// calls with the same infohash will always return true.
+// calls with the same infohash will always return true. Idempotent.
 func (b *BloomFilter) Add(infohash []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -137,7 +151,7 @@ func (b *BloomFilter) Add(infohash []byte) {
 
 // Test reports whether the infohash is "known-good" (probably).
 // True is "probably yes" (subject to the configured FP rate),
-// false is "definitely no".
+// false is "definitely no". One-sided: no false negatives.
 func (b *BloomFilter) Test(infohash []byte) bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -157,14 +171,15 @@ func (b *BloomFilter) PopulationCount() uint64 {
 	defer b.mu.RUnlock()
 	var n uint64
 	for _, w := range b.bits {
-		n += uint64(popcountUint64(w))
+		n += uint64(bits.OnesCount64(w))
 	}
 	return n
 }
 
 // EstimatedItems is a back-of-envelope estimate of how many distinct
 // items have been added to the filter, derived from the population
-// count. Accurate when the filter is below ~50% saturation.
+// count. Accurate when the filter is below ~50% saturation; returns
+// +Inf once every bit is set.
 func (b *BloomFilter) EstimatedItems() float64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -172,9 +187,13 @@ func (b *BloomFilter) EstimatedItems() float64 {
 	k := float64(b.k)
 	var pop uint64
 	for _, w := range b.bits {
-		pop += uint64(popcountUint64(w))
+		pop += uint64(bits.OnesCount64(w))
 	}
 	x := float64(pop)
+	if x == 0 {
+		// -m/k * log(1) computes to negative zero; report a clean 0.
+		return 0
+	}
 	if x >= m {
 		return math.Inf(1)
 	}
@@ -195,18 +214,21 @@ func (b *BloomFilter) HashFunctions() uint64 {
 	return b.k
 }
 
-// indices returns the k bit positions for the given input. Uses
-// the well-known double-hashing trick: instead of running k
-// independent hash functions, we compute two FNV hashes and
-// combine them as h1 + i*h2 to derive k indices. Empirically this
-// gives Bloom-filter performance indistinguishable from k true
-// hashes.
+// indices returns the k bit positions for the given input. This is
+// a frozen derivation and must not change: two FNV-64a hashes are
+// combined via the Kirsch-Mitzenmacher double-hashing trick as
+// h1 + i*h2. h1 is FNV-64a(input); h2 continues the same hash state
+// with one appended 0xff byte, then has its low bit forced set so
+// the stride is odd (guaranteeing distinct indices rather than a
+// collapse onto h1 % m). Any change here breaks byte-compatibility
+// with existing known-good.bloom files.
 func (b *BloomFilter) indices(input []byte) []uint64 {
 	h := fnv.New64a()
 	h.Write(input)
 	h1 := h.Sum64()
 	h.Write([]byte{0xff})
 	h2 := h.Sum64()
+	h2 |= 1
 
 	out := make([]uint64, b.k)
 	for i := uint64(0); i < b.k; i++ {
@@ -221,6 +243,10 @@ func (b *BloomFilter) indices(input []byte) []uint64 {
 //
 //	m = -n * ln(p) / (ln(2)^2)
 //	k = (m / n) * ln(2)
+//
+// Both are rounded up (math.Ceil) and floored to 1. k is derived
+// from the pre-ceil float mF, not the ceiled m; this affects the
+// default k and is part of the frozen sizing contract.
 func optimalSize(n int, p float64) (m, k uint64) {
 	mF := -float64(n) * math.Log(p) / (math.Ln2 * math.Ln2)
 	kF := mF / float64(n) * math.Ln2
@@ -235,16 +261,10 @@ func optimalSize(n int, p float64) (m, k uint64) {
 	return
 }
 
-// popcountUint64 returns the number of set bits in x. Plain
-// software implementation; the compiler emits POPCNT on amd64.
-func popcountUint64(x uint64) int {
-	x = x - ((x >> 1) & 0x5555555555555555)
-	x = (x & 0x3333333333333333) + ((x >> 2) & 0x3333333333333333)
-	x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0f
-	return int((x * 0x0101010101010101) >> 56)
-}
-
 // readBloom decodes a BloomFilter from r per the on-disk format.
+// Parse guards fail closed: a corrupt header (bad magic, wrong
+// version, m==0 or k==0, or a bitsLen that disagrees with m) is
+// rejected here rather than panicking on the first Add/Test.
 func readBloom(r io.Reader) (*BloomFilter, error) {
 	var hdr [4 + 2 + 2 + 8 + 8]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -260,7 +280,28 @@ func readBloom(r io.Reader) (*BloomFilter, error) {
 	k := uint64(binary.LittleEndian.Uint16(hdr[6:8]))
 	m := binary.LittleEndian.Uint64(hdr[8:16])
 	bitsLen := binary.LittleEndian.Uint64(hdr[16:24])
-	if bitsLen > (m+63)/64+1 {
+	// m and k must be positive: indices() divides by m and loops k
+	// times, so a corrupt/truncated header with m=0 (or k=0) would
+	// otherwise panic with a divide-by-zero on the next Test/Add.
+	if m == 0 || k == 0 {
+		return nil, fmt.Errorf("reputation: invalid bloom params m=%d k=%d", m, k)
+	}
+	// Cap m from the UNTRUSTED header before the make() below. Without this, a
+	// crafted or bit-rot-corrupted file whose header is internally consistent
+	// (e.g. m=2^60, bitsLen=(2^60+63)/64) passes every other guard and reaches
+	// make([]uint64, bitsLen) — a multi-terabyte alloc → runtime OOM, or a
+	// makeslice-len-out-of-range panic. Neither is an error return, so it bypasses
+	// loadSpamResistance's fail-safe (which only downgrades ERRORS) and crash-loops
+	// the daemon on startup. Returning an error here keeps it fail-SAFE. The cap
+	// (~2.1 billion bits, ~256 MiB) is ~200x the ~9.6M-bit default filter — far
+	// above any legitimate file.
+	if m > maxBloomBits {
+		return nil, fmt.Errorf("reputation: bloom m=%d exceeds cap %d (corrupt file)", m, maxBloomBits)
+	}
+	// The writer always emits exactly (m+63)/64 words. Anything else —
+	// undersized (truncated/corrupt file, would panic out-of-bounds on
+	// the first Add/Test) or oversized — is rejected at parse time.
+	if bitsLen != (m+63)/64 {
 		return nil, fmt.Errorf("reputation: bitsLen %d inconsistent with m %d", bitsLen, m)
 	}
 	bits := make([]uint64, bitsLen)
@@ -275,7 +316,7 @@ func readBloom(r io.Reader) (*BloomFilter, error) {
 }
 
 // writeBloom encodes a BloomFilter to w per the on-disk format.
-// The caller already holds b.mu.RLock().
+// The caller already holds b.mu.RLock(). k must fit in a u16.
 func writeBloom(w io.Writer, b *BloomFilter) error {
 	var hdr [4 + 2 + 2 + 8 + 8]byte
 	copy(hdr[0:4], bloomFileMagic)

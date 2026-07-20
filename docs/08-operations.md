@@ -400,7 +400,12 @@ that walks you through every field in a `.torrent` file:
   - **Output .torrent path** — where to save the .torrent file.
   - **Start seeding immediately** — when checked, the newly-created
     torrent is added to the engine and seeded from the same Root
-    path right away.
+    path right away. Seeding reads the bytes in place from their
+    real on-disk location, so it works even when you edit the
+    **Name** field to rename the torrent (the storage tracks the
+    real basename, not the display name). The CLI equivalent is
+    `swartznet create --seed <root>`, which likewise seeds in place
+    regardless of `--name`.
 
 Piece hashing is synchronous and I/O-bound. A ~1 GiB folder takes
 seconds; 100 GiB takes minutes. A "Hashing pieces..." modal with

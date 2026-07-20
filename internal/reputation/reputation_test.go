@@ -173,7 +173,7 @@ func repeat(pk reputation.PubKeyHex, n int) []reputation.PubKeyHex {
 	return out
 }
 
-// TestTrackerSeededBypassesThreshold covers the M13c cold-start
+// TestTrackerSeededBypassesThreshold covers the cold-start
 // heavy-tail rule: a freshly-seeded pubkey with zero traffic
 // should pass a MinIndexerScore threshold that a neutral unknown
 // pubkey would fail.

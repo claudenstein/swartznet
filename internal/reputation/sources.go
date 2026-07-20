@@ -6,45 +6,37 @@ import (
 	"sync"
 )
 
-// SourceTracker remembers, for each recently-seen infohash, the
-// set of indexer pubkeys that returned it as a hit. The httpapi
-// flag handler reads from it so `swartznet flag <ih>` only
-// demotes the indexers that actually claimed the hash, instead
-// of falling back to the M5d heuristic of demoting every known
-// indexer.
+// SourceTracker remembers, for each recently-seen infohash, the set
+// of indexer pubkeys that returned it as a hit. The flag path reads
+// from it so flagging an infohash only demotes the indexers that
+// actually claimed that hash, instead of a blanket "demote every
+// indexer" fallback.
 //
-// The tracker is bounded with LRU eviction so a long-running
-// daemon can not accumulate unbounded memory. Default capacity
-// is 10 000 distinct infohashes; entries past that get evicted
-// least-recently-used first when a new one is recorded.
-//
-// Concurrent-safe via a single sync.Mutex. The hot path is the
-// O(1) Record / Sources operation, both of which only take the
-// lock for a handful of map + list ops.
+// The tracker is bounded with LRU eviction so a long-running daemon
+// cannot accumulate unbounded memory. Always in-memory; no disk
+// persistence. Concurrent-safe via a single sync.Mutex.
 type SourceTracker struct {
 	mu       sync.Mutex
 	capacity int
-	// items maps infohash hex → *list.Element holding sourceEntry.
-	// Same element also lives in the order list for LRU eviction.
+	// items maps lowercased infohash hex → *list.Element holding a
+	// *sourceEntry. The same element lives in the order list for LRU.
 	items map[string]*list.Element
 	order *list.List
 }
 
-// sourceEntry is the value type stored in both the map and the
-// LRU list. Pubs is a deduplicated set of indexer pubkeys.
+// sourceEntry is the value stored in both the map and the LRU list.
+// pubs is a deduplicated set of indexer pubkeys.
 type sourceEntry struct {
 	infohash string
 	pubs     map[PubKeyHex]struct{}
 }
 
 // DefaultSourceCapacity is the LRU bound used when NewSourceTracker
-// is called with capacity ≤ 0. 10 000 distinct infohashes at ~80
-// bytes each (string key + small set value) is roughly 1 MB.
+// is called with capacity <= 0.
 const DefaultSourceCapacity = 10_000
 
-// NewSourceTracker constructs an empty tracker with the given
-// LRU capacity. Pass 0 (or any non-positive value) to use
-// DefaultSourceCapacity.
+// NewSourceTracker constructs an empty tracker with the given LRU
+// capacity. Non-positive capacity uses DefaultSourceCapacity.
 func NewSourceTracker(capacity int) *SourceTracker {
 	if capacity <= 0 {
 		capacity = DefaultSourceCapacity
@@ -56,12 +48,10 @@ func NewSourceTracker(capacity int) *SourceTracker {
 	}
 }
 
-// Record adds the given pubkey to the source set for the
-// infohash. The infohash is normalised to lowercase hex; an
-// empty pubkey or empty infohash is silently ignored.
-//
-// On insert, the entry is moved to the front of the LRU list. If
-// the tracker is at capacity, the oldest entry is evicted.
+// Record adds pubkey to the source set for infohash. The infohash
+// is normalised to lowercase hex; an empty infohash or empty pubkey
+// is silently ignored. The entry is moved to the front of the LRU
+// list; a new entry over capacity evicts the least-recently-used.
 func (s *SourceTracker) Record(infohash string, pubkey PubKeyHex) {
 	if infohash == "" || pubkey == "" {
 		return
@@ -95,21 +85,18 @@ func (s *SourceTracker) Record(infohash string, pubkey PubKeyHex) {
 	}
 }
 
-// RecordMany is a convenience wrapper that records every pubkey
-// in the slice for the same infohash. Used by Lookup.Query when
-// merging multi-source hits.
+// RecordMany records every pubkey in the slice for the same
+// infohash. Used when merging multi-source hits during lookup.
 func (s *SourceTracker) RecordMany(infohash string, pubkeys []PubKeyHex) {
 	for _, p := range pubkeys {
 		s.Record(infohash, p)
 	}
 }
 
-// Sources returns the deduplicated list of pubkeys recorded for
-// the infohash, or nil if the entry has never been recorded or
-// has been evicted. The returned slice is a fresh copy and is
-// safe to iterate without holding the tracker lock. Lookup
-// touches the LRU position so a recently-queried infohash stays
-// hot.
+// Sources returns a fresh copy of the deduplicated pubkeys recorded
+// for infohash, or nil if never recorded or evicted. The lookup
+// touches the LRU position so a recently-queried infohash stays hot.
+// The returned slice's order is unspecified (map iteration order).
 func (s *SourceTracker) Sources(infohash string) []PubKeyHex {
 	if infohash == "" {
 		return nil
@@ -131,9 +118,9 @@ func (s *SourceTracker) Sources(infohash string) []PubKeyHex {
 	return out
 }
 
-// Forget drops the tracker entry for the given infohash, if any.
-// Used after a successful flag so subsequent flags do not double-
-// dock the same indexers.
+// Forget drops the tracker entry for infohash, if any. Used after a
+// successful flag so subsequent flags do not double-dock the same
+// indexers. Empty or unknown infohash is a no-op.
 func (s *SourceTracker) Forget(infohash string) {
 	if infohash == "" {
 		return
@@ -149,8 +136,7 @@ func (s *SourceTracker) Forget(infohash string) {
 	delete(s.items, key)
 }
 
-// Len returns the current number of distinct infohashes the
-// tracker is holding. Useful for tests and /status diagnostics.
+// Len returns the number of distinct infohashes currently held.
 func (s *SourceTracker) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

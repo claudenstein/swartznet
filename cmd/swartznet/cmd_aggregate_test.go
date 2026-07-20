@@ -2,186 +2,141 @@ package main
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/swartznet/swartznet/internal/companion"
 )
 
-// Build a tiny real index on disk for the CLI tests to exercise.
-// Returns the path to the payload file and the expected record set.
-func buildTestIndexFile(t *testing.T) (path string, records []companion.Record) {
+// writeRecs writes a JSONL record file and returns its path.
+func writeRecs(t *testing.T, lines ...string) string {
 	t.Helper()
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	var pk [32]byte
-	copy(pk[:], pub)
-
-	// A handful of records spanning two keywords so we can
-	// exercise prefix find.
-	for i := 0; i < 5; i++ {
-		var r companion.Record
-		copy(r.Pk[:], pub)
-		r.Kw = "linux"
-		if i%2 == 0 {
-			r.Kw = "ubuntu"
-		}
-		r.Ih[0] = byte(i + 1)
-		r.T = int64(1000 + i)
-		sig := ed25519.Sign(priv, companion.RecordSigMessage(r))
-		copy(r.Sig[:], sig)
-		records = append(records, r)
-	}
-
-	out, err := companion.BuildBTree(companion.BuildBTreeInput{
-		Records:   records,
-		PubKey:    pk,
-		PrivKey:   priv,
-		Seq:       7,
-		PieceSize: companion.MinPieceSize,
-		CreatedTs: 1712649600,
-	})
-	if err != nil {
-		t.Fatalf("BuildBTree: %v", err)
-	}
-
-	dir := t.TempDir()
-	path = filepath.Join(dir, "index.bin")
-	if err := os.WriteFile(path, out.Bytes, 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	return path, records
-}
-
-func TestCmdAggregateInspect(t *testing.T) {
-	path, recs := buildTestIndexFile(t)
-
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"inspect", path}, stdout, stderr)
-	if code != exitOK {
-		t.Fatalf("exit = %d (stderr: %s)", code, stderr.String())
-	}
-	out := stdout.String()
-
-	// Must mention the record count and core fields.
-	if !strings.Contains(out, "records:") {
-		t.Errorf("missing 'records:' in output: %s", out)
-	}
-	// Note: output renders as "records:        5" with spaces;
-	// check for the digit rather than a fragile exact match.
-	if !strings.Contains(out, "records:") || !strings.Contains(out, "5") {
-		t.Errorf("output does not report %d records: %s", len(recs), out)
-	}
-	if !strings.Contains(out, "fingerprint:") {
-		t.Errorf("missing fingerprint line: %s", out)
-	}
-}
-
-func TestCmdAggregateInspectRejectsBadFile(t *testing.T) {
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"inspect", "/nonexistent/file"}, stdout, stderr)
-	if code == exitOK {
-		t.Fatal("inspect should fail on missing file")
-	}
-	if !strings.Contains(stderr.String(), "read") {
-		t.Errorf("expected a read-error in stderr, got %q", stderr.String())
-	}
-}
-
-func TestCmdAggregateInspectRejectsMalformedFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "garbage.bin")
-	// A file that's the right size for one piece but lacks the
-	// SNAGG magic → OpenBTree rejects.
-	if err := os.WriteFile(path, make([]byte, companion.MinPieceSize*3), 0644); err != nil {
+	p := filepath.Join(t.TempDir(), "recs.jsonl")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"inspect", path}, stdout, stderr)
-	if code == exitOK {
-		t.Fatal("inspect should fail on zero-filled garbage")
+	return p
+}
+
+func TestAggregateBuildInspectFindRoundTrip(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir()) // build auto-creates the identity here
+	recs := writeRecs(t,
+		`{"kw":"ubuntu","ih":"0000000000000000000000000000000000000001","t":1700000000}`,
+		`{"kw":"ubuntu","ih":"0000000000000000000000000000000000000002","t":1700000001}`,
+		`{"kw":"debian","ih":"0000000000000000000000000000000000000003","t":1700000002}`,
+	)
+	out := filepath.Join(t.TempDir(), "idx.snagg")
+
+	var so, se bytes.Buffer
+	if code := cmdAggregate([]string{"build", "--in", recs, "--out", out, "--seq", "7"}, &so, &se); code != exitOK {
+		t.Fatalf("build exit=%d stderr=%s", code, se.String())
+	}
+	if !strings.Contains(so.String(), "records:     3") || !strings.Contains(so.String(), "fingerprint:") {
+		t.Errorf("build output = %s", so.String())
+	}
+	// Output file must be mode 0644.
+	if fi, err := os.Stat(out); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o644 {
+		t.Errorf("output mode = %o, want 644", fi.Mode().Perm())
+	}
+
+	so.Reset()
+	se.Reset()
+	if code := cmdAggregate([]string{"inspect", out}, &so, &se); code != exitOK {
+		t.Fatalf("inspect exit=%d stderr=%s", code, se.String())
+	}
+	if !strings.Contains(so.String(), "records:        3") || !strings.Contains(so.String(), "sequence:       7") {
+		t.Errorf("inspect output = %s", so.String())
+	}
+
+	so.Reset()
+	se.Reset()
+	if code := cmdAggregate([]string{"find", "--verify", out, "ubu"}, &so, &se); code != exitOK {
+		t.Fatalf("find exit=%d stderr=%s", code, se.String())
+	}
+	if !strings.Contains(so.String(), "2 records") {
+		t.Errorf("find(ubu) output = %s", so.String())
 	}
 }
 
-func TestCmdAggregateFindPrefix(t *testing.T) {
-	path, _ := buildTestIndexFile(t)
-
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"find", path, "ubu"}, stdout, stderr)
-	if code != exitOK {
-		t.Fatalf("exit = %d (stderr: %s)", code, stderr.String())
-	}
-	out := stdout.String()
-	// All records with kw="ubuntu" should be listed — indices 0, 2, 4.
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) < 4 { // header + ≥3 records
-		t.Errorf("unexpected short output: %s", out)
-	}
-	for _, line := range lines[1:] {
-		if !strings.Contains(line, "ubuntu") {
-			t.Errorf("non-ubuntu line in ubu-prefix results: %q", line)
-		}
-	}
-}
-
-func TestCmdAggregateFindNoMatch(t *testing.T) {
-	path, _ := buildTestIndexFile(t)
-
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"find", path, "nomatch"}, stdout, stderr)
-	if code != exitOK {
-		t.Fatal("no-match should still be exit 0")
-	}
-	if !strings.Contains(stdout.String(), "0 records") {
-		t.Errorf("expected '0 records' in output: %s", stdout.String())
-	}
-}
-
-func TestCmdAggregateFindVerifyOption(t *testing.T) {
-	path, _ := buildTestIndexFile(t)
-
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"find", "--verify", path, "linux"}, stdout, stderr)
-	if code != exitOK {
-		t.Fatalf("verify-path exit = %d (stderr: %s)", code, stderr.String())
-	}
-}
-
-func TestCmdAggregateUnknownSubcommand(t *testing.T) {
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"nope"}, stdout, stderr)
+func TestAggregateBuildRefusesHighPoW(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	recs := writeRecs(t, `{"kw":"x","ih":"0000000000000000000000000000000000000001"}`)
+	var so, se bytes.Buffer
+	code := cmdAggregate([]string{"build", "--in", recs, "--out", filepath.Join(t.TempDir(), "o"), "--pow-bits", "41"}, &so, &se)
 	if code != exitUsage {
-		t.Errorf("unknown sub exit = %d, want exitUsage", code)
+		t.Fatalf("pow-bits 41 exit=%d, want %d", code, exitUsage)
+	}
+	if !strings.Contains(se.String(), "above 40 refused") {
+		t.Errorf("stderr = %s", se.String())
 	}
 }
 
-func TestCmdAggregateHelp(t *testing.T) {
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate([]string{"help"}, stdout, stderr)
-	if code != exitOK {
-		t.Error("help should return exitOK")
-	}
-	if !strings.Contains(stdout.String(), "aggregate") {
-		t.Errorf("help output missing 'aggregate': %s", stdout.String())
+func TestAggregateBuildRequiresOut(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	var so, se bytes.Buffer
+	if code := cmdAggregate([]string{"build", "--in", "-"}, &so, &se); code != exitUsage {
+		t.Errorf("missing --out exit=%d, want %d", code, exitUsage)
 	}
 }
 
-func TestCmdAggregateNoSubcommand(t *testing.T) {
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	code := cmdAggregate(nil, stdout, stderr)
-	if code != exitUsage {
-		t.Errorf("no subcommand exit = %d, want exitUsage", code)
+func TestAggregateBuildRejectsBadRecords(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	out := filepath.Join(t.TempDir(), "o")
+	// Short ih.
+	bad := writeRecs(t, `{"kw":"x","ih":"deadbeef"}`)
+	var so, se bytes.Buffer
+	if code := cmdAggregate([]string{"build", "--in", bad, "--out", out}, &so, &se); code != exitRuntime {
+		t.Errorf("short ih exit=%d, want %d", code, exitRuntime)
+	}
+	if !strings.Contains(se.String(), "want 40") {
+		t.Errorf("stderr = %s", se.String())
+	}
+	// Empty kw.
+	se.Reset()
+	bad2 := writeRecs(t, `{"kw":"","ih":"0000000000000000000000000000000000000001"}`)
+	if code := cmdAggregate([]string{"build", "--in", bad2, "--out", out}, &so, &se); code != exitRuntime {
+		t.Errorf("empty kw exit=%d, want %d", code, exitRuntime)
+	}
+}
+
+func TestAggregateInspectFailsOnGarbage(t *testing.T) {
+	t.Parallel()
+	garbage := filepath.Join(t.TempDir(), "garbage.snagg")
+	os.WriteFile(garbage, bytes.Repeat([]byte{0x00}, 16384*3), 0o644)
+	var so, se bytes.Buffer
+	if code := cmdAggregate([]string{"inspect", garbage}, &so, &se); code != exitRuntime {
+		t.Errorf("inspect garbage exit=%d, want %d", code, exitRuntime)
+	}
+	if !strings.Contains(se.String(), "open b-tree") {
+		t.Errorf("stderr = %s", se.String())
+	}
+}
+
+func TestAggregateFindVerifyFailsOnTamperedFingerprint(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	recs := writeRecs(t, `{"kw":"ubuntu","ih":"0000000000000000000000000000000000000001"}`)
+	out := filepath.Join(t.TempDir(), "idx.snagg")
+	var so, se bytes.Buffer
+	if code := cmdAggregate([]string{"build", "--in", recs, "--out", out}, &so, &se); code != exitOK {
+		t.Fatalf("build failed: %s", se.String())
+	}
+	// Tamper a leaf record byte (breaks the fingerprint but not the trailer sig).
+	data, _ := os.ReadFile(out)
+	// leaf is piece 1 (root=0, leaf=1, trailer=2); flip a payload byte deep in it.
+	data[16384+64] ^= 0xFF
+	os.WriteFile(out, data, 0o644)
+
+	so.Reset()
+	se.Reset()
+	// Without --verify, Find may still succeed or drop the record; WITH --verify
+	// the fingerprint mismatch must fail.
+	code := cmdAggregate([]string{"find", "--verify", out, "ubu"}, &so, &se)
+	if code != exitRuntime {
+		t.Fatalf("find --verify on tampered index exit=%d, want %d (stderr=%s)", code, exitRuntime, se.String())
+	}
+	if !strings.Contains(se.String(), "fingerprint verification failed") {
+		t.Errorf("stderr = %s", se.String())
 	}
 }

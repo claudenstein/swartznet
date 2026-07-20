@@ -11,10 +11,9 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 )
 
-// startBep51Responder runs a one-shot UDP loopback responder
-// that serves a BEP-51 sample_infohashes reply with the given
-// samples and closes. Mirrors the dhtindex test helper so the
-// CLI test stays self-contained.
+// startBep51Responder runs a one-shot UDP loopback responder that serves a
+// BEP-51 sample_infohashes reply with the given samples and then exits. Keeps
+// the CLI test self-contained (no real DHT server needed).
 func startBep51Responder(t *testing.T, samples []krpc.ID) string {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -53,12 +52,7 @@ func startBep51Responder(t *testing.T, samples []krpc.ID) string {
 		reply := customReply{
 			T: q.T,
 			Y: "r",
-			R: rPart{
-				ID:       krpc.ID{0xCA, 0xFE},
-				Samples:  string(buf),
-				Interval: 60,
-				Num:      42,
-			},
+			R: rPart{ID: krpc.ID{0xCA, 0xFE}, Samples: string(buf), Interval: 60, Num: 42},
 		}
 		out, err := bencode.Marshal(reply)
 		if err != nil {
@@ -69,39 +63,26 @@ func startBep51Responder(t *testing.T, samples []krpc.ID) string {
 	return conn.LocalAddr().String()
 }
 
-// TestCmdCrawlProbeTextOutput — end-to-end: the CLI queries our
-// responder, renders a human-readable summary, and exits 0.
-func TestCmdCrawlProbeTextOutput(t *testing.T) {
+// TestCrawlProbeText — end-to-end: the CLI queries our responder, renders a
+// human summary, and exits 0.
+func TestCrawlProbeText(t *testing.T) {
 	t.Parallel()
-	sampleA := krpc.ID{0xAA, 0xBB, 0xCC}
-	sampleB := krpc.ID{0x11, 0x22, 0x33}
-	addr := startBep51Responder(t, []krpc.ID{sampleA, sampleB})
-
+	addr := startBep51Responder(t, []krpc.ID{{0xAA, 0xBB, 0xCC}, {0x11, 0x22, 0x33}})
 	var stdout, stderr bytes.Buffer
 	code := cmdCrawlProbe([]string{"--addr", addr, "--timeout-ms", "3000"}, &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit = %d (stderr: %s)", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "BEP-51 sample_infohashes probe") {
-		t.Errorf("missing header in output: %s", out)
-	}
-	if !strings.Contains(out, "aabbcc") {
-		t.Errorf("missing sampleA hex: %s", out)
-	}
-	if !strings.Contains(out, "112233") {
-		t.Errorf("missing sampleB hex: %s", out)
-	}
-	if !strings.Contains(out, "num tracked: 42") {
-		t.Errorf("missing num field: %s", out)
-	}
-	if !strings.Contains(out, "interval:   60s") {
-		t.Errorf("missing interval: %s", out)
+	for _, want := range []string{"BEP-51 sample_infohashes probe", "aabbcc", "112233", "num tracked: 42", "interval:    60s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 }
 
-// TestCmdCrawlProbeJSONOutput — same roundtrip with --json.
-func TestCmdCrawlProbeJSONOutput(t *testing.T) {
+// TestCrawlProbeJSON — same round-trip with --json (the DoD gate).
+func TestCrawlProbeJSON(t *testing.T) {
 	t.Parallel()
 	addr := startBep51Responder(t, []krpc.ID{{0xDE, 0xAD, 0xBE, 0xEF}})
 	var stdout, stderr bytes.Buffer
@@ -110,33 +91,32 @@ func TestCmdCrawlProbeJSONOutput(t *testing.T) {
 		t.Fatalf("exit = %d (stderr: %s)", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, `"samples": [`) {
-		t.Errorf("JSON missing samples array: %s", out)
-	}
-	if !strings.Contains(out, "deadbeef") {
-		t.Errorf("JSON missing sample hex: %s", out)
+	for _, want := range []string{`"samples": [`, "deadbeef", `"interval": 60`, `"num": 42`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("JSON missing %q:\n%s", want, out)
+		}
 	}
 }
 
-// TestCmdCrawlProbeMissingAddr confirms the required-flag guard.
-func TestCmdCrawlProbeMissingAddr(t *testing.T) {
+// TestCrawlProbeMissingAddr confirms the required-flag guard.
+func TestCrawlProbeMissingAddr(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	code := cmdCrawlProbe([]string{}, &stdout, &stderr)
 	if code != exitUsage {
-		t.Errorf("missing --addr exit = %d, want exitUsage (%d)", code, exitUsage)
+		t.Errorf("missing --addr exit = %d, want %d", code, exitUsage)
 	}
 	if !strings.Contains(stderr.String(), "--addr is required") {
-		t.Errorf("stderr missing --addr hint: %s", stderr.String())
+		t.Errorf("stderr missing hint: %s", stderr.String())
 	}
 }
 
-// TestCmdCrawlProbeBadTarget rejects a non-40-char target hex.
-func TestCmdCrawlProbeBadTarget(t *testing.T) {
+// TestCrawlProbeBadTarget rejects a non-40-hex target.
+func TestCrawlProbeBadTarget(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	code := cmdCrawlProbe([]string{"--addr", "127.0.0.1:1", "--target", "zz"}, &stdout, &stderr)
 	if code != exitUsage {
-		t.Errorf("bad target exit = %d, want exitUsage", code)
+		t.Errorf("bad target exit = %d, want %d", code, exitUsage)
 	}
 }

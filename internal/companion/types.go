@@ -1,28 +1,24 @@
 package companion
 
-// FormatVersion is the on-disk schema version of the
-// CompanionIndex JSON document. Bumped on a backwards-
-// incompatible change to the schema; subscribers MUST refuse
-// any companion file whose version they do not recognise.
+// FormatVersion is the on-disk schema version of the CompanionIndex JSON
+// document. Bumped on a backwards-incompatible schema change; subscribers MUST
+// refuse any companion file whose version they do not recognise.
 const FormatVersion = 1
 
-// FormatFileName is the legacy generic filename used inside
-// every companion .torrent before per-publisher naming was
-// introduced. New publishers tag the file with their pubkey
-// prefix via CompanionFileName so each node's companion torrent
-// has a distinguishable name in downloads lists. The constant
-// is retained for the empty-publisher fallback (mostly tests
-// and unit code that constructs a CompanionIndex without a key).
+// FormatName is the stable schema identifier carried in every document.
+const FormatName = "swartznet-content-index"
+
+// FormatFileName is the generic filename used inside a companion .torrent when
+// the publisher is anonymous (no pubkey). Real publishers tag the file with
+// their pubkey prefix via CompanionFileName so each node's companion torrent
+// has a distinguishable name in downloads lists.
 const FormatFileName = "swartznet-content-index-v1.json.gz"
 
-// CompanionFileName returns the on-wire filename for a
-// CompanionIndex written by the publisher whose pubkey hex is
-// pubkeyHex. When pubkeyHex is empty, the generic FormatFileName
-// is used (preserves the test/zero-config code path). For real
-// publishers the result is "swartznet-content-index-<prefix>-v1.json.gz",
-// where <prefix> is the first 12 hex chars of the pubkey — short
-// enough to keep the filename readable, long enough to make
-// collisions vanishingly unlikely.
+// CompanionFileName returns the on-wire filename for a CompanionIndex written
+// by the publisher whose pubkey hex is pubkeyHex. Empty pubkeyHex → the generic
+// FormatFileName; otherwise "swartznet-content-index-<first-12-hex>-v1.json.gz"
+// (the prefix is the raw first 12 hex chars — short enough to stay readable,
+// long enough to make collisions vanishingly unlikely).
 func CompanionFileName(pubkeyHex string) string {
 	if pubkeyHex == "" {
 		return FormatFileName
@@ -34,87 +30,46 @@ func CompanionFileName(pubkeyHex string) string {
 	return "swartznet-content-index-" + prefix + "-v1.json.gz"
 }
 
-// FormatMagic is the leading byte sequence of an UNCOMPRESSED
-// companion JSON document. Decode checks for it after gunzip so
-// a corrupted or wrong-format file fails fast with a clear
-// error rather than producing garbage records.
-const FormatMagic = `{"version":1,"format":"swartznet-content-index"`
-
-// CompanionIndex is the top-level JSON document. The Publisher
-// field carries the publisher's ed25519 pubkey as 64-char hex,
-// matching reputation.PubKeyHex; subscribers use it to
-// attribute imported records and to maintain reputation
-// against the publisher.
+// CompanionIndex is the top-level JSON document. Publisher carries the ed25519
+// pubkey as 64-char hex; subscribers use it to VERIFY the snapshot was authored
+// by the publisher they follow and to stamp imported records with SignedBy.
 type CompanionIndex struct {
-	// Version is FormatVersion at the time the index was written.
-	// Subscribers refuse versions they do not recognise.
+	// Version is FormatVersion at write time. Subscribers refuse unknown versions.
 	Version int `json:"version"`
-	// Format is a stable string identifying the schema. Always
-	// "swartznet-content-index" for this package.
+	// Format is the stable schema id, always FormatName.
 	Format string `json:"format"`
-	// Publisher is the 64-char hex form of the publisher's
-	// ed25519 public key. Empty for an anonymous companion
-	// (uncommon — subscribers should be skeptical).
+	// Publisher is the 64-char hex ed25519 public key. Empty for an anonymous
+	// companion (uncommon; subscribers following a specific key reject a
+	// mismatch).
 	Publisher string `json:"publisher,omitempty"`
-	// GeneratedAt is the unix timestamp at which the index was
-	// serialised. Used by subscribers to skip duplicates of an
-	// older snapshot they have already imported.
+	// GeneratedAt is the unix timestamp at serialization. Subscribers dedup on
+	// it — an unchanged snapshot is not re-imported.
 	GeneratedAt int64 `json:"generated_at"`
-	// Torrents is the list of torrents the publisher is
-	// describing in this snapshot.
+	// Torrents is the list of torrents the publisher describes.
 	Torrents []TorrentRecord `json:"torrents"`
 }
 
-// TorrentRecord is one entry in CompanionIndex.Torrents. It
-// describes a torrent the publisher has indexed locally,
-// optionally with the extracted file content for search.
+// TorrentRecord is one entry in CompanionIndex.Torrents.
 type TorrentRecord struct {
-	// InfoHash is the 40-char lowercase SHA-1 hex form.
-	InfoHash string `json:"infohash"`
-	// Name is the human-readable torrent name.
-	Name string `json:"name"`
-	// Size is the total bytes in the torrent (for size filters).
-	Size int64 `json:"size,omitempty"`
-	// AddedAt is the unix timestamp when the publisher added
-	// this torrent to their local index. Useful for freshness
-	// ranking on the subscriber side.
-	AddedAt int64 `json:"added_at,omitempty"`
-	// Files is the optional per-file detail. Empty when the
-	// publisher chose to share only torrent-level metadata.
-	Files []FileRecord `json:"files,omitempty"`
+	InfoHash string       `json:"infohash"` // 40-char lowercase SHA-1 hex
+	Name     string       `json:"name"`
+	Size     int64        `json:"size,omitempty"`
+	AddedAt  int64        `json:"added_at,omitempty"` // unix seconds
+	Files    []FileRecord `json:"files,omitempty"`
 }
 
-// FileRecord is one entry in TorrentRecord.Files. It describes
-// a file the publisher has extracted text from, with optional
-// content chunks for full-text search.
+// FileRecord is one file's extracted detail.
 type FileRecord struct {
-	// Index is the file's position in the torrent's
-	// upverted file list, matching the M2.1 file tracker.
-	Index int `json:"index"`
-	// Path is the user-visible file path.
-	Path string `json:"path"`
-	// Size is the file's byte length.
-	Size int64 `json:"size,omitempty"`
-	// Mime is the best-known MIME type, e.g. "text/plain" or
-	// "application/pdf".
-	Mime string `json:"mime,omitempty"`
-	// Extractor is the name of the M2.2/M2.3/M6 extractor that
-	// produced the chunks below — useful for telemetry and for
-	// the subscriber to decide whether to trust the content.
-	Extractor string `json:"extractor,omitempty"`
-	// Chunks is the list of extracted text chunks. May be
-	// empty when the publisher only shares per-file metadata
-	// (filename + size + mime) without the actual text.
-	Chunks []ContentChunk `json:"chunks,omitempty"`
+	Index     int            `json:"index"` // position in the torrent's file list
+	Path      string         `json:"path"`
+	Size      int64          `json:"size,omitempty"`
+	Mime      string         `json:"mime,omitempty"`
+	Extractor string         `json:"extractor,omitempty"`
+	Chunks    []ContentChunk `json:"chunks,omitempty"`
 }
 
 // ContentChunk is one paragraph-level extracted text fragment.
-// Mirrors extractors.Chunk in the producer side and
-// indexer.ContentDoc.Text on the consumer side.
 type ContentChunk struct {
-	// Text is the extracted text content of this chunk.
-	Text string `json:"text"`
-	// Offset is the byte offset of the chunk inside the
-	// source file. Zero for whole-file extractions.
-	Offset int64 `json:"offset,omitempty"`
+	Text   string `json:"text"`
+	Offset int64  `json:"offset,omitempty"` // byte offset in the source file; 0 whole-file
 }

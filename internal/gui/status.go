@@ -9,198 +9,69 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/swartznet/swartznet/contracts/ltepwire"
 	"github.com/swartznet/swartznet/internal/daemon"
-	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
+const statusPollInterval = 2 * time.Second
+
+// statusTab renders live node status. Every value comes from a Daemon/engine
+// accessor — the GUI computes no state of its own.
 type statusTab struct {
 	content fyne.CanvasObject
 	d       *daemon.Daemon
-
-	// Card labels (updated by polling goroutine).
-	torrentsCard   *widget.Card
-	torrentsLabels []*widget.Label
-	indexCard      *widget.Card
-	indexLabels    []*widget.Label
-	swarmCard      *widget.Card
-	swarmLabels    []*widget.Label
-	dhtCard        *widget.Card
-	dhtLabels      []*widget.Label
-	aggCard        *widget.Card
-	aggLabels      []*widget.Label
-	pubCard        *widget.Card
-	pubLabels      []*widget.Label
-	bloomCard      *widget.Card
-	bloomLabels    []*widget.Label
-	repCard        *widget.Card
-	repList        *widget.List
-
-	// Reputation snapshot for the list widget.
-	repSnap []repRow
-}
-
-type repRow struct {
-	pubkey string
-	score  string
-	hits   string
+	body    *widget.Label
 }
 
 func newStatusTab(ctx context.Context, d *daemon.Daemon) *statusTab {
-	st := buildStatusTab(d)
+	st := &statusTab{d: d}
+	st.body = widget.NewLabel("")
+	st.body.TextStyle.Monospace = true
+	st.content = container.NewVScroll(container.NewPadded(st.body))
+	st.refresh()
 	go st.pollLoop(ctx)
 	return st
 }
 
-// buildStatusTab constructs the statusTab struct (cards, labels,
-// lists, content) without spawning the pollLoop goroutine. Tests
-// use it to avoid the goroutine-vs-test-goroutine race on Fyne's
-// shared widget caches.
-func buildStatusTab(d *daemon.Daemon) *statusTab {
-	st := &statusTab{d: d}
-
-	// Torrents card — aggregate counts + throughput across every
-	// active torrent. Complements the per-torrent Downloads tab.
-	st.torrentsLabels = makeLabelGroup(7)
-	st.torrentsCard = widget.NewCard("Torrents", "",
-		container.NewVBox(
-			labelRow("Total:", st.torrentsLabels[0]),
-			labelRow("Downloading:", st.torrentsLabels[1]),
-			labelRow("Seeding:", st.torrentsLabels[2]),
-			labelRow("Queued:", st.torrentsLabels[3]),
-			labelRow("Paused:", st.torrentsLabels[4]),
-			widget.NewSeparator(),
-			labelRow("Download rate:", st.torrentsLabels[5]),
-			labelRow("Upload rate:", st.torrentsLabels[6]),
-		),
-	)
-
-	// Index card.
-	st.indexLabels = makeLabelGroup(4)
-	st.indexCard = widget.NewCard("Local Index", "",
-		container.NewVBox(
-			labelRow("Documents:", st.indexLabels[0]),
-			labelRow("Torrents:", st.indexLabels[1]),
-			labelRow("Content docs:", st.indexLabels[2]),
-			labelRow("Disk size:", st.indexLabels[3]),
-		),
-	)
-
-	// Swarm card.
-	st.swarmLabels = makeLabelGroup(2)
-	st.swarmCard = widget.NewCard("Swarm Peers", "",
-		container.NewVBox(
-			labelRow("Known peers:", st.swarmLabels[0]),
-			labelRow("Search-capable:", st.swarmLabels[1]),
-		),
-	)
-
-	// DHT routing-table card. good_nodes is the cheapest
-	// signal for "this node can put/get BEP-44 items"; a
-	// daemon with DHT disabled sees "-" here.
-	st.dhtLabels = makeLabelGroup(2)
-	st.dhtCard = widget.NewCard("DHT Routing", "",
-		container.NewVBox(
-			labelRow("Good nodes:", st.dhtLabels[0]),
-			labelRow("Total nodes:", st.dhtLabels[1]),
-		),
-	)
-
-	// Aggregate card — v0.5 PPMI/B-tree/RIBLT track. Follows the
-	// DHT card pattern: one label per field, order matches the
-	// CLI status renderer so operators can read the same info
-	// in either surface.
-	st.aggLabels = makeLabelGroup(7)
-	st.aggCard = widget.NewCard("Aggregate (v0.5)", "",
-		container.NewVBox(
-			labelRow("PPMI enabled:", st.aggLabels[0]),
-			labelRow("Known indexers:", st.aggLabels[1]),
-			labelRow("Record source:", st.aggLabels[2]),
-			labelRow("Cache size:", st.aggLabels[3]),
-			labelRow("Bootstrap anchors:", st.aggLabels[4]),
-			labelRow("Bootstrap admitted:", st.aggLabels[5]),
-			labelRow("Bootstrap pending:", st.aggLabels[6]),
-		),
-	)
-
-	// Publisher card.
-	st.pubLabels = makeLabelGroup(3)
-	st.pubCard = widget.NewCard("DHT Publisher", "",
-		container.NewVBox(
-			labelRow("Keywords:", st.pubLabels[0]),
-			labelRow("Total hits:", st.pubLabels[1]),
-			labelRow("Pubkey:", st.pubLabels[2]),
-		),
-	)
-
-	// Bloom card.
-	st.bloomLabels = makeLabelGroup(1)
-	st.bloomCard = widget.NewCard("Known-Good Filter", "",
-		container.NewVBox(
-			labelRow("Estimated items:", st.bloomLabels[0]),
-		),
-	)
-
-	// Reputation card.
-	st.repList = widget.NewList(
-		func() int { return len(st.repSnap) },
-		func() fyne.CanvasObject {
-			return container.NewHBox(
-				widget.NewLabel("pubkey"),
-				widget.NewLabel("score"),
-				widget.NewLabel("hits"),
-			)
-		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			box := obj.(*fyne.Container)
-			if id >= len(st.repSnap) {
-				return
-			}
-			r := st.repSnap[id]
-			box.Objects[0].(*widget.Label).SetText(r.pubkey)
-			box.Objects[1].(*widget.Label).SetText(r.score)
-			box.Objects[2].(*widget.Label).SetText(r.hits)
-		},
-	)
-	st.repCard = widget.NewCard("Reputation", "", st.repList)
-
-	grid := container.NewAdaptiveGrid(2,
-		st.torrentsCard,
-		st.indexCard,
-		st.swarmCard,
-		st.dhtCard,
-		st.aggCard,
-		st.pubCard,
-		st.bloomCard,
-	)
-
-	st.content = container.NewBorder(grid, nil, nil, nil, st.repCard)
-
-	return st
-}
-
 func (st *statusTab) pollLoop(ctx context.Context) {
-	// Initial fetch.
-	st.refresh()
-
-	tick := time.NewTicker(4 * time.Second)
-	defer tick.Stop()
+	t := time.NewTicker(statusPollInterval)
+	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
-			st.refresh()
+		case <-t.C:
+			// Compute the (expensive) status OFF the Fyne UI thread — render()
+			// calls indexer.Stats(), a full-corpus scan under the index lock that
+			// can far exceed a frame budget on a real corpus. Running it inside
+			// fyne.Do would block ALL rendering/input (the GLFW main loop drains
+			// the func-queue and draws in mutually-exclusive cases), freezing the
+			// whole GUI every 2s. Only the widget mutation goes on the UI thread.
+			text := st.render()
+			fyne.Do(func() { st.body.SetText(text) })
 		}
 	}
 }
 
+// refresh renders synchronously; used for the one-time initial paint during
+// construction. The recurring poll computes render() off-thread (see pollLoop).
 func (st *statusTab) refresh() {
-	// Torrents summary (counts by status + aggregate throughput).
-	snaps := st.d.Eng.TorrentSnapshots()
-	var total, downloading, seeding, queued, paused int
-	var totalDown, totalUp int64
+	st.body.SetText(st.render())
+}
+
+func (st *statusTab) render() string {
+	e := st.d.Eng
+	if e == nil {
+		return "engine unavailable"
+	}
+	var b []string
+	add := func(f string, a ...any) { b = append(b, fmt.Sprintf(f, a...)) }
+
+	// Torrents.
+	snaps := e.TorrentSnapshots()
+	var downloading, seeding, queued, paused int
+	var dlRate, ulRate int64
 	for _, s := range snaps {
-		total++
 		switch s.Status {
 		case "downloading":
 			downloading++
@@ -211,167 +82,75 @@ func (st *statusTab) refresh() {
 		case "paused":
 			paused++
 		}
-		totalDown += s.DownloadRate
-		totalUp += s.UploadRate
+		dlRate += s.DownloadRate
+		ulRate += s.UploadRate
 	}
+	add("Torrents")
+	add("  total=%d  downloading=%d  seeding=%d  queued=%d  paused=%d", len(snaps), downloading, seeding, queued, paused)
+	add("  ↓ %s/s   ↑ %s/s", humanBytes(dlRate), humanBytes(ulRate))
+	add("")
 
-	// Index stats.
-	var docCount, torrentCount, contentCount uint64
-	var dirBytes int64
-	if st.d.Index != nil {
-		if stats, err := st.d.Index.Stats(); err == nil {
-			docCount = stats.DocCount
-			torrentCount = stats.TorrentCount
-			contentCount = stats.ContentCount
-			dirBytes = stats.DirBytes
+	// Local index (Layer L).
+	add("Local Index")
+	if idx := st.d.Idx; idx != nil {
+		if s, err := idx.Stats(); err == nil {
+			add("  documents=%d  torrents=%d  content=%d  disk=%s", s.DocCount, s.TorrentCount, s.ContentCount, humanBytes(s.DirBytes))
+		} else {
+			add("  (error: %v)", err)
 		}
+	} else {
+		add("  (disabled)")
 	}
+	add("")
 
-	// Swarm peers.
-	var knownPeers, capablePeers int
-	if sw := st.d.Eng.SwarmSearch(); sw != nil {
-		peers := sw.KnownPeers()
-		knownPeers = len(peers)
-		for _, p := range peers {
-			if p.Supported {
-				capablePeers++
+	// Swarm (Layer S).
+	sw := e.SwarmSearch()
+	add("Swarm Peers")
+	add("  known=%d  search-capable=%d", sw.KnownPeers(), sw.CapablePeerCount())
+	add("")
+
+	// DHT routing.
+	good, total := e.DHTRoutingTableSize()
+	add("DHT Routing")
+	add("  good=%d  total=%d", good, total)
+	add("")
+
+	// Layer D publisher + reconciliation cache.
+	ps := e.PublisherStatus()
+	add("Layer D / Aggregate")
+	add("  published keywords=%d  hits=%d", ps.TotalKeywords, ps.TotalHits)
+	if rc := e.RecordCache(); rc != nil {
+		add("  reconciliation cache=%d records", rc.Len())
+	}
+	add("  services mask=%s", ltepwire.FormatHex(e.ServicesMask()))
+	add("")
+
+	// Reputation (top 5).
+	add("Reputation")
+	if tr := e.ReputationTracker(); tr != nil {
+		snap := tr.Snapshot()
+		add("  known indexers=%d", len(snap))
+		for i, r := range snap {
+			if i >= 5 {
+				break
 			}
+			add("  %s  score=%.3f  returned=%d confirmed=%d flagged=%d",
+				short16(string(r.PubKey)), r.Score, r.Counters.HitsReturned, r.Counters.HitsConfirmed, r.Counters.HitsFlagged)
 		}
+	} else {
+		add("  (disabled)")
 	}
 
-	// DHT routing table. Engine.DHTRoutingTableSize returns
-	// (0, 0) when DisableDHT was set, which the label
-	// formatter renders as "-" to match other empty cards.
-	dhtGood, dhtTotal := st.d.Eng.DHTRoutingTableSize()
-
-	// Aggregate track (v0.5). PPMI getter attachment reflects
-	// the dual-read migration state; record source kind + cache
-	// size reflect whether the publisher is feeding records into
-	// the sync responder. Everything nil-safe — a daemon without
-	// Aggregate wiring just shows zeros/"no".
-	aggPPMI := "no"
-	var aggKnownIndexers int
-	aggSourceKind := "-"
-	var aggCacheSize int
-	var aggAnchors, aggAdmitted, aggPending int
-	if lookup := st.d.Eng.Lookup(); lookup != nil {
-		if lookup.PPMIGetter() != nil {
-			aggPPMI = "yes"
-		}
-		aggKnownIndexers = len(lookup.Indexers())
-	}
-	// Bootstrap counts, when the daemon has one wired.
-	if b := st.d.Bootstrap; b != nil {
-		aggAnchors = b.AnchorCount()
-		aggAdmitted = b.AdmittedCount()
-		aggPending = b.PendingCount()
-	}
-	if sw := st.d.Eng.SwarmSearch(); sw != nil {
-		if src := sw.RecordSource(); src != nil {
-			if cache, ok := src.(*swarmsearch.RecordCache); ok {
-				aggSourceKind = "cache"
-				aggCacheSize = cache.Len()
-			} else {
-				aggSourceKind = "custom"
-			}
-		}
-	}
-
-	// Publisher.
-	var pubKeywords, pubHits int
-	var pubKey string
-	if pub := st.d.Eng.Publisher(); pub != nil {
-		ps := pub.Status()
-		pubKeywords = ps.TotalKeywords
-		pubHits = ps.TotalHits
-	}
-	if id := st.d.Eng.Identity(); id != nil {
-		pubKey = id.PublicKeyHex()
-		if len(pubKey) > 16 {
-			pubKey = pubKey[:16] + "..."
-		}
-	}
-
-	// Bloom.
-	var bloomItems float64
-	if bloom := st.d.Eng.KnownGoodBloom(); bloom != nil {
-		bloomItems = bloom.EstimatedItems()
-	}
-
-	// Reputation.
-	var rows []repRow
-	if tracker := st.d.Eng.ReputationTracker(); tracker != nil {
-		snap := tracker.Snapshot()
-		for _, e := range snap {
-			pk := string(e.PubKey)
-			if len(pk) > 16 {
-				pk = pk[:16] + "..."
-			}
-			rows = append(rows, repRow{
-				pubkey: pk,
-				score:  fmt.Sprintf("%.3f", e.Score),
-				hits:   fmt.Sprintf("%d/%d/%d", e.Counters.HitsReturned, e.Counters.HitsConfirmed, e.Counters.HitsFlagged),
-			})
-		}
-	}
-
-	fyne.Do(func() {
-		st.torrentsLabels[0].SetText(fmt.Sprintf("%d", total))
-		st.torrentsLabels[1].SetText(fmt.Sprintf("%d", downloading))
-		st.torrentsLabels[2].SetText(fmt.Sprintf("%d", seeding))
-		st.torrentsLabels[3].SetText(fmt.Sprintf("%d", queued))
-		st.torrentsLabels[4].SetText(fmt.Sprintf("%d", paused))
-		st.torrentsLabels[5].SetText(rateStr(totalDown))
-		st.torrentsLabels[6].SetText(rateStr(totalUp))
-
-		st.indexLabels[0].SetText(fmt.Sprintf("%d", docCount))
-		st.indexLabels[1].SetText(fmt.Sprintf("%d", torrentCount))
-		st.indexLabels[2].SetText(fmt.Sprintf("%d", contentCount))
-		st.indexLabels[3].SetText(humanBytes(dirBytes))
-
-		st.swarmLabels[0].SetText(fmt.Sprintf("%d", knownPeers))
-		st.swarmLabels[1].SetText(fmt.Sprintf("%d", capablePeers))
-
-		st.dhtLabels[0].SetText(fmt.Sprintf("%d", dhtGood))
-		st.dhtLabels[1].SetText(fmt.Sprintf("%d", dhtTotal))
-
-		st.aggLabels[0].SetText(aggPPMI)
-		st.aggLabels[1].SetText(fmt.Sprintf("%d", aggKnownIndexers))
-		st.aggLabels[2].SetText(aggSourceKind)
-		st.aggLabels[3].SetText(fmt.Sprintf("%d", aggCacheSize))
-		st.aggLabels[4].SetText(fmt.Sprintf("%d", aggAnchors))
-		st.aggLabels[5].SetText(fmt.Sprintf("%d", aggAdmitted))
-		st.aggLabels[6].SetText(fmt.Sprintf("%d", aggPending))
-
-		st.pubLabels[0].SetText(fmt.Sprintf("%d", pubKeywords))
-		st.pubLabels[1].SetText(fmt.Sprintf("%d", pubHits))
-		st.pubLabels[2].SetText(pubKey)
-
-		st.bloomLabels[0].SetText(fmt.Sprintf("%.0f", bloomItems))
-
-		st.repSnap = rows
-		st.repList.Refresh()
-	})
+	return joinLines(b)
 }
 
-// labelRow creates a horizontal pair of label + value.
-func labelRow(name string, value *widget.Label) fyne.CanvasObject {
-	return container.NewHBox(boldLabel(name), value)
-}
-
-// boldLabel returns a non-italic, bold-styled label. Used by
-// row-builders that already do their own layout and only need
-// the styled name cell.
-func boldLabel(name string) *widget.Label {
-	lbl := widget.NewLabel(name)
-	lbl.TextStyle.Bold = true
-	return lbl
-}
-
-func makeLabelGroup(n int) []*widget.Label {
-	out := make([]*widget.Label, n)
-	for i := range out {
-		out[i] = widget.NewLabel("-")
+func joinLines(lines []string) string {
+	out := ""
+	for i, l := range lines {
+		if i > 0 {
+			out += "\n"
+		}
+		out += l
 	}
 	return out
 }

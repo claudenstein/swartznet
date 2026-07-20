@@ -7,33 +7,42 @@ import "strings"
 // blocker-1 research: Elastic's chunking docs default to ~250 words
 // (≈1.25 KiB), production RAG/BM25 stacks converge on 0.5–4 KiB, and
 // shorter chunks give better BM25 relevance per-hit plus tighter
-// snippet fragments. The old 10 KiB target was an order of magnitude
-// larger than the sweet spot; smaller chunks also produce smaller
-// highlight fragments without losing recall because Bleve scores
-// each chunk independently.
+// snippet fragments. Smaller chunks also produce smaller highlight
+// fragments without losing recall because Bleve scores each chunk
+// independently.
 //
 // Raising this value costs index size and relevance; lowering it
 // below ~512 bytes costs Bleve document-metadata overhead.
 const DefaultChunkTargetBytes = 2 * 1024
 
+// defaultTextOutputCap is the fallback ceiling on accumulated
+// decompressed/decoded text when a caller does not supply an explicit
+// budget (maxBytes <= 0). ZIP/XML/PDF extractors cap their *compressed*
+// input but a malicious archive can still amplify a small input into
+// gigabytes of text inside an in-memory strings.Builder. Bounding the
+// output caps that amplification — we return whatever partial text we
+// accumulated up to the cap. 64 MiB of indexable text per file is far
+// beyond any legitimate document and keeps the pipeline RAM-safe.
+const defaultTextOutputCap = 64 * 1024 * 1024
+
 // chunkMaxOverrunRatio bounds how much bigger a chunk is allowed to be
-// than DefaultChunkTargetBytes before we force a split even in the
-// middle of a paragraph. 1.5× means "paragraphs up to 15 KiB stay
-// whole, longer ones get re-split at line boundaries."
+// than the target before we force a split even in the middle of a
+// paragraph. 1.5× means "paragraphs up to 3 KiB (at the default
+// target) stay whole, longer ones get re-split at line boundaries."
 const chunkMaxOverrunRatio = 1.5
 
 // smallFileFactor controls the "don't chunk tiny files" optimisation:
-// a file whose extracted text is smaller than
-// DefaultChunkTargetBytes * smallFileFactor is returned as a single
-// chunk regardless of the target size. This avoids the pathological
-// case where a 12 KiB file becomes two 6 KiB chunks.
+// a file whose extracted text is no larger than
+// targetBytes * smallFileFactor is returned as a single chunk
+// regardless of the target size. This avoids the pathological case
+// where a barely-oversized file becomes two half-sized chunks.
 const smallFileFactor = 1.25
 
 // chunkText splits text into a sequence of Chunks no larger than about
 // targetBytes each, preferring split points at paragraph boundaries
-// (blank lines), then line boundaries, then spaces, then arbitrary
-// positions as a last resort. Each returned Chunk carries the byte
-// offset at which it begins in the input.
+// (blank lines), then line boundaries, then hard byte splits at exact
+// targetBytes intervals as a last resort. Each returned Chunk carries
+// the byte offset at which it begins in the input.
 //
 // Small inputs (see smallFileFactor) are returned as a single chunk.
 //
@@ -54,7 +63,7 @@ func chunkText(text string, targetBytes int) []Chunk {
 	// Walk the text by paragraphs (blank-line separated). Accumulate
 	// paragraphs into the current chunk until adding another would
 	// push us past targetBytes. Any single paragraph larger than
-	// maxChunk is handed to chunkBySmaller for recursive splitting.
+	// maxChunk is handed to chunkByLine for line-level splitting.
 	var (
 		out    []Chunk
 		curBuf strings.Builder
@@ -71,9 +80,16 @@ func chunkText(text string, targetBytes int) []Chunk {
 
 	for pos < len(text) {
 		para, next := nextParagraph(text, pos)
+		// paraStart is where the paragraph's first byte actually sits:
+		// nextParagraph skips leading blank lines internally, so offsets
+		// recorded from the raw pos would point at the blank run.
+		paraStart := pos
+		for paraStart < len(text) && (text[paraStart] == '\n' || text[paraStart] == '\r') {
+			paraStart++
+		}
 		// Starting a new chunk: record the input offset.
 		if curBuf.Len() == 0 {
-			curOff = pos
+			curOff = paraStart
 		}
 
 		// A single paragraph that is too big gets split by line.
@@ -82,7 +98,7 @@ func chunkText(text string, targetBytes int) []Chunk {
 			for _, sub := range chunkByLine(para, targetBytes, maxChunk) {
 				out = append(out, Chunk{
 					Text:   sub.Text,
-					Offset: int64(pos) + sub.Offset,
+					Offset: int64(paraStart) + sub.Offset,
 				})
 			}
 			pos = next
@@ -93,7 +109,7 @@ func chunkText(text string, targetBytes int) []Chunk {
 		// AND we already have at least one paragraph — flush first.
 		if curBuf.Len() > 0 && curBuf.Len()+len(para)+2 > targetBytes {
 			flush()
-			curOff = pos
+			curOff = paraStart
 		}
 
 		if curBuf.Len() > 0 {
@@ -108,9 +124,9 @@ func chunkText(text string, targetBytes int) []Chunk {
 
 // nextParagraph returns the paragraph starting at pos and the position
 // immediately after the blank line that terminates it. A paragraph is
-// any run of non-empty lines delimited by "\n\n" (optionally with
-// trailing \r). If there is no more blank line, the entire remainder
-// of the text is returned as the last paragraph.
+// any run of non-empty lines delimited by "\n\n" (optionally with a
+// carriage return: "\n\r\n"). If there is no more blank line, the
+// entire remainder of the text is returned as the last paragraph.
 func nextParagraph(text string, pos int) (string, int) {
 	if pos >= len(text) {
 		return "", pos
@@ -121,7 +137,7 @@ func nextParagraph(text string, pos int) (string, int) {
 	}
 	start := pos
 	for pos < len(text) {
-		// Look for "\n\n" or "\r\n\r\n" (allow either).
+		// Look for "\n\n" or "\n\r\n" (allow either).
 		if text[pos] == '\n' {
 			if pos+1 < len(text) && text[pos+1] == '\n' {
 				return strings.TrimRight(text[start:pos], "\r\n"), pos + 2
@@ -137,7 +153,8 @@ func nextParagraph(text string, pos int) (string, int) {
 
 // chunkByLine splits a paragraph that exceeds maxChunk at single-line
 // boundaries, targeting targetBytes per chunk. Returned chunks carry
-// offsets relative to the start of the paragraph.
+// offsets relative to the start of the paragraph; joined back together
+// they reproduce the input byte-for-byte.
 func chunkByLine(text string, targetBytes, maxChunk int) []Chunk {
 	var (
 		out     []Chunk

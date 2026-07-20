@@ -14,82 +14,85 @@ import (
 	"github.com/swartznet/swartznet/internal/httpapi"
 )
 
-// cmdFlag implements `swartznet flag <infohash>`. POSTs to the
-// running daemon's /flag endpoint, which decrements every known
-// indexer's reputation for the given infohash. Used by the user
-// to mark a hit as spam or unwanted.
-func cmdFlag(args []string, stdout, stderr io.Writer) int {
-	return cmdFlagOrConfirm("flag", "/flag", args, stdout, stderr)
-}
-
-// cmdConfirm implements `swartznet confirm <infohash>`. POSTs to
-// /confirm, which adds the infohash to the known-good Bloom
-// filter so future Layer-D queries boost it.
-//
-// Auto-confirm on download completion is wired in the engine, so
-// most users will never need this command — it exists for the
-// "this came from elsewhere but I trust it" case.
+// cmdConfirm marks a search hit's content as good over the daemon's shared
+// confirm path.
 func cmdConfirm(args []string, stdout, stderr io.Writer) int {
-	return cmdFlagOrConfirm("confirm", "/confirm", args, stdout, stderr)
+	return confirmFlag("confirm", args, stdout, stderr)
 }
 
-func cmdFlagOrConfirm(name, endpoint string, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+// cmdFlag reports a search hit as bad. It honestly says "no reputations
+// changed" when the daemon demoted nobody (the §6 dishonest-success fix).
+func cmdFlag(args []string, stdout, stderr io.Writer) int {
+	return confirmFlag("flag", args, stdout, stderr)
+}
+
+func confirmFlag(action string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var apiAddr string
-	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "address of the running swartznet HTTP API")
-	if err := fs.Parse(args); err != nil {
+	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
+		return parseErrExit(err)
+	}
+	if len(pos) != 1 {
+		fmt.Fprintf(stderr, "usage: swartznet %s <infohash>\n", action)
 		return exitUsage
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: swartznet %s <infohash>\n", name)
-		return exitUsage
-	}
-	infoHash := strings.ToLower(strings.TrimSpace(fs.Arg(0)))
-	if len(infoHash) != 40 {
+	ih := strings.ToLower(strings.TrimSpace(pos[0]))
+	if !validInfoHash(ih) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}
 
-	body, err := json.Marshal(httpapi.FlagRequest{InfoHash: infoHash})
-	if err != nil {
-		return reportRunErr(err, stderr)
-	}
+	body, _ := json.Marshal(httpapi.FlagRequest{InfoHash: ih})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+apiAddr+endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+*apiAddr+"/"+action, bytes.NewReader(body))
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Fprintf(stderr, "swartznet: cannot reach the daemon at %s (%v)\n", apiAddr, err)
+		fmt.Fprintf(stderr, "swartznet: cannot reach the daemon at %s (%v)\n", *apiAddr, err)
 		fmt.Fprintln(stderr, "start it with: swartznet add <magnet>")
 		return exitRuntime
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, data)
+		b, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, b)
 		return exitRuntime
+	}
+	raw, _ := io.ReadAll(resp.Body)
+
+	if action == "confirm" {
+		var out httpapi.ConfirmResponse
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return reportRunErr(err, stderr)
+		}
+		fmt.Fprintf(stdout, "confirmed: %s\n", ih)
+		if out.IndexersConfirmed > 0 {
+			fmt.Fprintf(stdout, "  boosted %d indexer(s)\n", out.IndexersConfirmed)
+		}
+		return exitOK
 	}
 
 	var out httpapi.FlagResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return reportRunErr(err, stderr)
 	}
-	if out.OK {
-		// English-friendly past tense: "flag" → "flagged",
-		// "confirm" → "confirmed". Avoid the lazy "%sed" format
-		// which yields "flaged".
-		past := name + "ed"
-		if name == "flag" {
-			past = "flagged"
-		}
-		fmt.Fprintf(stdout, "%s: %s\n", past, out.InfoHash)
-		return exitOK
+	fmt.Fprintf(stdout, "flagged: %s\n", ih)
+	// Honest reporting — never claim a demotion that did not happen.
+	switch {
+	case out.IndexersFlagged > 0:
+		fmt.Fprintf(stdout, "  demoted %d indexer(s)\n", out.IndexersFlagged)
+	case out.Attribution == "trusted-exempt":
+		fmt.Fprintln(stdout, "  no reputations changed (source is a trusted publisher)")
+	case out.Attribution == "trust-unavailable":
+		fmt.Fprintln(stdout, "  no reputations changed (trust list unavailable — flag suppressed to protect trusted publishers)")
+	default:
+		fmt.Fprintln(stdout, "  no reputations changed (this hit has no attributed source)")
 	}
-	fmt.Fprintf(stderr, "swartznet: %s did not succeed\n", name)
-	return exitRuntime
+	return exitOK
 }

@@ -2,72 +2,47 @@ package companion
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/anacrolix/torrent/bencode"
-	"github.com/anacrolix/torrent/metainfo"
-
-	"github.com/swartznet/swartznet/internal/indexer"
 )
 
-// SaltContentIndex is the BEP-44 salt under which every
-// SwartzNet publisher publishes their companion content-index
-// pointer. Subscribers compute target = SHA1(pubkey ||
-// SaltContentIndex) and issue a get against it. Stable
-// constant; never change without bumping FormatVersion.
-const SaltContentIndex = "_sn_content_index"
-
-// PointerPutter is the narrow interface companion.Publisher
-// needs from a BEP-44 mutable-item put implementation. The
-// dhtindex.AnacrolixPutter satisfies it via PutInfohashPointer.
-//
-// Defined as a local interface so the companion package keeps
-// no hard dependency on internal/dhtindex — same adapter
-// pattern as everywhere else in the codebase.
-type PointerPutter interface {
-	PutInfohashPointer(ctx context.Context, salt []byte, infohash [20]byte) error
+// contentFingerprint hashes a companion index's CORPUS (its torrent records,
+// which carry the extracted content) while ignoring the top-level GeneratedAt +
+// Publisher fields. Per-torrent hashes are XORed so the result is independent of
+// the torrent order the corpus source yields (infohashes are unique, so no two
+// cancel out). Two rebuilds of the same corpus produce the same fingerprint.
+func contentFingerprint(idx CompanionIndex) [32]byte {
+	var fp [32]byte
+	for _, tr := range idx.Torrents {
+		raw, err := json.Marshal(tr)
+		if err != nil {
+			continue
+		}
+		h := sha256.Sum256(raw)
+		for i := range fp {
+			fp[i] ^= h[i]
+		}
+	}
+	return fp
 }
 
-// TorrentSeeder is the narrow interface companion.Publisher
-// needs from the engine in order to seed the freshly-built
-// companion torrent. The engine's AddTorrentMetaInfo method
-// satisfies it; the publisher does not need a typed handle
-// back.
-type TorrentSeeder interface {
-	AddTorrentMetaInfo(mi *metainfo.MetaInfo) (any, error)
-}
+// ErrTooSoon is returned by RefreshNow when a manual refresh is throttled.
+var ErrTooSoon = errors.New("companion: refresh throttled (too soon since last refresh)")
 
-// PublisherOptions tunes how the periodic worker behaves. The
-// defaults are sensible for a normal desktop install.
+// PublisherOptions tunes the companion publisher.
 type PublisherOptions struct {
-	// Dir is the on-disk directory for the companion files
-	// (the JSON.gz payload and the wrapping .torrent). Required.
-	Dir string
-	// PublisherKey is the publisher's ed25519 pubkey. Used as
-	// the BEP-44 namespace for the pointer (target =
-	// SHA1(PublisherKey || SaltContentIndex)) and as the
-	// "publisher" field on the JSON document.
-	PublisherKey [32]byte
-	// Interval is how often the worker rebuilds the companion
-	// index and re-publishes the pointer. Default: 1h. The
-	// pointer expires after 2h per BEP-44 so the interval
-	// must be ≤ 1h to keep it alive.
-	Interval time.Duration
-	// MinInterval throttles how often a manual RefreshNow can
-	// fire. Useful so a UI button doesn't let the user spam
-	// the DHT. Default: 1 minute.
-	MinInterval time.Duration
-	// PutTimeout bounds a single BEP-44 put traversal.
-	// Default: 30s.
-	PutTimeout time.Duration
-	// Build controls what BuildFromIndex includes. Default:
-	// DefaultBuildOptions().
-	Build BuildOptions
+	Dir          string        // on-disk dir for the payload + .torrent; REQUIRED
+	PublisherKey [32]byte      // ed25519 pubkey: BEP-44 namespace + Publisher field
+	Interval     time.Duration // rebuild+republish cadence; default 1h (≤ the 2h pointer TTL)
+	MinInterval  time.Duration // throttle for manual RefreshNow; default 1m
+	PutTimeout   time.Duration // bounds one BEP-44 put traversal; default 30s
+	Build        BuildOptions  // what BuildFromIndex includes
 }
 
 // DefaultPublisherOptions returns the production defaults.
@@ -80,11 +55,8 @@ func DefaultPublisherOptions() PublisherOptions {
 	}
 }
 
-// RegtestPublisherOptions returns the accelerated options used
-// in regtest mode. Same philosophy as
-// dhtindex.RegtestPublisherOptions — shrink every production
-// time constant so scenario tests run in seconds, not hours.
-// NEVER use this in production.
+// RegtestPublisherOptions returns accelerated timings for scenario tests. NEVER
+// production — a real node would hammer the mainline DHT.
 func RegtestPublisherOptions() PublisherOptions {
 	return PublisherOptions{
 		Interval:    10 * time.Second,
@@ -94,28 +66,11 @@ func RegtestPublisherOptions() PublisherOptions {
 	}
 }
 
-// Publisher is the long-running worker that owns the F3
-// companion-index publication path:
-//
-//  1. Walk the local Bleve index to build a CompanionIndex.
-//  2. Encode + write to disk as
-//     <Dir>/swartznet-content-index-v1.json.gz.
-//  3. Wrap it in a v1 .torrent metainfo and write
-//     <Dir>/companion.torrent.
-//  4. Add the metainfo to the engine so it gets seeded.
-//  5. Publish a BEP-44 mutable item containing the new
-//     infohash at salt SaltContentIndex.
-//
-// Refresh schedule: every PublisherOptions.Interval (default
-// 1h). Manual triggers via RefreshNow are throttled by
-// MinInterval. The current pointer infohash and last refresh
-// time are exposed via Status() so the GUI / status command
-// can show them.
-//
-// Concurrent-safe; Start launches one goroutine, Stop tears it
-// down idempotently.
+// Publisher rebuilds and republishes a companion index on a ticker. lastRefresh
+// (the last SUCCESSFUL publish) advances ONLY on success, so it truthfully
+// answers "is my pointer still alive (<2h)?".
 type Publisher struct {
-	idx       *indexer.Index
+	src       CorpusSource
 	putter    PointerPutter
 	seeder    TorrentSeeder
 	pubkeyHex string
@@ -123,30 +78,33 @@ type Publisher struct {
 	log       *slog.Logger
 
 	mu             sync.Mutex
-	lastRefresh    time.Time
+	lastRefresh    time.Time // last SUCCESSFUL publish
+	lastAttempt    time.Time // last attempt of any outcome
 	lastInfoHash   string
 	lastError      string
 	publishedCount int
+	lastSeededIH   [20]byte // the companion seed torrent currently held (zero = none)
+	// lastContentFP fingerprints the last-published CORPUS (torrents + content,
+	// excluding the timestamp); lastGeneratedAt is the timestamp that went with
+	// it. When a rebuild's content is unchanged, the publisher reuses that
+	// timestamp so the payload — and thus the companion infohash — is byte-
+	// identical, so followers' pointer dedup fires and they do not re-fetch +
+	// re-ingest an unchanged snapshot every interval. The pointer is still re-put
+	// (BEP-44 TTL refresh), just at the SAME infohash.
+	lastContentFP   [32]byte
+	lastGeneratedAt int64
 
 	startOnce sync.Once
 	stopOnce  sync.Once
 	stopCh    chan struct{}
-	trigger   chan struct{}
+	trigger   chan struct{} // buffered cap 1
 	wg        sync.WaitGroup
 }
 
-// NewPublisher constructs a Publisher. Returns an error for
-// nil collaborators or an empty Dir; everything else is
-// validated lazily on the first refresh.
-func NewPublisher(
-	idx *indexer.Index,
-	putter PointerPutter,
-	seeder TorrentSeeder,
-	opts PublisherOptions,
-	log *slog.Logger,
-) (*Publisher, error) {
-	if idx == nil {
-		return nil, errors.New("companion: nil index")
+// NewPublisher validates its ports and defaults its options.
+func NewPublisher(src CorpusSource, putter PointerPutter, seeder TorrentSeeder, opts PublisherOptions, log *slog.Logger) (*Publisher, error) {
+	if src == nil {
+		return nil, errors.New("companion: nil corpus source")
 	}
 	if putter == nil {
 		return nil, errors.New("companion: nil putter")
@@ -169,12 +127,11 @@ func NewPublisher(
 	if opts.PutTimeout <= 0 {
 		opts.PutTimeout = 30 * time.Second
 	}
-	pubkeyHex := hexEncode(opts.PublisherKey[:])
 	return &Publisher{
-		idx:       idx,
+		src:       src,
 		putter:    putter,
 		seeder:    seeder,
-		pubkeyHex: pubkeyHex,
+		pubkeyHex: hex.EncodeToString(opts.PublisherKey[:]),
 		opts:      opts,
 		log:       log,
 		stopCh:    make(chan struct{}),
@@ -182,8 +139,7 @@ func NewPublisher(
 	}, nil
 }
 
-// Start launches the worker goroutine. Idempotent — subsequent
-// calls are no-ops (guarded by a sync.Once).
+// Start launches the worker goroutine (idempotent).
 func (p *Publisher) Start() {
 	p.startOnce.Do(func() {
 		p.wg.Add(1)
@@ -191,82 +147,42 @@ func (p *Publisher) Start() {
 	})
 }
 
-// Stop signals the worker to finish its current refresh and
-// exit, then waits for it. Idempotent.
+// Stop signals the worker and waits for it (idempotent). Closing stopCh cancels
+// the run-context so an in-flight put is cancelled rather than blocking Stop.
 func (p *Publisher) Stop() {
-	p.stopOnce.Do(func() {
-		close(p.stopCh)
-	})
+	if p == nil {
+		return
+	}
+	p.stopOnce.Do(func() { close(p.stopCh) })
 	p.wg.Wait()
 }
 
-// RefreshNow asks the worker to perform an immediate refresh
-// out-of-band. Subject to MinInterval throttling — if a
-// refresh ran recently, this returns ErrTooSoon and the
-// scheduled refresh tick handles things normally.
+// RefreshNow requests an immediate rebuild, throttled by MinInterval measured
+// against the last ATTEMPT (so a failed retry cannot masquerade as a recent
+// successful publish).
 func (p *Publisher) RefreshNow() error {
 	p.mu.Lock()
-	if !p.lastRefresh.IsZero() && time.Since(p.lastRefresh) < p.opts.MinInterval {
+	if !p.lastAttempt.IsZero() && time.Since(p.lastAttempt) < p.opts.MinInterval {
 		p.mu.Unlock()
 		return ErrTooSoon
 	}
 	p.mu.Unlock()
 	select {
 	case p.trigger <- struct{}{}:
-		return nil
 	default:
-		// A trigger is already queued; that's good enough.
-		return nil
 	}
+	return nil
 }
 
-// ErrTooSoon is returned by RefreshNow when called within
-// PublisherOptions.MinInterval of the previous refresh.
-var ErrTooSoon = errors.New("companion: refresh throttled (too soon since last refresh)")
-
-// Status is the publisher's view of its own state, suitable
-// for /status output.
-type PublisherStatus struct {
-	LastRefresh    time.Time
-	LastInfoHash   string
-	LastError      string
-	PublishedCount int
-	PubKeyHex      string
-}
-
-// Status returns a snapshot of the publisher's state.
-func (p *Publisher) Status() PublisherStatus {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return PublisherStatus{
-		LastRefresh:    p.lastRefresh,
-		LastInfoHash:   p.lastInfoHash,
-		LastError:      p.lastError,
-		PublishedCount: p.publishedCount,
-		PubKeyHex:      p.pubkeyHex,
-	}
-}
-
-// run is the worker goroutine. It services the refresh ticker
-// and out-of-band RefreshNow triggers until Stop is called.
 func (p *Publisher) run() {
 	defer p.wg.Done()
-
-	// A context tied to stopCh means an in-flight Put traversal
-	// gets cancelled the moment Stop is called. Without this,
-	// Stop could block for up to PutTimeout (default 30s) if
-	// the current refresh was in the DHT put phase.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
 		<-p.stopCh
 		cancel()
 	}()
-
-	// Run an initial refresh as soon as the worker starts so
-	// the GUI does not have to wait an hour to see anything.
-	p.refreshOnce(ctx)
-
+	p.refreshOnce(ctx) // immediate first build so the GUI shows something fast
 	tick := time.NewTicker(p.opts.Interval)
 	defer tick.Stop()
 	for {
@@ -281,83 +197,138 @@ func (p *Publisher) run() {
 	}
 }
 
-// refreshOnce runs the full publish pipeline once: build →
-// write → seed → put pointer. Failures at any step are
-// recorded on the publisher state and logged but never
-// escalated. The caller-supplied parent ctx is threaded into
-// the DHT put so Stop can short-circuit a slow traversal.
+// refreshOnce runs the full pipeline once. Every failure is recorded + logged
+// but never escalated — the worker keeps running.
 func (p *Publisher) refreshOnce(parent context.Context) {
-	idx, err := BuildFromIndex(p.idx, p.pubkeyHex, p.opts.Build)
+	idx, err := BuildFromIndex(p.src, p.pubkeyHex, p.opts.Build)
 	if err != nil {
 		p.recordFailure(fmt.Errorf("build: %w", err))
 		return
 	}
+	// EMPTY = FAILURE: an empty local index is not a no-op success; lastRefresh
+	// does not advance, and the next tick may find something.
 	if len(idx.Torrents) == 0 {
-		// Nothing indexed yet — publish nothing. The next
-		// refresh tick may find something.
 		p.recordFailure(errors.New("nothing to publish (empty local index)"))
 		return
 	}
+	// If the corpus is unchanged since the last publish, reuse the prior
+	// timestamp so the payload (and infohash) is identical — the pointer still
+	// re-publishes (TTL refresh) but at the SAME infohash, so followers do not
+	// re-download + re-ingest the unchanged snapshot.
+	fp := contentFingerprint(idx)
+	p.mu.Lock()
+	if fp == p.lastContentFP && p.lastGeneratedAt != 0 {
+		idx.GeneratedAt = p.lastGeneratedAt
+	} else {
+		// Keep GeneratedAt strictly monotonic across content changes. Followers
+		// reject a snapshot whose GeneratedAt regressed (replay defense), so if
+		// the wall clock stepped backward (NTP correction, VM migration) we must
+		// still advance past the last published timestamp — otherwise legitimate
+		// new content would be silently dropped by every follower until the clock
+		// caught back up. The bump only triggers under clock regression; normal
+		// forward time already satisfies now > lastGeneratedAt.
+		if p.lastGeneratedAt != 0 && idx.GeneratedAt <= p.lastGeneratedAt {
+			idx.GeneratedAt = p.lastGeneratedAt + 1
+		}
+		p.lastContentFP = fp
+		p.lastGeneratedAt = idx.GeneratedAt
+	}
+	p.mu.Unlock()
 
-	_, mi, err := WriteCompanionFiles(p.opts.Dir, idx)
+	jsonPath, mi, err := WriteCompanionFiles(p.opts.Dir, idx)
 	if err != nil {
 		p.recordFailure(fmt.Errorf("write: %w", err))
 		return
 	}
-
-	if _, err := p.seeder.AddTorrentMetaInfo(mi); err != nil {
-		// Re-adding the same metainfo is benign (anacrolix
-		// dedupes by infohash internally), so swallow that
-		// error rather than treating it as a failure.
+	// Seed errors are benign (anacrolix dedupes by infohash) — log at Debug and
+	// continue to publish the pointer regardless. The single file is served
+	// from where WriteCompanionFiles wrote it.
+	if err := p.seeder.SeedMetaInfo(mi, jsonPath); err != nil {
 		p.log.Debug("companion.publisher.seed_warn", "err", err)
 	}
-
 	infoHash := mi.HashInfoBytes()
+
+	// Publish the pointer BEFORE dropping the previous seed. If the put fails, the
+	// live BEP-46 pointer still resolves to the PREVIOUS infohash, so we must keep
+	// seeding it — dropping it first would leave a new follower unable to fetch
+	// the still-advertised (old) index until the next successful refresh.
 	ctx, cancel := context.WithTimeout(parent, p.opts.PutTimeout)
 	defer cancel()
 	if err := p.putter.PutInfohashPointer(ctx, []byte(SaltContentIndex), infoHash); err != nil {
 		p.recordFailure(fmt.Errorf("put pointer: %w", err))
+		// The pointer was NOT published, so no live BEP-46 pointer references this
+		// freshly-seeded infohash. Drop it UNLESS it is the one still advertised by
+		// the last SUCCESSFUL pointer (unchanged corpus → identical infohash → a
+		// TTL-refresh retry), which must keep seeding. Without this, every
+		// put-failure-coinciding-with-a-content-change leaks one companion seed
+		// (seeded forever, referenced by nothing) — defeating the drop logic below
+		// whose whole purpose is that companion seeds do not accumulate.
+		p.mu.Lock()
+		advertised := p.lastSeededIH
+		p.mu.Unlock()
+		if [20]byte(infoHash) != advertised {
+			if derr := p.seeder.DropTorrent([20]byte(infoHash)); derr != nil {
+				p.log.Debug("companion.publisher.drop_orphan_warn", "err", derr)
+			}
+		}
 		return
 	}
 
+	// Put succeeded — now it is safe to drop the previously-seeded companion
+	// torrent (its infohash differs because the content changed) so companion
+	// seeds do not accumulate in the engine over the node's lifetime.
+	p.mu.Lock()
+	prev := p.lastSeededIH
+	p.lastSeededIH = [20]byte(infoHash)
+	p.mu.Unlock()
+	if prev != ([20]byte{}) && prev != [20]byte(infoHash) {
+		if err := p.seeder.DropTorrent(prev); err != nil {
+			p.log.Debug("companion.publisher.drop_warn", "err", err)
+		}
+	}
 	p.recordSuccess(infoHash.HexString())
-	p.log.Info("companion.publisher.refreshed",
-		"infohash", infoHash.HexString(),
-		"torrents", len(idx.Torrents),
-	)
+	p.log.Info("companion.publisher.refreshed", "infohash", infoHash.HexString(), "torrents", len(idx.Torrents))
 }
 
 func (p *Publisher) recordSuccess(infoHashHex string) {
+	now := time.Now()
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.lastRefresh = time.Now()
+	p.lastRefresh = now
+	p.lastAttempt = now
 	p.lastInfoHash = infoHashHex
 	p.lastError = ""
 	p.publishedCount++
+	p.mu.Unlock()
 }
 
 func (p *Publisher) recordFailure(err error) {
 	p.log.Warn("companion.publisher.refresh_failed", "err", err)
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.lastRefresh = time.Now()
+	p.lastAttempt = time.Now()
 	p.lastError = err.Error()
+	p.mu.Unlock()
 }
 
-// hexEncode is a tiny local hex helper that avoids importing
-// the encoding/hex package. The pubkey is exactly 32 bytes so
-// the output is exactly 64 chars.
-func hexEncode(b []byte) string {
-	const digits = "0123456789abcdef"
-	out := make([]byte, len(b)*2)
-	for i, x := range b {
-		out[i*2] = digits[x>>4]
-		out[i*2+1] = digits[x&0x0f]
+// PublisherStatus is a point-in-time view of the publisher.
+type PublisherStatus struct {
+	LastRefresh    time.Time // last SUCCESSFUL publish (zero until first success)
+	LastAttempt    time.Time
+	LastInfoHash   string
+	LastError      string
+	PublishedCount int
+	PubKeyHex      string
+}
+
+// Status snapshots the publisher state.
+func (p *Publisher) Status() PublisherStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return PublisherStatus{
+		LastRefresh:    p.lastRefresh,
+		LastAttempt:    p.lastAttempt,
+		LastInfoHash:   p.lastInfoHash,
+		LastError:      p.lastError,
+		PublishedCount: p.publishedCount,
+		PubKeyHex:      p.pubkeyHex,
 	}
-	return string(out)
 }
-
-// _ ensures we use these imports even if compile-time
-// reflection elides one of them on a refactor.
-var _ = sha1.Sum
-var _ = bencode.Marshal

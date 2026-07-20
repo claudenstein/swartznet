@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Rebuild status (Phase 4, since 2026-07-17)
+
+This tree is mid-way through a from-scratch rebuild (`SPEC.md` → `ARCHITECTURE.md` →
+`PLAN.md`, gate cleared by the author 2026-07-17). The legacy implementation lives
+untouched on the **`legacy-snapshot`** branch as a read-only behavioral reference; the
+working tree grows slice by slice per `PLAN.md`. Slices 0–11 have landed: config,
+identity, daemon, httpapi, `contracts/*`, the anacrolix engine, the CLI (`add` IS the
+daemon — there is no `serve`), Layer L (Bleve search), trust/reputation/Bloom, the
+capability mask, Layer S (`sn_search` peer-wire), RIBLT record sync, Layer D (BEP-44
+keyword index), the companion content-index (BEP-46), and the native Fyne GUI. The GUI
+binary now exists — rebuild **both** `dist/swartznet` and
+`dist/swartznet-gui-dev-linux-amd64` per change (`./scripts/build-gui.sh dev`). Sections
+below describing the repository layout refer to the target state; packages appear as
+their slice lands. Remaining: Slice 12 (Aggregate/PPMI backend, opt-in) and Slice 13
+(hardening). Per-slice binary DoD scripts live in `scripts/dod-slice*.sh`; the
+timing-sensitive multi-client tests live in `internal/wirecompat/scenarios` (excluded
+from CI, run locally via `go test -race ./...`). Running decisions go in `DECISIONS.md`.
+
 ## What this is
 
 SwartzNet is a Go BitTorrent client that embeds [`anacrolix/torrent`](https://github.com/anacrolix/torrent) and layers full-text search on top. The load-bearing constraint is **mainline compatibility**: no new reserved bit, no new DHT verb, no new UDP port. A vanilla client must see nothing but BEP-3/5/9/10/44 traffic. Any change that would break this must be called out.
@@ -44,8 +62,7 @@ Integration testbed (Docker + netem scenarios) lives in `testbed/`; multi-peer f
 - `cmd/dht-smoke` — standalone DHT probe for ops debugging.
 - `internal/daemon` — **the wiring point**. `daemon.New(ctx, Options)` constructs engine + indexer + companion pub/sub + httpapi and is the single source of truth for startup order and cleanup. All three frontends call into it.
 - `internal/engine` — BitTorrent engine wrapper around `anacrolix/torrent`. Owns piece-completion callbacks, file-priority, rate-limits, session save/restore, `.torrent` creation, publisher signing integration.
-- `internal/indexer` — Bleve schema (currently v3), ingestion pipeline, text extractors under `indexer/extractors/`. Extractor registry is where PDF/EPUB/DOCX/ODT/plaintext/subtitle support lives.
-- `internal/search` — query engine over Bleve, shared by local CLI, HTTP API, swarm and DHT layers.
+- `internal/indexer` — Bleve schema (currently v3), ingestion pipeline, text extractors under `indexer/extractors/`. Extractor registry is where PDF/EPUB/DOCX/ODT/plaintext/subtitle support lives. Layer-L (local Bleve) queries also live here; there is no separate `internal/search` package.
 - `internal/swarmsearch` — Layer S: `sn_search` BEP-10 extension. LTEP message envelope, services-bit capability negotiation, LRU hit cache.
 - `internal/dhtindex` — Layer D: BEP-44 mutable-item keyword index publisher/fetcher.
 - `internal/companion` — Companion-index torrents (BEP-46 pointer pattern) for publishing/fetching compact content indexes.
@@ -59,7 +76,7 @@ Integration testbed (Docker + netem scenarios) lives in `testbed/`; multi-peer f
 
 **Three frontends, one daemon.** CLI, web UI (embedded via `go:embed` in the CLI binary), and native GUI all obtain a fully-wired node from `internal/daemon`. They differ only in presentation. Changes to subsystem lifecycle belong in `daemon.New` / `Daemon.Close`, not in each frontend.
 
-**Three search layers, strict isolation.** Layer L (local Bleve) never knows about the wire; Layer S (`sn_search` peer-wire) never knows about Bleve internals; Layer D (DHT BEP-44) never knows about the HTTP API. The only cross-layer type is a small `SearchResult` struct. Preserve these boundaries when adding features.
+**Three search layers, strict isolation.** Layer L (local Bleve) never knows about the wire; Layer S (`sn_search` peer-wire) never knows about Bleve internals; Layer D (DHT BEP-44) never knows about the HTTP API. Each layer carries its own response type (`indexer.SearchResponse`, `swarmsearch.QueryResponse`, `dhtindex.LookupResponse`); the seam is reconciled at the `httpapi` boundary, not via a shared cross-layer type. Preserve these boundaries when adding features.
 
 **Per-torrent indexing is opt-in at runtime, opt-out globally.** `Engine.SetTorrentIndexing(hex, bool)` toggles per-torrent; the global `--no-index` flag prevents Bleve from opening at all (and cascades to disable Layer D publishing). The flag is checked in `engine.autoIndex` (torrent-level) and `engine.ingestFileEvents` (content-level).
 

@@ -7,6 +7,606 @@ format follows [Keep a Changelog][kac]; the project follows
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 
+## v0.9.0 — 2026-07-20 (preview release)
+
+First tagged build of the from-scratch rebuild. Pre-1.0 preview — the wire
+protocol is compatibility-frozen but the local APIs are still in motion. The
+rebuild log below (Phase 4) has the slice-by-slice detail; the headlines:
+
+- **Three frontends, one daemon.** A pure-Go static CLI (`swartznet`), an
+  embedded single-page **web UI** at `http://localhost:7654/`, and a native
+  cross-platform **Fyne GUI** (`swartznet-gui`) all drive the same
+  `internal/daemon` node.
+- **Create a torrent from any frontend.** `swartznet create` on the CLI, a
+  Create-torrent dialog in the native GUI, and `POST /torrents/create` behind a
+  create form in the web UI — with optional identity-signing and seed-in-place.
+- **Three search layers.** Layer L (local Bleve full-text), Layer S (`sn_search`
+  BEP-10 peer-wire), Layer D (BEP-44 DHT keyword index) — all mainline-compatible
+  (no new reserved bit, DHT verb, or UDP port).
+- **Spam resistance.** Known-good Bloom filter, Bayesian-smoothed per-publisher
+  reputation, and a targeted spam-flag gesture.
+- **Copyable publisher id** in both UIs; **whitepaper** shipped as
+  [`docs/whitepaper.pdf`](docs/whitepaper.pdf).
+- Hardened against the bencode alloc-amplification class and a batch of
+  concurrency/TOCTOU issues found by adversarial review; the full tree is
+  race-clean under `go test -race ./...`.
+
+Binaries (CLI for linux/darwin/windows × amd64/arm64, plus a linux-amd64 GUI)
+and `SHA256SUMS` are attached to the [GitHub release][rel-0-9-0].
+
+[rel-0-9-0]: https://github.com/claudenstein/swartznet/releases/tag/v0.9.0
+
+## Rebuild (in progress — Phase 4)
+
+The tree is being rebuilt from scratch against `SPEC.md` /
+`ARCHITECTURE.md` / `PLAN.md`; the legacy implementation lives on the
+`legacy-snapshot` branch. Entries here track rebuild slices; everything
+below "Unreleased" describes the legacy line.
+
+### Create a torrent from both UIs + copyable publisher id (2026-07-20)
+
+**Create torrent** is now in **both** frontends (previously CLI-only,
+`swartznet create`):
+
+- **Native GUI** — a Create torrent button on the Downloads tab opens a dialog
+  with File… / Folder… OS pickers, an auto-derived (editable) output `.torrent`
+  path, optional trackers/comment/private (BEP-27), opt-in Sign with my identity,
+  and Seed after creating. Hashing runs off the UI thread behind a progress bar.
+- **Web UI** — the same on the Downloads tab, via a new `POST /torrents/create`
+  endpoint. Because a browser can't pick server-side paths, the source/output are
+  typed paths on the machine running the daemon (which does the hashing); the
+  handler extends its write deadline so a long hash isn't cut off by the API
+  timeout. Same options, sign, and seed-in-place.
+
+Both create paths seed through the running engine when asked, so the new torrent
+appears in the list immediately.
+
+**Copyable publisher id.** The node's publisher pubkey is now copyable in both
+UIs — a Copy button in the native GUI's About dialog, and Copy buttons on the web
+UI's Status and Settings→About views (the full key is served by `/status`).
+
+### Test environment + CLI fixes (2026-07-19)
+
+A unified test harness (`scripts/run-all-tests.sh`) now runs the whole suite from
+one entry point — both binaries, the race unit set, every per-slice DoD, the
+web-client DoD, a new whole-CLI end-to-end (`scripts/e2e-cli.sh`), and the
+CI-mirror gate. Building and running it caught three real bugs, now fixed:
+
+- **CLI arg ordering.** `create`, `files`, `confirm`, and `flag` now accept their
+  positional argument before or after flags (e.g. `swartznet files <ih>
+  --api-addr X` and `swartznet create ./dir -o out.torrent`), matching what their
+  usage strings show — previously the flag was silently ignored or the command
+  errored.
+- **`search` with a running daemon.** A plain `search <query>` no longer fails
+  with "index locked" when a daemon is running; it transparently falls back to a
+  local search routed through the daemon, so it works with or without one.
+- **Companion status codes.** `follow`/`unfollow`/`refresh` now return HTTP 503
+  (feature unavailable) instead of 500/429 when the companion subsystem is not
+  wired (e.g. under `--no-dht`), so clients can disable the control rather than
+  show a spurious error.
+
+### Adversarial bug-hunt hardening (2026-07-19)
+
+Multi-round adversarial bug hunts (each finding verified with a concrete repro
+and fixed with a neutralize-to-fail regression test) hardened the untrusted-input
+and concurrency surfaces:
+
+- **Security — `sn_search` decode DoS (HIGH).** Every `sn_search` peer-wire
+  decoder (`contracts/ltepwire`) used an unbounded bencode decode, so a ~32-byte
+  frame declaring a huge inner string forced a ~128 MiB allocation before failing
+  — a remotely-reachable memory-exhaustion DoS on every inbound frame. Decodes are
+  now bounded to the payload size (`decodeBounded`), matching the BEP-44 side.
+- **Security — BEP-46 pointer decode.** The companion pointer decoder now bounds
+  its bencode string length, so a tiny malicious pointer from a followed publisher
+  can no longer force a ~128 MiB allocation on every sync — closing the last site
+  of the allocation-amplification class (matching the DHT/wire/tree decoders).
+- **GUI responsiveness.** The Status tab now computes its index statistics off the
+  UI thread, so a node with a large corpus no longer freezes the whole GUI every
+  couple of seconds.
+- **GUI search results.** Toggling the Swarm/DHT checkboxes while a search is in
+  flight no longer discards results that were already fetched for those layers.
+- **Security — peer-map leak.** A `peer_announce` frame processed just after a
+  peer disconnects can no longer re-create a stale peer entry, closing a slow
+  remote-triggerable memory leak.
+- **Queue accounting.** Raising a file's priority on a queued torrent no longer
+  lets it download outside the max-active-downloads cap.
+- **GUI correctness (data-safety).** The Downloads tab now targets pause/resume/
+  remove by the infohash of the selected torrent, not by a list-row index. The
+  torrent list is now returned in a deterministic (sorted) order, so a background
+  refresh can no longer reorder it under the selection — previously Remove could
+  act on a torrent the user never selected.
+- **Security — EPUB / ZIM extractor resource bombs.** A crafted EPUB whose
+  chapters decompress to gigabytes while emitting no text no longer drives
+  unbounded decompression (a shared total-decompression budget now bounds it), and
+  the ZIM decompressed-cluster cache is now bounded by aggregate bytes (not just
+  entry count), so a small crafted `.zim` can't pin gigabytes of memory.
+- **Test harness.** The s12 swarm/DHT scenario's publish-wait now has a real
+  timeout — a Layer-D publisher regression makes it report FAIL instead of hanging
+  the whole testbed run indefinitely.
+- **Security — PDF extractor OOM (DoS).** A downloaded PDF whose content stream
+  decompresses (flate) to gigabytes of text no longer OOM-crashes the daemon: the
+  extractor now bounds accumulation page-by-page and skips any page whose
+  decompressed content exceeds the budget, instead of materializing the whole
+  document's text before the size limiter ran.
+- **Security — corrupt bloom-filter header.** A corrupted or crafted
+  `known-good.bloom` with an absurd declared size no longer crashes the daemon on
+  startup; the bit count is capped and a bad file fails safe (runs bloom-less).
+- **Durability.** A torrent removal whose session-file write fails is now logged
+  instead of silently swallowed (it previously could resurrect the torrent on the
+  next restart without any indication).
+- **Security — untrusted pre-allocation.** `contracts/snagg` no longer
+  over-allocates from unauthenticated inputs: leaf/interior page decoders cap the
+  element-count hint against the remaining bytes, and `DecodeRecord` bounds its
+  bencode string length to the record size (a ~15-byte hostile record previously
+  forced a ~128 MiB allocation).
+- **Security — unbounded indexer set (DoS).** The Layer-D lookup set fed by
+  gossiped publisher keys is now capped and FIFO-evicted, so a peer flooding
+  signed records can't grow it (or per-query DHT fan-out) without bound; operator-
+  configured indexers are exempt.
+- **Privacy — sharing caps enforced on responses.** The `sn_search` responder now
+  applies the node's `FileHits`/`ContentHits` sharing prefs to the response
+  payload, not just to explicit scope requests — a name-scope query can no longer
+  extract per-file paths or content matches the operator chose to withhold.
+- **Concurrency.** Concurrent companion fetches of the same infohash retain and
+  attach atomically, closing a residual teardown race in the reference-counting.
+- **Queue accounting.** A queued but already-complete seed no longer consumes a
+  download slot in `promoteQueued`, which previously starved a real download.
+- **Companion seed accounting.** A pointer-put failure after a content change no
+  longer leaks the freshly-seeded companion torrent; and the publisher's snapshot
+  timestamp is now monotonic, so a backward clock step can't drop new content.
+- **Runtime indexing.** Re-enabling per-torrent indexing now re-writes the
+  torrent-level document (previously it stayed unsearchable by name until restart).
+- **Concurrency.** Concurrent companion fetches of the same infohash are
+  reference-counted so one finishing can't tear down the other's in-progress
+  download; `persistAdd` can no longer resurrect a torrent removed mid-add; and an
+  `Unfollow` racing a companion sync no longer resurrects dedup state.
+
+### Whitepaper (2026-07-19)
+
+- Added `docs/whitepaper.md` — a concise (~2.5k words), Bitcoin-whitepaper-styled
+  paper (abstract, numbered sections, conclusion, references) describing
+  SwartzNet's architecture and innovations: mainline-invisible search over
+  existing BEPs, the three isolated search layers (local / peer-wire / DHT),
+  signed identity and records, RIBLT set reconciliation, the signed Aggregate
+  B-tree + PPMI pointer, deny-by-default spam resistance, and the capability mask.
+
+### Web client — full embedded SPA (2026-07-19)
+
+The embedded web UI (served by the daemon at `/`) grows from a placeholder into a
+**fully functional** single-page app at feature parity with the CLI and native GUI.
+
+- Vanilla JS, native ES modules, **no build step / framework / CDN** — served via
+  the existing `go:embed` contract. Five tabs (Downloads, Search, Status,
+  Companion, Settings) matching the GUI; only the visible tab polls.
+- **Downloads:** live torrent list with progress/status/peers/rates, add-magnet,
+  pause/resume/remove (files on disk always kept; optional index-forget),
+  indexing toggle, and a per-file priority drawer.
+- **Search:** the three search layers (Local / Swarm / DHT) render as **three
+  strictly-separate result groups** — never merged, sorted, or deduped — each with
+  its own counters and score type; per-hit Confirm/Flag through the shared spam
+  path; highlight snippets are safely escaped.
+- **Status / Companion / Settings:** node health with honest degraded blocks
+  (disabled subsystems shown as such), companion follow/unfollow/refresh, and
+  bandwidth/queue/sharing settings with merge-PATCH saves (only changed fields
+  sent; the clamped response is authoritative).
+- Security model is the daemon's existing loopback bind + CSRF guard; the client
+  sends no auth token and works same-origin. Verified by `scripts/smoke-web.sh`
+  (21 live checks incl. the cross-origin 403 guard) and a Go embed-manifest test.
+
+### Slice 13 — Hardening: CI merge gate + doc/license reconciliation (2026-07-19)
+
+- The CI merge gate (`gofmt -s`, `go vet`, `go mod tidy`, `go test -race` with
+  the Fyne build deps, timing-sensitive scenarios excluded) is confirmed to run
+  the full deterministic wire-compat suite — all `contracts/*` golden vectors,
+  future-service-bit tolerance, and reject-code-2 — and now passes green (the
+  pass caught and fixed real formatting/vet breakers).
+- Docs reconciled with code: `docs/07` now documents oldest-hit eviction (the
+  shipping oversize handling) with DHT sharding as reserved scaffolding, not a
+  requirement; `ledongthuc/pdf` is correctly attributed BSD-3-Clause.
+- `cmd/dht-smoke` (live-DHT smoke tool) is rebuilt with a corrected exit
+  contract: an all-failed `-stress` phase is now a hard failure (exit 1) instead
+  of a swallowed warning, so a dead DHT path no longer reports PASS.
+
+### Slice 12 — Aggregate index: frozen contracts + offline tooling (2026-07-19)
+
+The signed SNAGG B-tree Aggregate index format and its DHT pointer are frozen,
+and the offline builder/inspector/query tooling ships.
+
+- New `contracts/snagg`: the byte-exact signed B-tree format (6-byte magic,
+  bencoded records, MIN-KEY separators, 162-byte signed trailer, deterministic
+  build, SHA-256 record-stream fingerprint, hostile-tree-guarded prefix query).
+- New `contracts/dhtschema.PPMIValue` + `PPMISalt = SHA256("snet.index")`: the
+  BEP-44 pointer to a publisher's merged index, with the tree fingerprint as its
+  commit. Both contracts carry frozen golden vectors.
+- New `swartznet aggregate build|inspect|find`: offline sign + pack a JSONL
+  record set into a signed SNAGG file (mode 0644; `--pow-bits` refused above
+  40), inspect its trailer (integrity gate), and prefix-query it (`--verify`
+  re-derives the fingerprint).
+
+The live aggregatePPMI/composite backends and DHT distribution are wired (see
+below); admission seeds and the crawler remain the opt-in tail. All of it is off
+by default — the ship default stays `LayerDMode=legacy`.
+
+- **Aggregate DHT distribution (cross-publisher discovery).** In
+  `aggregatePPMI`/`composite` mode a rebuilt SNAGG tree is now seeded as a
+  companion torrent and advertised by a signed PPMI pointer on each refresh, and
+  a lookup for another publisher resolves their pointer → fetches their tree →
+  verifies it against the pointer's commit before returning hits. An unreachable
+  or unknown publisher degrades to no hits — never a query error — so one
+  offline publisher can't fail a search. Still off by default (`legacy`).
+- **`swartznet crawl` — bounded BEP-51 DHT crawler.** A new ops command performs
+  a bounded breadth-first crawl of the mainline DHT (over the standard
+  `sample_infohashes` verb — no new verb/bit/port), sampling infohashes from the
+  nodes it reaches and expanding its frontier from their neighbours. Bounded by
+  `--workers`, `--max-infohashes`, `--max-nodes`, per-sample `--timeout-ms`, and
+  an overall `--duration-ms`; `--json` for structured output. It only discovers
+  and prints infohashes — it never fetches, indexes, or downloads. Exits non-zero
+  if the crawl reaches no node (dead network / all seeds unreachable).
+
+### Slice 11 — Native Fyne GUI (2026-07-19)
+
+The first graphical build: `swartznet-gui` presents Downloads, Search, Status,
+Companion, and Settings over the SAME daemon the CLI and web UI use — pure
+presentation, no independent logic.
+
+- New `internal/gui` (Fyne) + `cmd/swartznet-gui`. The Search tab renders
+  per-layer Local / Swarm / DHT result cards from the shared search fan-out and
+  never merges them; Confirm/Flag on a hit route through the daemon's shared
+  spam path. The Downloads tab shows live download %/status and drives add /
+  pause / resume / remove through the engine.
+- The search fan-out is unified behind a new `Daemon.Search` that both the HTTP
+  API and the GUI call, so their reconciliation can never drift.
+- The About dialog now states Apache-2.0 for first-party code (correcting the
+  legacy "MIT" claim) and notes the MPL-2.0 anacrolix engine dependency; the
+  version and license come from one build-stamped source.
+- Build with `./scripts/build-gui.sh dev` (requires CGo for Fyne/OpenGL).
+
+### Slice 10 — Companion content-index publish/subscribe (2026-07-19)
+
+A node now publishes a compact companion content-index (a gzip-JSON snapshot of
+its indexed torrents + extracted text) as a single-file torrent advertised by a
+BEP-46 pointer, and a follower imports a followed publisher's index into its own
+local search — verified end-to-end between two real engines over BitTorrent.
+
+- New `internal/companion`: the `CompanionIndex` gzip-JSON codec (bounded
+  decompression, format/version refuse), the corpus builder, the single-file
+  trackerless `.torrent` wrapper, the `Publisher` (rebuild+republish on a ≤1h
+  ticker; an empty index is a failure; `lastRefresh` advances only on success),
+  and the `Subscriber` + worker. The package talks to the DHT/engine only
+  through narrow ports (it consumes the Slice-9 BEP-46 pointer primitive).
+- The subscriber is fail-closed and closes three legacy defects: it **rejects a
+  snapshot not authored by the followed publisher**, **stamps imported records
+  with `SignedBy` = the publisher** (so `search --signed-by` attributes them),
+  and **dedups on `GeneratedAt`** so an unchanged snapshot is not re-imported.
+- The companion fetch (in the engine) is fail-closed on the untrusted infohash:
+  exactly one file, ≤32 MiB checked before any piece, and a safe filename.
+- Daemon wiring: independent publisher/subscriber legs, all failures non-fatal,
+  teardown before the index; a persisted follow file (atomic, size-capped).
+- New `GET /companion` + `POST /companion/{refresh,follow,unfollow}` HTTP routes
+  and a new `swartznet companion <status|follow|unfollow|refresh>` CLI command
+  (closing a legacy discoverability gap), plus a gated `add --regtest` flag.
+- Config: `CompanionDir`, `CompanionFollowFile`.
+
+### Slice 9 — Layer D: BEP-44 keyword index (2026-07-19)
+
+A node now publishes its own torrents' name-keywords as signed BEP-44 mutable
+items and resolves a query against a set of known indexer pubkeys — a real
+2-node DHT cluster round-trips (node A publishes, node B searches and recovers
+A's infohash) over nothing but standard mainline traffic (BEP-44/46/51 — no new
+verb, reserved bit, or UDP port).
+
+- New `contracts/dhtschema`: the frozen `KeywordValue` wire payload (bencoded
+  via anacrolix `torrent/bencode` for byte-identity with the signing path), the
+  ≤1000-byte cap enforced **before** unmarshal on decode, and the verbatim,
+  never-truncated `SaltForKeyword`. Golden-vector pinned, with a `bep44` re-
+  marshal-identity gate and a legacy-bytes read-back gate.
+- New `internal/dhtindex`: the swappable `RecordBackend` seam
+  (`Publish/Refresh/Retract/Lookup/Status/Close`) with the shipping
+  `legacyKeyword` per-keyword backend; the `Publisher` worker (buffered submit +
+  hourly refresh + retract) with a 55-minute per-keyword throttle and oldest-hit
+  eviction; the `Lookup` read side (most-distinctive token, parallel per-indexer
+  fan-out, reputation-gated, scored merge); the `AnacrolixPutter`/`Getter`
+  sharing the fail-closed `checkPutStats` guard (a zero-node put surfaces as a
+  failure, never a false success); the BEP-46 infohash-pointer primitive; and
+  the BEP-51 `SampleInfohashes` primitive.
+- Engine wiring: publish-on-`GotInfo` submits the torrent **name** keywords only
+  (content tokens never reach the DHT) behind `--no-index` / `--no-dht-publish`;
+  retract-on-removal; the read side stays alive leech-only while the write side
+  is suppressed under those flags (the privacy cascade); the self-pubkey and
+  `peer_announce`-gossiped pubkeys enter the lookup set.
+- `searchmux` gains the third concurrent layer; `POST /search {"dht":true}`
+  returns a `dht` block; a Layer-D error is surfaced inline (200), never a 5xx
+  (§5.9). New `GET /publish` status route. New `swartznet crawl-probe` (a
+  stateless BEP-51 diagnostic) and `--no-dht-publish` flag, both in `--help`.
+- Config: `LayerDMode` (`legacy` only this release), `MinIndexerScore`,
+  `PublisherPath`.
+
+### Slice 8 — RIBLT sync + Aggregate record substrate (2026-07-19)
+
+Two peers now reconcile their signed keyword→infohash record sets over
+multi-batch Rateless-IBLT set reconciliation (the `sn_search` msg_types 4–8),
+so differences larger than 100 symbols converge.
+
+- New `contracts/riblt`: the frozen RIBLT math — FNV-1a-64 element key (over all
+  32 bytes), the SplitMix64 12-step membership cycle, the streaming encoder, and
+  the peel decoder with a self-consistency gate. Golden-vector pinned.
+- New `contracts/record`: the signed keyword record. Its RIBLT `ElementID`
+  (`SHA-256(pk‖kw‖ih‖LE64(t))`) **excludes** the proof-of-work and signature, so
+  two valid signings of one semantic record dedupe; the signature message
+  **includes** the PoW nonce. Golden-vector pinned.
+- Extended `contracts/ltepwire`: the `sync_begin`/`symbols`/`need`/`records`/
+  `end` codec with its per-message caps and `element_size == 32` / `kw ≤ 64`
+  invariants. Golden-vector pinned.
+- New `internal/swarmsearch` reconciliation: a FIFO-capped, filter-matched
+  `RecordCache` (source + sink), the `SyncSession` state machine (budgets
+  negotiate downward, byte accounting on the semantic record size, a
+  symbol-budget overrun ends the session `limit_exceeded` penalty-free while
+  other violations `aborted` + charge), the multi-batch responder pump, and the
+  `StartSync`/`SendSyncNeed`/`CloseSync`/`WaitSyncConverged` initiator. It
+  tolerates the reordering + timing of the async peer-wire dispatch (an
+  out-of-order symbol batch is buffered; the initiator finalizes only past a
+  symbol floor and exactly once).
+- Engine: mints one signed record per torrent name-keyword on metadata arrival
+  (even with `--no-index`, so a leech-only node still reconciles), wires the
+  record cache with an age-prune loop, and takes the node identity via
+  `SetSigner`. The `sn_search` reconciliation capability (services bit 9) is
+  advertised again now that the sync bodies exist.
+- `GET /aggregate` gains `cache_size` (records held) and `reconciliation`.
+- `scripts/dod-slice8.sh`: 11 checks — the frozen golden vectors, a 250-record
+  symmetric-difference converging to the union multi-batch, the budget /
+  index-desync / capability guards, record minting per name-keyword, and the
+  live `/aggregate` readout.
+
+### Slice 7 — Layer S: `sn_search` peer-wire extension (2026-07-19)
+
+The first wire slice. Two SwartzNet peers negotiate `sn_search` in the LTEP
+`m` dict and answer scoped queries over an ordinary piece-transfer connection;
+a vanilla BitTorrent client sees only an ignorable name in the `m` dict and
+**receives zero `sn_search` frames**. No new reserved bit, no new DHT verb, no
+new UDP port.
+
+- New `contracts/ltepwire/wire.go`: the frozen query/result/reject/
+  peer_announce envelope (msg_types 0–3; 4–8 reserved for RIBLT sync) with
+  byte-exact golden vectors. The wire drops the year-1 zero timestamp,
+  truncates hit names to 60 bytes (rune-safe, non-UTF-8 preserved), clamps
+  rank, and forces an empty (never null) hit list.
+- New `internal/swarmsearch`: the `Protocol` (LTEP negotiation, per-peer state,
+  the token-gated transport seam), the inbound `Handler` (scope-checked answer
+  or reject, fail-closed on `ShareLocal≠2`), the outbound query fan-out with
+  **asked-set anti-spoof** (a result counts only from a peer we asked, one
+  frame per peer), a Bitcoin-style **banman** (local, never gossiped) and a
+  per-peer token-bucket rate limiter. It never imports Bleve (answers via an
+  injected searcher) nor the torrent package.
+- Engine LTEP transport seam: the `sn_search` extension is advertised on every
+  outbound handshake; inbound frames are dispatched **off the read loop** with
+  dual 256-slot semaphores and a payload copy; a `PeerToken` (mintable only from
+  a recorded advertisement) makes "no send to a non-advertising peer" a
+  compile-time property. `peer_announce.services` is produced by the single
+  Slice-6 `Announced()` mask, so capability downgrades now reach the wire.
+- `POST /search {"swarm":true}` fans in swarm hits concurrently with Layer L; a
+  Layer-S failure is surfaced inline as `swarm.error` with a 200 (never a 5xx);
+  `/status` reports the known/capable peer counts.
+- `wirecompat` gains a raw-socket `MiniPeer` and two scenarios: a **vanilla
+  peer sees zero `sn_search` frames** while a capable peer gets the
+  `peer_announce`, and a peer queries the engine over the real wire and gets
+  its indexed hits.
+- `scripts/dod-slice7.sh`: 11 checks — the wire gates (codec goldens, §6 fixes,
+  scope-reject-2, fail-closed, anti-spoof, vanilla silence, real-wire query,
+  compile-time no-bare-send) plus the HTTP swarm surface (§5.9 inline error,
+  `/status` counts, index-independent swarm).
+
+### Slice 6 — capability mask: the single services-bit producer (2026-07-19)
+
+- New `contracts/ltepwire`: the frozen 64-bit `sn_search` services bitfield
+  (bits 0–9, append-only; unknown bits ignored never rejected) and the SINGLE
+  pure producer `Announced(Sharing, RuntimeFacts) uint64`, pinned by a golden
+  vector table. `Announced` derives every bit purely from its inputs — there is
+  no static default floor — so an operator downgrade actually clears its bit.
+- **Type split** (`Sharing` = operator prefs, bits 0–3; `RuntimeFacts` = daemon
+  facts, bits 4–9). The Publisher bit is a daemon-owned `RuntimeFact`; the
+  `PATCH /capabilities` body has no publisher field, so a partial "save sharing"
+  can never clobber it.
+- Engine: `Sharing`/`SetSharing` (runtime-mutable, seeded from config),
+  `RuntimeFacts` (computed live — `Publishing = !--no-index && !--no-dht-publish`,
+  so `--no-index` zeroes the Publisher bit), and `ServicesMask()` — the one call
+  site both the HTTP readout and (later) the wire announce use.
+- HTTP: `GET /capabilities` (sharing prefs + read-only `publisher` + live
+  `services`), `PATCH /capabilities` (preserve-unset merge, clamps
+  `share_local` 0..2) with a `POST` alias, and `GET /aggregate` `services` now
+  the **live** mask (16 lowercase hex, big-endian) instead of the static
+  `0x2ED`. New config fields: `share_local` (0..2), `share_file_hits`,
+  `share_content_hits`.
+- Fixes three legacy §6 defects: the static `/aggregate` mask and the
+  Publisher-bit clobber are fully closed; capability downgrades now reach the
+  readout (the wire half lands in Slice 7). Regtest (bit 8) is now actually
+  advertised when in regtest mode — the "loud" announce the legacy never set.
+- `scripts/dod-slice6.sh`: 17 checks — live `0x2FD`/`0x2E0` masks, the
+  Publisher-bit-untouched PATCH, clamp, POST alias, CSRF, and the `--no-index`
+  `→ 0x2ED` cascade.
+
+### Slice 5 — trust, reputation, Bloom, confirm/flag (2026-07-18)
+
+- New `internal/reputation`: the frozen FNV-64a Kirsch-Mitzenmacher
+  **known-good Bloom filter** (`SBLM` v1 on-disk format, pinned by a golden
+  byte-vector and a checked-in `testdata/known-good.bloom`), the
+  **Bayesian-smoothed per-publisher reputation tracker** (prior weight 5.0,
+  neutral 0.5, decaying seed bonus; score-sorted `Snapshot`), and the
+  source-attribution LRU that records which indexer returned each hit.
+- New `internal/trust`: the persistent publisher **allowlist** (`trust.json`,
+  pretty JSON, atomic write, 64-hex validation).
+- New `internal/admission`: a **deny-by-default** admission engine (inverts
+  the legacy's permissive §6 admission; the permissive policy survives only
+  for tests).
+- The **one shared confirm/flag path** (`daemon.Confirm`/`daemon.Flag` →
+  `engine.ConfirmHit`/`engine.FlagHit`): deterministic code owns the Bloom/
+  reputation state transition. **Confirm** adds the infohash to the Bloom and
+  boosts its attributed indexers; **flag** demotes ONLY attributed,
+  non-trusted indexers and **fails closed** on zero attribution — fixing the
+  legacy §6 dishonest-success defect (it never claims a demotion it did not
+  perform; `indexers_flagged` is not `omitempty`, `attribution` is explicit).
+- Two Bloom auto-confirm paths, both **add-only** (no reputation
+  self-reinforcement): a **trusted publisher** is confirmed at metadata
+  arrival; a **completed** torrent is confirmed unconditionally — and
+  `watchCompletion` promotes the next queued slot *before* the Bloom
+  checkpoint so promotion never waits on disk I/O.
+- Crash-safety: a bounded **periodic checkpoint** (~5 min) plus a
+  save-on-close flush; each save writes a **unique tempfile** and the
+  checkpoint is serialized, so a checkpoint racing a confirm/flag can never
+  tear `reputation.json`. A corrupt/unreadable but configured `trust.json`
+  **fails closed** (`attribution=trust-unavailable`, demotes nobody) rather
+  than silently disabling the trusted-publisher exemption.
+- HTTP: `POST /confirm`, `POST /flag`, `GET /aggregate` (known-indexer /
+  bootstrap counts, distinguishing a starved node from a quiet one), and
+  `/status` gains `bloom` + `reputation` blocks. CLI: `swartznet trust`
+  (offline `list`/`add`/`remove`), `swartznet confirm`, and `swartznet flag`
+  (honest "no reputations changed …" reporting).
+- `scripts/dod-slice5.sh`: 22 checks — offline trust management, golden Bloom
+  load, trusted-publisher auto-confirm at metadata, the shared confirm/flag
+  path, `kill -9` checkpoint durability, `/aggregate` shape, and the
+  fail-closed corrupt-trust path.
+
+### Slice 4 — Layer L: local full-text search (2026-07-18)
+
+- New `internal/indexer`: the Bleve (scorch) schema v3, the single-worker
+  extraction pipeline with a 60 s watchdog + panic-recover, the 2 KiB
+  chunker (paragraph→line→hard-split), `t:`/`c:` doc IDs, exact-match
+  `TermQuery` for `signed_by`/`infohash`, the `<mark>` HTML highlighter,
+  and the schema-sentinel rebuild. `IndexTorrent` honors the §7-Q37
+  sticky-SignedBy rule.
+- New `internal/indexer/extractors`: the first-claim-wins MIME registry
+  (full `extTypes` override table) with plaintext (tags-in `.html`),
+  subtitle, PDF, EPUB, DOCX, ODT, and ZIM extractors, all hardening
+  bounds preserved.
+- New `contracts/token`: frozen `Tokenize` + `MostDistinctive` (the only
+  lookup-token chooser — the §6 first-token defect is unrepresentable);
+  golden vectors.
+- New `internal/searchmux`: the local-only fan-out (native response
+  types, no merged hit type), shared by the HTTP adapter and (later) GUI.
+- Engine wiring: `SetIndex`, `autoIndex`, `ingestFileEvents`, per-torrent
+  indexing toggle, snapshot index counters, a reachable **Forget** (docs
+  deleted, files kept — §6/F36), and an **hourly rescan** that recovers
+  dropped file-complete events (rebuild-only; the legacy had none).
+- **ZIM works against the live pipeline** (the §6 defect): the engine
+  wraps its torrent reader in a size-bounded `ReadSeekerAt` shim so
+  `io.ReaderAt`-requiring extractors work — and the size bound fixes a
+  real over-read where anacrolix's `File.NewReader` read a large buffer
+  past the file into the next file's bytes, mis-indexing every earlier
+  file in a multi-file torrent.
+- HTTP: `POST /search` (Layer-L block; nil index = 200-empty, not 503),
+  `GET /index/stats`, `POST /torrents/{ih}/indexing`, `DELETE
+  /torrents/{ih}?forget=1`, `/status local.doc_count`. CLI: `swartznet
+  search` (direct-Bleve or daemon-routed) and `swartznet index`
+  (stats / per-torrent toggle).
+- `scripts/dod-slice4.sh`: 18 checks — PDF+ZIM+plaintext indexed through
+  the live pipeline, `<mark>` highlights, exact-TermQuery `--signed-by`,
+  Forget, and the NoIndex degraded surface.
+
+### Slice 3 — create + infohash-preserving signing (2026-07-18)
+
+- New `contracts/sign`: the frozen 34-byte signing payload
+  (`"SN-TORRENT-V1|" ‖ SHA1(info)`), the ed25519 primitives, the
+  `Signature` type, and the three-way verification taxonomy —
+  `ErrNotSigned` (benign), `ErrBadSignature` (tamper, Signature still
+  populated), and plain errors for bad lengths that are neither sentinel.
+  A deterministic golden vector pins the derivation byte-for-byte.
+- New `internal/signing`: `Sign`/`Verify` over raw .torrent bytes via the
+  contracts codecs — the info dict never round-trips a typed struct, so
+  signed and unsigned twins share one infohash. Re-signing replaces.
+- `swartznet create <path> -o <out>` with `--sign`, `--seed`, `--name`,
+  `--piece-kib` (now genuinely validated: power of two ≥ 16 KiB — the
+  legacy documented but never enforced it), trackers/webseeds/private/
+  comment. A no-seed create builds no engine at all; `--seed` seeds in
+  place daemonlessly.
+- Verify-at-add: signed torrents populate `SignedBy` end to end (handle →
+  session → `/torrents` → status), bad signatures add anyway with empty
+  `SignedBy` and a logged rejection (D20), and a verified duplicate add
+  upgrades an unsigned handle stickily (§7-Q37).
+- Fixed the legacy defect where `create --sign --seed` never showed the
+  creator's own signature: the signed bytes now flow to the engine via
+  `AddTorrentBytesSeedFrom`, so the publisher's own node badges itself.
+- `scripts/dod-slice3.sh`: 17 checks — twin infohash equality at the byte
+  level, taxonomy over the wire, D20 add-anyway, the J1 fix, and the
+  fail-closed identity paths.
+
+### Slice 2 — add + download + seed (2026-07-18)
+
+The first slice that is a usable BitTorrent client.
+
+- New `internal/engine`: the anacrolix wrapper (v1.61.0, extension APIs
+  only) with the full SPEC §5.4 quirk catalog honored — positive
+  rate-limiter burst floor, shared `PeerStore` for BEP-5 write tokens,
+  `Exp=2h` BEP-44 pin, per-file Normal-priority activation (never
+  `DownloadAll`), seed-in-place `FilePathMaker` on the real basename,
+  background `VerifyData` on metainfo add and restore, and the
+  magnet→metainfo upgrade guard. Frozen `session.json` v1 format with
+  byte-exact `.torrent` copies; per-entry restore that survives corrupt
+  rows; exactly-once file-complete events with a 64-slot replay buffer.
+- Three §6 defects fixed by construction: queue promotion on completion
+  is unconditional (never Bloom-gated); `countActiveDownloads` inspects
+  file priorities so an all-`none` torrent frees its slot;
+  `/config/rate-limit` uses pointer-field merge semantics (PATCH+POST) so
+  a partial update can't zero the other cap.
+- New `contracts/bencode`: raw-bytes-preserving metainfo codec — the
+  infohash is always SHA1 of the original info bytes, never a typed
+  round-trip; signed/unsigned twins share one infohash (golden-pinned).
+- `swartznet add <magnet|.torrent|40-hex|->` IS the daemon (the Slice-0
+  `serve` scaffold is deleted); bare 40-hex is an infohash add; `-` reads
+  .torrent bytes from stdin. New `swartznet files` command; `status`
+  gains a Downloads section with real percentages.
+- HTTP API: `POST /torrent`, `GET /torrents`, files listing/priority,
+  pause/resume/remove, `/config/rate-limit`, `/config/queue` — all via
+  locally-declared interfaces (httpapi still imports zero subsystems).
+- New `internal/wirecompat` in-process multi-engine harness; the
+  timing-sensitive two-engine transfer lives in `wirecompat/scenarios`,
+  excluded from CI by a non-end-anchored grep (fixing the legacy footgun).
+- `scripts/dod-slice2.sh`: 15 checks driving TWO real binaries through a
+  loopback magnet transfer, session restore percentages, and the
+  rate-limit merge.
+
+### Slice 1 — persistent identity (2026-07-18)
+
+- New `internal/identity`: raw 64-byte ed25519 `identity.key` (frozen legacy
+  format), created at mode exactly 0600 with the legacy validation gates and
+  error strings preserved byte-for-byte (exact-0600 — 0400 rejected too;
+  size; seed→pubkey re-derivation; directory-at-path). A present-but-invalid
+  key is never overwritten or regenerated (invariant #2).
+- Auto-create happens **only at the default XDG path**: the daemon compares
+  the configured path against `config.Default().IdentityPath` and
+  `identity.Load`'s create branch is the single enforcement site (also
+  closing the legacy stat-then-create TOCTOU). Parent-dir creation moved to
+  the create arm, so a refused load has no side effects.
+- `daemon.New` loads identity before all subsystems and — fixing the §6
+  defect — wires `httpapi.Options.PublisherPubKey` from
+  `identity.PublicKeyHex`, un-nested from any publisher collaborator:
+  `/status` now reports `publisher.pubkey` in every real daemon.
+- `serve --identity <path>`: explicit paths are load-only; a failed explicit
+  load exits 1, while a default-path failure degrades per SPEC §2.8 (warn +
+  publisher-less). New log events `daemon.identity_loaded` /
+  `daemon.identity_load_err` (attrs `pubkey`/`err` kept from legacy).
+- `scripts/dod-slice1.sh` (19 checks) covers the whole DoD against the real
+  binary; `dod-slice0.sh` gained hermetic `XDG_DATA_HOME` isolation.
+
+### Slice 0 — walking skeleton (2026-07-17)
+
+- New `internal/config`, `internal/daemon`, `internal/httpapi` (+ embedded
+  web stub) and `cmd/swartznet` with `serve` (temporary scaffold, folds
+  into `add` in Slice 2), thin-HTTP-client `status`, `version`, `help`.
+- `GET /status` (frozen full JSON shape, honestly degraded) and
+  `GET /healthz`; CSRF/DNS-rebind guard and 1 MiB body cap preserved
+  byte-for-byte from legacy; non-loopback binds warn loudly
+  ("API is UNAUTHENTICATED") but are honored.
+- Reverse-order teardown is now observable in logs
+  (`daemon.close_begin` → `daemon.bg_joined` → `httpapi.stopped` →
+  `daemon.close_done`); SIGINT/SIGTERM exit 130; `Daemon.Close` is
+  idempotent.
+- §6 defect fixes shipped from day one: **one** unsafe gate
+  (`SWARTZNET_UNSAFE=1` or a test binary; `SWARTZNET_ALLOW_REGTEST` is
+  gone), and `SWARTZNET_LOG` (`debug|info|warn|error`, default info) is
+  documented in `swartznet help`, with a warning on unrecognized values.
+- `Validate()` now runs all rejections before creating any directory
+  (SPEC §7-Q48 resolved; create-set unchanged: DataDir 0755 +
+  IndexDir's parent only).
+
 ## Unreleased
 
 Targeting **v1.0.0** — first GA release. v1.0.0 still wants
@@ -14,6 +614,247 @@ real-world data for the reputation prior weight and at least
 one second client implementing `sn_search` (the BEP-1
 requirement to take a draft to Final). Both require
 engagement from actual users of the v0.x prereleases.
+
+### Fixed — Create-and-seed shows "downloading 0%" instead of "seeding"
+
+A freshly-created torrent could sit at `downloading` / 0% instead
+of flipping to `seeding` / 100%, even though every byte was
+already on disk. Two paths were affected:
+
+- **CLI `create --seed`** called the plain `AddTorrentMetaInfo`,
+  which roots anacrolix storage at `cfg.DataDir`. Unless the user
+  passed `--data-dir <parent-of-root>` (documented but
+  unenforced), the post-add `VerifyData` rehashed an empty
+  directory and reported 0%. It now seeds **in place** from the
+  positional `<root>` via `AddTorrentMetaInfoSeedFrom`, matching
+  the GUI; `--data-dir` no longer needs to point at the content.
+
+- **Renamed torrents (GUI *and* CLI `--name`)** stayed at 0% even
+  on the seed-from path: anacrolix's default file storage resolves
+  every file under `<base>/<info.Name>/…`, so once the display
+  name differed from the on-disk basename (the GUI's Create dialog
+  auto-fills an editable name and defaults the seed checkbox on,
+  making this the common case) it looked for the bytes under the
+  wrong name and found nothing.
+
+The engine's per-torrent seed storage now keys file paths on the
+**real on-disk basename** (`storage.NewFileOpts` + a custom
+`FilePathMaker`) instead of `info.Name`, so a renamed torrent
+seeds from its real location while downloaders still see the
+chosen name. The basename is persisted in the session manifest
+(new `content_name` field) so a restart restores the correct
+storage; legacy entries fall back to `info.Name`. Regression
+tests cover single-file and multi-file renames plus the
+restart/restore path, and the GUI create-seed test now asserts the
+renamed torrent reaches 0 missing bytes. Wire-compat is untouched
+(local storage wiring only; the infohash and `.torrent` bytes are
+produced identically).
+
+### Fixed — Second whole-codebase review pass (32 findings: 3 blocking, 11 important, 18 nits)
+
+A fresh review + regression-check against the prior 55-finding
+audit confirmed every prior fix holds, found two of them
+incomplete, and surfaced new hardening work. All 32 confirmed
+findings are fixed here, each with a regression test. No on-wire
+bytes changed (the swarmsearch budget work *implements*
+already-specified `limit_exceeded` behavior) and Layer L/S/D
+isolation is preserved, so the mainline-compat matrix stays green.
+
+**Blocking (remote OOM/DoS that `recover()` cannot catch):**
+
+- **extractors:** the ZIP-container document extractors
+  (DOCX/ODT/ODP/PPTX/EPUB) fed the *decompressed* entry stream to
+  the XML parser unbounded — the between-token output guard never
+  runs inside a single giant `Token()` call, so one deflate-bomb
+  text node (~1032:1 amplification) buffered the whole decompressed
+  body. Every zip-entry reader is now wrapped in
+  `io.LimitReader(rc, maxDocTextBytes)` (64 MiB text budget; PPTX
+  slides and EPUB chapters share a shrinking budget). The HTML
+  tokenizer now sets `SetMaxBuf` (default was unlimited) and treats
+  buffer/budget exhaustion as graceful truncation. Also: archive
+  name-list extraction enforces its documented 4 MiB cap on the
+  tar.gz branch (plus a 1 GiB decompression-walk bound), and EXIF
+  IFD parsing is integer-overflow-safe on 32-bit targets.
+- **companion:** the B-tree walker's per-page child checks could
+  not see *cross-page* fan-in — pages laid out `i → {i+1, i+2}`
+  grow root-to-leaf paths Fibonacci-ally (reproduced: 5M+ piece
+  fetches for a 40-piece file). This was the incomplete half of the
+  prior audit's fix. The walk now shares a visited-set across the
+  entire traversal and fails closed the moment any page is reached
+  twice, capping the walk at `NumPieces` fetches; `Find`
+  additionally rejects duplicate leaf indices as defense-in-depth.
+
+**Important:**
+
+- **dhtindex:** all three BEP-44 put paths (keyword, BEP-46
+  companion pointer, PPMI) now share one `checkPutStats` guard and
+  fail closed when the put traversal reaches zero DHT nodes — the
+  prior audit hardened only the keyword path, so a companion
+  pointer that never landed still recorded success and showed a
+  green refresh. Pointer values fetched from the DHT are size-capped
+  at the BEP-44 1000-byte limit before decoding; PPMI seqs use the
+  overflow-clamping `nextSeq`.
+- **swarmsearch:** the per-session sync `max_bytes` budget was
+  declared and echoed on the wire but never enforced (dead code).
+  `ApplyRecords` now phase-guards, accounts every frame into
+  `bytes_in`, and aborts with the documented `limit_exceeded` once
+  over budget; `sync_symbols`/`sync_records` protocol violations now
+  tear the session down (terminal `sync_end`, release, misbehavior
+  charge) instead of logging at Debug; query `result`/`reject`
+  frames from peers outside the query's fan-out set are dropped and
+  charged.
+- **indexer pipeline:** the extract reader is now closed by the
+  extracting goroutine strictly after `Extract` returns — never by
+  the worker on the watchdog-timeout path — fixing a
+  Read-after-Close data race on anacrolix `torrent.Reader` when an
+  extractor wedges.
+- **engine:** companion-index torrent downloads are capped at
+  32 MiB (`maxCompanionBytes`) — an attacker-controlled BEP-46
+  pointer can no longer fill the disk; the fetch fails closed before
+  any piece is requested. `sn_search` reply writers are gated by a
+  bounded semaphore; `autoDownload`/`autoIndex`/magnet-upgrade
+  metadata waits now honor `bgCtx` so Close doesn't leak them.
+- **reputation:** corrupt/truncated `known-good.bloom` files are
+  rejected at load time (exact bitset-length match) instead of
+  panicking the daemon on the first `Add`/`Test`.
+- **httpapi + gui:** flagging an infohash with no recorded source
+  attribution no longer demotes *every* known indexer's reputation
+  (an attacker-weaponizable fan-out); both sides now fail closed
+  with zero demotions, and `FlagResponse` gained an additive
+  `indexers_flagged` field. GUI: the Downloads primary selection is
+  infohash-keyed so Remove/Pause can't hit the wrong torrent after
+  the 2 s background re-sort; copied magnet links URL-escape the
+  display name (closing a magnet-parameter-injection vector from
+  remote-sourced names).
+- **cmd:** `create --seed` now keeps DHT enabled so trackerless
+  seeds are actually discoverable; `--identity` without `--sign` is
+  a usage error instead of silently ignored.
+- **daemon:** the anchor-fetch loop re-runs when the HTTPS
+  bootstrap fallback adds anchors after startup (previously a dead
+  cold-start path); the companion follow file is capped at 1 MiB
+  (rejected wholesale over the cap); anchors no longer consume
+  `MaxTrackedPublishers` slots and cap refusals are logged.
+- Plus input-validation nits across httpapi (search query length
+  cap, strict file-index parsing), cmd, gui (strict search-limit
+  parsing, notification-map pruning), indexer (bounded doc-walk
+  pagination, SignedBy-only search now accepted as documented), and
+  engine (untrusted-name validation on companion/session paths).
+
+### Fixed — `internal/gui` is race-clean under `-race`
+
+The GUI tests raced under the Fyne *test* driver: a background
+worker goroutine routes its UI update through `fyne.Do`, which the
+test driver (unlike the real GLFW driver) runs inline on the
+spawned goroutine. That render then touched Fyne's process-global,
+unsynchronized font/SVG cache concurrently with other
+test-goroutine rendering — `DATA RACE` reports, all inside Fyne
+internals. Production behavior is unchanged and was never racy:
+with the real driver, `fyne.Do` serializes every callback onto the
+single UI thread, so exactly one goroutine ever touches those
+caches.
+
+The fix is test-only. Each async UI flow that a test exercises now
+exposes an unexported, nil-in-production seam invoked at the very
+end of its goroutine (after `fyne.Do` returns); tests set the seam
+and deterministically join the goroutine before any further
+rendering or teardown, restoring the single-UI-thread invariant
+under the test driver and replacing the prior `time.Sleep` drains.
+Seams added: `afterCreateTorrent` (create.go), `afterRunSearch`
+(search.go), `afterRefreshPublisher` (companion.go),
+`afterSetAllPriorities` (files_dialog.go), and `afterRemoveSelected`
+/ `afterAddMagnet` (downloads.go). No production logic, signatures,
+or off-thread behavior changed. Verified across 38+ full-suite
+`-race` iterations with zero `DATA RACE` reports.
+
+Also widened a handful of tight test wall-clock budgets that could
+flake under a fully-saturated parallel `-race` sweep (CPU starvation,
+not a code defect): the regtest Layer-D refresh scenario
+(`TestLayerDPublisherRefreshKeepsItemFresh`, 12 s → 30 s) and four
+`cmd/swartznet` "did this near-instant event happen?" assertions —
+the two `signalContext` cancellation tests (1 s → 5 s) and the two
+`progressLoop` exit tests (2 s → 5 s). Each assertion's meaning is
+unchanged; a genuinely hung loop still fails.
+
+### Fixed — Whole-codebase review hardening pass (55 findings)
+
+A multi-package review swept every subsystem and produced 55
+confirmed, adversarially-verified findings; all are fixed here,
+each with a regression test (except pure-comment nits). No
+on-wire bytes changed and Layer L/S/D isolation is preserved,
+so the mainline-compat matrix stays green.
+
+Untrusted-input availability (remote DoS, were unauthenticated):
+
+  - `engine`: reject a zero infohash decoded from an untrusted
+    BEP-46 pointer before it reaches `AddTorrentInfoHash`
+    (`panicif.Zero` crash); the add path now recovers like
+    `AddMagnetURI`.
+  - `indexer/extractors`: the subtitle extractor now honours
+    `maxBytes` (was ignored → multi-GB `.srt` OOM); MKV element
+    sizes are bounded before allocation (untrusted EBML VINT →
+    multi-GB `make`); `readFull` enforces a 64 MiB ceiling.
+  - `indexer/extractors`: ZIP/XML/PDF extractors (docx, odt,
+    odp, pptx, epub, pdf, htmltext) now cap *decompressed*
+    output, not just compressed input, closing zip-bomb
+    amplification; ID3 `tagSize` is clamped to the read budget.
+  - `companion`: the B-tree reader requires strictly-downward,
+    increasing, in-range child indices plus a depth budget,
+    visited-set and leaf cap — a self/back-pointing or
+    DAG-shaped page no longer recurses into stack overflow.
+  - `swarmsearch`: responder sync sessions are bounded per peer
+    with a staleness reaper that emits `sync_end` aborted, so an
+    abandoned session reaches a terminal state instead of
+    lingering forever (unbounded-memory DoS).
+  - `dhtindex` / `indexer`: DHT value decode and infohash→query
+    paths are size-bounded / structured (no `QueryString`
+    interpolation), matching the encode-side caps.
+
+Fail-open on state-changing steps (deterministic-layer rules):
+
+  - `dhtindex`: a publish that reached zero DHT nodes no longer
+    counts as success (the rate-limiter then suppressed retry
+    for ~55m); `MarkPublished`/`LastPublished` require ≥1
+    confirmed node. Manifest size estimates reserve the
+    timestamp width so a near-cap entry can actually publish.
+  - `cli`: explicit `--key`/`--identity` paths are load-only and
+    error on a missing file instead of silently minting a new
+    identity; `defaultIdentityPath` honours `XDG_DATA_HOME`;
+    `--dht-insecure`/`--regtest` are gated; `config.Validate`
+    fails closed on those flags outside tests.
+  - `daemon`: the companion publisher writes to `CompanionDir`
+    (was `DataDir`, silently ignoring the setting); the
+    anchor-fetch goroutine is cancel-tracked and joined on
+    `Close`; HTTPS bootstrap rejects non-`https` URLs.
+  - `engine`: a restored *paused* torrent no longer flips its
+    files to Normal priority on activation.
+
+Concurrency, correctness & identity:
+
+  - `indexer`: the extract watchdog now runs `Extract` against a
+    hard deadline so a wedged extractor fails the file instead
+    of pinning a worker forever; `deleteByQueryLocked` is
+    bounded; `Stats.CorpusTextBytes` no longer truncates past
+    64k content docs; `AllTorrentDocs` preserves `SignedBy`.
+  - `swarmsearch`: RIBLT symbol `Index` is validated (a dropped
+    frame aborts instead of silently desyncing); `ShareLocal==1`
+    fails closed; `StartFeeler` is idempotent; misbehavior
+    scores are charged; `mergeResponses` dedups per peer.
+  - `security`: seed-list pubkeys are normalised (uppercase hex
+    seeds now get the bonus); a corrupt Bloom header with
+    `m==0` is rejected instead of panicking; Bloom double-hash
+    forces an odd stride (Kirsch-Mitzenmacher); a loaded key's
+    public half is re-derived from its seed and verified.
+  - `gui`: follow rows are sorted deterministically and the
+    context menu keys off pubkey, not row index, so Unfollow no
+    longer targets the wrong publisher; the file-priority
+    `Select` no longer re-fires `OnChanged` on recycle; startup
+    no longer fires false "Download complete" toasts for
+    already-seeding torrents.
+  - `httpapi`: mutating endpoints reject cross-origin / non-loopback
+    `Origin`/`Referer` and validate `Host` (CSRF / DNS-rebinding
+    defense); non-loopback binds are refused without an explicit
+    opt-in; client-supplied search timeouts are clamped;
+    `handleStatus` populates the publisher pubkey.
 
 ### Added — "Aggregate" distributed-layer redesign
 
@@ -84,6 +925,99 @@ convention. Documented in
 LocalRecord sync was wired up in earlier commits so nodes do
 share records over the responder path; the engine attaches a
 RecordCache as both source and sink in `engine.New`.
+
+### Changed — Indexer pipeline hardening (global cap + watchdog)
+
+Two extractor-pipeline robustness improvements following the
+whole-codebase review:
+
+  - `internal/engine/engine.go` — pipeline construction now
+    passes a 100 MiB global per-file extract cap instead of 0
+    ("each extractor's own default"). The archive extractor
+    enforced 64 MiB but PDF / EPUB / DOCX / FB2 silently
+    buffered whatever the file claimed; a torrent of
+    pathological PDFs could blow up resident memory before
+    any per-extractor limit kicked in. 100 MiB is comfortably
+    larger than any real-world textual document while still
+    bounding the worst case.
+  - `internal/indexer/pipeline.go` — `safeExtract` now arms a
+    soft 60-second watchdog that emits a
+    `pipeline.extract_slow` warning when an extract exceeds
+    its budget. Soft because Go can't terminate goroutines
+    externally — the watchdog observes and reports, the
+    worker keeps going. Real protection still comes from
+    `Pipeline.maxFileBytes` plus per-extractor
+    `io.LimitReader` plus the panic recovery; the watchdog
+    surfaces hangs in logs before the pipeline channel backs
+    up.
+
+The Extractor interface itself still doesn't take a
+context.Context — plumbing one through every extractor is a
+larger refactor that's not justified by current threat
+modelling. The watchdog + size cap combination addresses the
+practical concern (memory blowups, silent hangs) without the
+churn.
+
+### Added — BEP-46 pointer carries publisher timestamp
+
+Companion-index pointers now include a `ts` field (publisher
+wall-clock Unix-seconds) alongside the existing `ih`
+infohash. Subscribers can use the timestamp to detect
+publishers that have gone silent (pointer hasn't been
+re-published in days/weeks) and apply policy — log a warning,
+deprioritize, drop the follow — instead of silently chasing a
+stale infohash.
+
+  - `internal/dhtindex/dht.go` — `bep46Pointer.TS int64`
+    field with `bencode:"ts,omitempty"`. PutInfohashPointer
+    sets it from `time.Now().Unix()`. New
+    `AnacrolixGetter.GetInfohashPointerInfo` returns
+    `PointerInfo{InfoHash, TS}`; the legacy
+    `GetInfohashPointer` is now a thin wrapper around it so
+    every existing caller (companion subscriber, all the
+    fakes in the test suite) keeps working without churn.
+  - `internal/dhtindex/pointer_ts_test.go` — round-trip,
+    omitempty-on-zero, legacy-decode tolerance, and
+    forward-compat (unknown-extra-key) tests lock in the wire
+    contract.
+
+Wire-compat is preserved by bencode's extension model:
+publishers without ts emit `{ih: ...}` (decoders treat TS=0
+as "unknown freshness, accept"); subscribers without ts
+support ignore the extra dict entry. No coordinated upgrade
+required; no BEP-44/46 spec violation.
+
+### Fixed — `--no-index` cascades to disable Layer-D publishing
+
+`--no-index` was documented to "prevent Bleve from opening at
+all (and cascade to disable Layer D publishing)" but only the
+first half held: the daemon skipped `indexer.Open` while
+`engine.startPublisher` still launched the BEP-44 keyword
+publisher under the user's identity. A user running
+`swartznet add --no-index` was still announcing keyword
+pointers to the DHT — a privacy regression that contradicted
+the documented global opt-out.
+
+  - `internal/config/config.go` — new `Config.NoIndex` field
+    mirrors the daemon-level flag down to the engine.
+  - `internal/daemon/daemon.go` — `daemon.New` copies
+    `Options.NoIndex` into `Cfg.NoIndex` before calling
+    `engine.New` so the engine's publisher gating sees a
+    consistent view.
+  - `internal/engine/engine.go` — `startPublisher` now skips
+    the keyword Publisher worker on either `cfg.NoIndex` or
+    `cfg.DisableDHTPublish`, and keeps the `sn_search`
+    Publisher capability bit at 0 in both cases (a node that
+    isn't pushing entries shouldn't gossip itself as an
+    indexer).
+  - `internal/daemon/daemon_test.go` —
+    `TestDaemonNoIndexCascadesToPublisher` regression-locks
+    that `Engine.Publisher()` is nil when `NoIndex` is true.
+
+The lookup / pointer-getter path stays intact, so a
+`--no-index` node still subscribes to other publishers and
+fetches companion indexes — it just contributes nothing to
+the search-side network.
 
 ### Fixed — Determinism follow-ups from production-architecture audit
 

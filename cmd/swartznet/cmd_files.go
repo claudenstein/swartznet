@@ -8,53 +8,57 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/swartznet/swartznet/internal/httpapi"
 )
 
-// cmdFiles implements `swartznet files <infohash> [<index> <priority>]`.
-// Without extra args: lists every file in the torrent with
-// priority and progress. With index+priority: flips a single
-// file's priority via POST /torrents/{ih}/files/{index}/priority.
+// cmdFiles lists a torrent's files or sets one file's priority — a thin
+// HTTP client like status.
 func cmdFiles(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("files", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var (
-		apiAddr string
-		asJSON  bool
-	)
-	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "address of the running swartznet HTTP API")
-	fs.BoolVar(&asJSON, "json", false, "emit JSON instead of a table")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage
+	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
+	asJSON := fs.Bool("json", false, "emit JSON instead of a table")
+	pos, err := parseFlagsAllowingLeadingPositionals(fs, args)
+	if err != nil {
+		return parseErrExit(err)
 	}
-
-	switch fs.NArg() {
-	case 1:
-		return filesList(apiAddr, fs.Arg(0), asJSON, stdout, stderr)
-	case 3:
-		return filesSetPriority(apiAddr, fs.Arg(0), fs.Arg(1), fs.Arg(2), stdout, stderr)
-	default:
+	if n := len(pos); n != 1 && n != 3 {
 		fmt.Fprintln(stderr, "usage:")
 		fmt.Fprintln(stderr, "  swartznet files <infohash>                    # list files")
 		fmt.Fprintln(stderr, "  swartznet files <infohash> <index> <priority> # set priority (none|normal|high)")
 		return exitUsage
 	}
-}
-
-func filesList(apiAddr, ihRaw string, asJSON bool, stdout, stderr io.Writer) int {
-	ih := strings.ToLower(strings.TrimSpace(ihRaw))
-	if len(ih) != 40 {
+	ih := strings.ToLower(strings.TrimSpace(pos[0]))
+	if !validInfoHash(ih) {
 		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
 		return exitUsage
 	}
 
+	if len(pos) == 3 {
+		idx, err := strconv.Atoi(strings.TrimSpace(pos[1]))
+		if err != nil || idx < 0 {
+			fmt.Fprintln(stderr, "swartznet: file index must be a non-negative integer")
+			return exitUsage
+		}
+		prio := strings.ToLower(strings.TrimSpace(pos[2]))
+		if prio != "none" && prio != "normal" && prio != "high" {
+			fmt.Fprintln(stderr, "swartznet: priority must be none/normal/high")
+			return exitUsage
+		}
+		return filesSetPriority(*apiAddr, ih, idx, prio, stdout, stderr)
+	}
+	return filesList(*apiAddr, ih, *asJSON, stdout, stderr)
+}
+
+func filesList(apiAddr, ih string, asJSON bool, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	url := "http://" + apiAddr + "/torrents/" + ih + "/files"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("http://%s/torrents/%s/files", apiAddr, ih), nil)
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
@@ -65,63 +69,39 @@ func filesList(apiAddr, ihRaw string, asJSON bool, stdout, stderr io.Writer) int
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, data)
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, body)
 		return exitRuntime
 	}
-
-	var body httpapi.FilesListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	var list httpapi.FilesListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 		return reportRunErr(err, stderr)
 	}
-
 	if asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(body); err != nil {
-			return reportRunErr(err, stderr)
-		}
+		_ = enc.Encode(list)
 		return exitOK
 	}
-
-	if len(body.Files) == 0 {
+	if len(list.Files) == 0 {
 		fmt.Fprintln(stdout, "(no files — torrent metadata not yet available)")
 		return exitOK
 	}
-
 	fmt.Fprintf(stdout, "%-4s  %-10s  %8s  %6s  %s\n", "IDX", "PRIORITY", "SIZE", "PROG%", "PATH")
-	for _, f := range body.Files {
+	for _, f := range list.Files {
 		fmt.Fprintf(stdout, "%-4d  %-10s  %8s  %5.1f%%  %s\n",
 			f.Index, f.Priority, humanBytes(f.Length), f.Progress*100, f.DisplayPath)
 	}
 	return exitOK
 }
 
-func filesSetPriority(apiAddr, ihRaw, idxRaw, priority string, stdout, stderr io.Writer) int {
-	ih := strings.ToLower(strings.TrimSpace(ihRaw))
-	if len(ih) != 40 {
-		fmt.Fprintln(stderr, "swartznet: infohash must be 40 hex characters")
-		return exitUsage
-	}
-	idx := strings.TrimSpace(idxRaw)
-	prio := strings.ToLower(strings.TrimSpace(priority))
-	switch prio {
-	case "none", "normal", "high":
-		// ok
-	default:
-		fmt.Fprintln(stderr, "swartznet: priority must be none/normal/high")
-		return exitUsage
-	}
-
-	body, err := json.Marshal(map[string]any{"priority": prio})
-	if err != nil {
-		return reportRunErr(err, stderr)
-	}
-
+func filesSetPriority(apiAddr, ih string, idx int, prio string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	url := "http://" + apiAddr + "/torrents/" + ih + "/files/" + idx + "/priority"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]string{"priority": prio})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("http://%s/torrents/%s/files/%d/priority", apiAddr, ih, idx),
+		bytes.NewReader(body))
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
@@ -133,10 +113,10 @@ func filesSetPriority(apiAddr, ihRaw, idxRaw, priority string, stdout, stderr io
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, data)
+		respBody, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, respBody)
 		return exitRuntime
 	}
-	fmt.Fprintf(stdout, "file %s of %s: priority=%s\n", idx, ih, prio)
+	fmt.Fprintf(stdout, "file %s of %s: priority=%s\n", strconv.Itoa(idx), ih, prio)
 	return exitOK
 }

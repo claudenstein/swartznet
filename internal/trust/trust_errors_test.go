@@ -112,3 +112,33 @@ func TestSaveRenameFailure(t *testing.T) {
 		t.Errorf("tempfile leaked: stat err = %v", err)
 	}
 }
+
+// TestAddCreatesMissingParentDir pins the offline-CLI case: `swartznet
+// trust add` on a clean install, where the XDG data dir the trust.json
+// lives in does not exist yet. save() must MkdirAll the parent rather
+// than failing the whole command with "write tmp: no such file".
+func TestAddCreatesMissingParentDir(t *testing.T) {
+	t.Parallel()
+	// Two nested levels that do NOT exist yet, mirroring a fresh
+	// ~/.local/share/swartznet/ on first run.
+	path := filepath.Join(t.TempDir(), "share", "swartznet", "trust.json")
+	s, err := trust.LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreate on a missing dir should succeed: %v", err)
+	}
+	pub := strings.Repeat("ab", 32)
+	if err := s.Add(pub, "clean-install"); err != nil {
+		t.Fatalf("Add on a missing parent dir should create it, got: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("trust.json not written to a freshly created dir: %v", err)
+	}
+	// The mode is the caller's business; just assert it round-trips.
+	reopened, err := trust.LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if !reopened.IsTrusted(pub) {
+		t.Error("added pubkey did not persist across reopen")
+	}
+}

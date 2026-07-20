@@ -9,24 +9,26 @@ import (
 	"io"
 )
 
-// Encode serialises a CompanionIndex into the on-the-wire form:
-// JSON inside a single gzip stream. The caller is responsible
-// for writing the result to disk (or wrapping it in a torrent).
-//
-// The Format and Version fields are filled in by the encoder so
-// the caller doesn't have to remember to set them. Any value
-// the caller passes in for those two fields is overwritten.
+// maxDecompressed bounds the decompressed companion payload — defence in depth
+// against a gzip bomb from an untrusted publisher (the BEP-46 pointer resolves
+// to an attacker-chosen infohash). 1 GiB is far above any legitimate index yet
+// well below memory exhaustion.
+const maxDecompressed = 1 << 30
+
+// Encode serialises a CompanionIndex to gzip(JSON). It force-sets Format and
+// Version (caller values are overwritten by design) and normalises a nil
+// Torrents to the empty slice so the JSON carries "torrents":[] never
+// "torrents":null — subscribers rely on this.
 func Encode(idx CompanionIndex) ([]byte, error) {
-	idx.Format = "swartznet-content-index"
+	idx.Format = FormatName
 	idx.Version = FormatVersion
 	if idx.Torrents == nil {
 		idx.Torrents = []TorrentRecord{}
 	}
-
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	enc := json.NewEncoder(gz)
-	if err := enc.Encode(idx); err != nil {
+	if err := json.NewEncoder(gz).Encode(idx); err != nil {
+		_ = gz.Close()
 		return nil, fmt.Errorf("companion: encode json: %w", err)
 	}
 	if err := gz.Close(); err != nil {
@@ -35,55 +37,34 @@ func Encode(idx CompanionIndex) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Decode reverses Encode. It reads the gzip stream, decodes the
-// JSON, and validates the Format and Version fields. Subscribers
-// MUST call Decode (rather than directly unmarshaling) so the
-// version check is enforced consistently across the codebase.
+// Decode parses a gzip(JSON) companion payload retrieved from an untrusted
+// publisher. It bounds the decompressed size, then refuses an unknown format or
+// version BEFORE trusting the records. A nil Torrents is normalised to empty.
 func Decode(r io.Reader) (CompanionIndex, error) {
+	var out CompanionIndex
 	gz, err := gzip.NewReader(r)
 	if err != nil {
-		return CompanionIndex{}, fmt.Errorf("companion: open gzip: %w", err)
+		return out, fmt.Errorf("companion: open gzip: %w", err)
 	}
 	defer gz.Close()
-
-	// Read up to a generous cap to avoid a malicious publisher
-	// sending an unbounded stream that exhausts our memory. 1
-	// GiB of decompressed JSON is enough for any reasonable
-	// content index — that's roughly the M2 chunker output of a
-	// terabyte of indexed text.
-	const maxDecompressed = 1 << 30
-	body, err := io.ReadAll(io.LimitReader(gz, maxDecompressed+1))
+	raw, err := io.ReadAll(io.LimitReader(gz, maxDecompressed+1))
 	if err != nil {
-		return CompanionIndex{}, fmt.Errorf("companion: read gzip: %w", err)
+		return out, fmt.Errorf("companion: read gzip: %w", err)
 	}
-	if int64(len(body)) > maxDecompressed {
-		return CompanionIndex{}, errors.New("companion: decompressed payload exceeds 1 GiB safety cap")
+	if int64(len(raw)) > maxDecompressed {
+		return out, errors.New("companion: decompressed payload exceeds 1 GiB safety cap")
 	}
-
-	var out CompanionIndex
-	if err := json.Unmarshal(body, &out); err != nil {
-		return CompanionIndex{}, fmt.Errorf("companion: parse json: %w", err)
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, fmt.Errorf("companion: parse json: %w", err)
 	}
-	if out.Format != "swartznet-content-index" {
-		return CompanionIndex{}, fmt.Errorf("companion: bad format %q, want 'swartznet-content-index'", out.Format)
+	if out.Format != FormatName {
+		return out, fmt.Errorf("companion: bad format %q, want %q", out.Format, FormatName)
 	}
 	if out.Version != FormatVersion {
-		return CompanionIndex{}, fmt.Errorf("companion: unsupported version %d, this build understands %d",
-			out.Version, FormatVersion)
+		return out, fmt.Errorf("companion: unsupported version %d, this build understands %d", out.Version, FormatVersion)
 	}
 	if out.Torrents == nil {
 		out.Torrents = []TorrentRecord{}
 	}
 	return out, nil
-}
-
-// EncodeSize is a small helper that returns just the encoded
-// size without producing the full byte slice. Useful for
-// publisher-side budgeting before committing to a put.
-func EncodeSize(idx CompanionIndex) (int, error) {
-	buf, err := Encode(idx)
-	if err != nil {
-		return 0, err
-	}
-	return len(buf), nil
 }

@@ -7,222 +7,279 @@ import (
 	"testing"
 )
 
-func TestUserOverridesRoundTrip(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "nested", "config.json")
-
-	// Missing file: not an error, returns empty values.
-	d, i, err := LoadUserOverrides(path)
-	if err != nil || d != "" || i != "" {
-		t.Fatalf("missing file should return empty,empty,nil; got %q,%q,%v", d, i, err)
-	}
-
-	// Save and re-load.
-	if err := SaveUserOverrides(path, "/tmp/data", "/tmp/index"); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	d, i, err = LoadUserOverrides(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if d != "/tmp/data" || i != "/tmp/index" {
-		t.Errorf("round-trip mismatch: got %q,%q", d, i)
-	}
-
-	// Empty save path is rejected so callers don't accidentally
-	// stomp on an unrelated file in the working directory.
-	if err := SaveUserOverrides("", "x", "y"); err == nil {
-		t.Error("empty save path should error")
-	}
-
-	// Malformed JSON surfaces as an error rather than silent
-	// fallback to defaults, so the operator can fix it.
-	bad := filepath.Join(dir, "bad.json")
-	if err := os.WriteFile(bad, []byte("not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := LoadUserOverrides(bad); err == nil {
-		t.Error("malformed JSON should error")
-	}
-}
-
 func TestDefaultNonEmpty(t *testing.T) {
-	t.Parallel()
 	c := Default()
-
-	if c.DataDir == "" {
-		t.Error("DataDir is empty")
-	}
-	if c.IndexDir == "" {
-		t.Error("IndexDir is empty")
-	}
-	if c.IdentityPath == "" {
-		t.Error("IdentityPath is empty")
-	}
-	if c.PublisherManifest == "" {
-		t.Error("PublisherManifest is empty")
-	}
-	if c.ReputationPath == "" {
-		t.Error("ReputationPath is empty")
-	}
-	if c.SeedListPath == "" {
-		t.Error("SeedListPath is empty")
-	}
-	if c.BloomPath == "" {
-		t.Error("BloomPath is empty")
-	}
-	if c.CompanionDir == "" {
-		t.Error("CompanionDir is empty")
-	}
-	if c.CompanionFollowFile == "" {
-		t.Error("CompanionFollowFile is empty")
+	if c.DataDir == "" || c.IndexDir == "" || c.IdentityPath == "" {
+		t.Fatalf("Default() has empty paths: %+v", c)
 	}
 	if c.ListenPort != 42069 {
-		t.Errorf("ListenPort = %d, want 42069", c.ListenPort)
+		t.Fatalf("ListenPort = %d, want 42069", c.ListenPort)
 	}
-	if !c.Seed {
-		t.Error("Seed should default to true")
-	}
-	if c.NoUpload {
-		t.Error("NoUpload should default to false")
-	}
-	if c.DisableDHT {
-		t.Error("DisableDHT should default to false")
-	}
-	if c.Regtest {
-		t.Error("Regtest should default to false")
+	if filepath.Base(c.IdentityPath) != "identity.key" {
+		t.Fatalf("IdentityPath leaf = %q, want identity.key", c.IdentityPath)
 	}
 }
 
 func TestDefaultPathsShareRoot(t *testing.T) {
-	t.Parallel()
 	c := Default()
-	// All persistent paths should share the same swartznet root directory.
-	// DataDir, IndexDir, CompanionDir are directories (apply filepath.Dir);
-	// the rest are file paths (also apply filepath.Dir to get their parent).
-	root := filepath.Dir(c.DataDir)
-	for _, p := range []string{
-		filepath.Dir(c.IndexDir),
-		filepath.Dir(c.IdentityPath),
-		filepath.Dir(c.PublisherManifest),
-		filepath.Dir(c.ReputationPath),
-		filepath.Dir(c.SeedListPath),
-		filepath.Dir(c.BloomPath),
-		filepath.Dir(c.CompanionDir),
-		filepath.Dir(c.CompanionFollowFile),
-	} {
-		if p != root {
-			t.Errorf("path root %q != expected %q", p, root)
+	root := ResolveShareRoot()
+	for _, p := range []string{c.DataDir, c.IndexDir, c.IdentityPath, c.TrustPath, c.BloomPath, c.ReputationPath, c.SeedListPath} {
+		if !strings.HasPrefix(p, root) {
+			t.Errorf("path %q does not share root %q", p, root)
 		}
 	}
 }
 
-func TestValidateHappy(t *testing.T) {
-	t.Parallel()
-	c := Default()
-	c.DataDir = t.TempDir()
-	c.IndexDir = filepath.Join(t.TempDir(), "idx")
+// TestValidateNeverTouchesIdentity pins the Slice-0 §5 rule after the
+// IdentityPath field landed: Validate's create-set stays exactly two dirs.
+func TestValidateNeverTouchesIdentity(t *testing.T) {
+	tmp := t.TempDir()
+	c := Config{
+		DataDir:      filepath.Join(tmp, "data"),
+		IdentityPath: filepath.Join(tmp, "id", "identity.key"),
+	}
 	if err := c.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "id")); !os.IsNotExist(err) {
+		t.Fatal("Validate created the identity parent dir; the loader owns it")
+	}
+}
+
+func TestResolveShareRoot(t *testing.T) {
+	t.Run("xdg wins", func(t *testing.T) {
+		t.Setenv("XDG_DATA_HOME", "/tmp/xdg-test")
+		if got := ResolveShareRoot(); got != "/tmp/xdg-test/swartznet" {
+			t.Fatalf("got %q", got)
+		}
+	})
+	t.Run("home fallback", func(t *testing.T) {
+		t.Setenv("XDG_DATA_HOME", "")
+		t.Setenv("HOME", "/tmp/home-test")
+		got := ResolveShareRoot()
+		if !strings.Contains(got, filepath.Join(".local", "share", "swartznet")) {
+			t.Fatalf("got %q, want ~/.local/share/swartznet", got)
+		}
+	})
+	t.Run("homeless last resort", func(t *testing.T) {
+		t.Setenv("XDG_DATA_HOME", "")
+		t.Setenv("HOME", "")
+		if got := ResolveShareRoot(); got != "./swartznet-state" {
+			t.Fatalf("got %q, want ./swartznet-state", got)
+		}
+	})
+}
+
+func TestValidatePortBounds(t *testing.T) {
+	tmp := t.TempDir()
+	for _, tc := range []struct {
+		port int
+		ok   bool
+	}{
+		{0, true}, {1, true}, {65535, true},
+		{-1, false}, {65536, false}, {70000, false},
+	} {
+		c := Config{DataDir: filepath.Join(tmp, "data"), ListenPort: tc.port}
+		err := c.Validate()
+		if tc.ok && err != nil {
+			t.Errorf("port %d: unexpected error %v", tc.port, err)
+		}
+		if !tc.ok {
+			if err == nil {
+				t.Errorf("port %d: want error", tc.port)
+			} else if !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("port %d: error %q lacks 'out of range'", tc.port, err)
+			}
+		}
 	}
 }
 
 func TestValidateEmptyDataDir(t *testing.T) {
-	t.Parallel()
-	c := Default()
-	c.DataDir = ""
-	if err := c.Validate(); err == nil {
-		t.Fatal("expected error for empty DataDir")
+	tmp := t.TempDir()
+	c := Config{DataDir: "", IndexDir: filepath.Join(tmp, "sub", "index")}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "DataDir must not be empty") {
+		t.Fatalf("err = %v", err)
+	}
+	// A rejected config must leave the filesystem untouched.
+	if _, statErr := os.Stat(filepath.Join(tmp, "sub")); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected Validate created IndexDir parent")
 	}
 }
 
-func TestValidatePortBounds(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		port int
-		ok   bool
-	}{
-		{"zero", 0, true},
-		{"low", 1, true},
-		{"max", 65535, true},
-		{"negative", -1, false},
-		{"too high", 65536, false},
-		{"way too high", 70000, false},
+func TestValidateCreatesExactlyTwo(t *testing.T) {
+	tmp := t.TempDir()
+	c := Config{
+		DataDir:  filepath.Join(tmp, "a", "data"),
+		IndexDir: filepath.Join(tmp, "b", "idx", "leaf"),
 	}
-	for _, tc := range cases {
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(c.DataDir)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("DataDir not created: %v", err)
+	}
+	if st.Mode().Perm()&^0o755 != 0 {
+		t.Errorf("DataDir mode %v exceeds 0755", st.Mode().Perm())
+	}
+	parent, err := os.Stat(filepath.Dir(c.IndexDir))
+	if err != nil || !parent.IsDir() {
+		t.Fatalf("IndexDir parent not created: %v", err)
+	}
+	// The IndexDir leaf must NOT exist — Bleve insists on creating it.
+	if _, err := os.Stat(c.IndexDir); !os.IsNotExist(err) {
+		t.Fatalf("IndexDir leaf was created; it must be left to Bleve")
+	}
+}
+
+func TestValidateEmptyIndexDir(t *testing.T) {
+	tmp := t.TempDir()
+	c := Config{DataDir: filepath.Join(tmp, "data")}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("empty IndexDir must be valid (indexing off): %v", err)
+	}
+}
+
+func TestValidateDataDirCreateFailure(t *testing.T) {
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{DataDir: filepath.Join(blocker, "data")}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "create DataDir") {
+		t.Fatalf("err = %v, want 'create DataDir'", err)
+	}
+}
+
+func TestValidateIndexDirParentCreateFailure(t *testing.T) {
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{
+		DataDir:  filepath.Join(tmp, "data"),
+		IndexDir: filepath.Join(blocker, "sub", "index"),
+	}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "parent of IndexDir") {
+		t.Fatalf("err = %v, want 'parent of IndexDir'", err)
+	}
+}
+
+// TestUnsafeGateProductionBranch exercises the production (non-test) branch of
+// the single unsafe gate by threading inTest=false explicitly.
+func TestUnsafeGateProductionBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		regtest bool
+		env     string
+		inTest  bool
+		ok      bool
+	}{
+		{"no flags, prod, no env", false, "", false, true},
+		{"regtest, prod, no env", true, "", false, false},
+		{"regtest, prod, env 1", true, "1", false, true},
+		{"regtest, prod, env yes", true, "yes", false, false},
+		{"regtest, prod, env true", true, "true", false, false},
+		{"regtest, in test", true, "", true, true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Default()
-			c.DataDir = t.TempDir()
-			c.ListenPort = tc.port
-			err := c.Validate()
+			t.Setenv("SWARTZNET_UNSAFE", tc.env)
+			c := Config{Regtest: tc.regtest}
+			err := c.checkUnsafe(tc.inTest)
 			if tc.ok && err != nil {
-				t.Fatalf("port %d should be valid: %v", tc.port, err)
+				t.Fatalf("unexpected error: %v", err)
 			}
-			if !tc.ok && err == nil {
-				t.Fatalf("port %d should be invalid", tc.port)
+			if !tc.ok {
+				if err == nil {
+					t.Fatal("want rejection")
+				}
+				if !strings.Contains(err.Error(), "SWARTZNET_UNSAFE") {
+					t.Fatalf("rejection %q must name SWARTZNET_UNSAFE", err)
+				}
 			}
 		})
 	}
 }
 
-func TestValidateCreatesDataDir(t *testing.T) {
-	t.Parallel()
-	dir := filepath.Join(t.TempDir(), "nested", "data")
-	c := Default()
-	c.DataDir = dir
+func TestValidateAuthorizesUnderTest(t *testing.T) {
+	tmp := t.TempDir()
+	c := Config{DataDir: filepath.Join(tmp, "data"), Regtest: true, DHTInsecure: true}
 	if err := c.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
+		t.Fatalf("testing.Testing() must authorize regtest in test binaries: %v", err)
 	}
-	info, err := os.Stat(dir)
+}
+
+// TestNoSecondGateName pins the §6 fix: the legacy second env gate name must
+// not exist anywhere in the rebuilt tree.
+func TestNoSecondGateName(t *testing.T) {
+	banned := "SWARTZNET_" + "ALLOW_REGTEST" // split so this file doesn't match itself
+	root := moduleRoot(t)
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == "research" || name == "dist" || name == "legacy" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(b), banned) {
+			t.Errorf("%s contains the retired gate name %s", path, banned)
+		}
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("DataDir not created: %v", err)
-	}
-	if !info.IsDir() {
-		t.Fatal("DataDir is not a directory")
+		t.Fatal(err)
 	}
 }
 
-func TestValidateCreatesIndexDirParent(t *testing.T) {
-	t.Parallel()
-	base := t.TempDir()
-	c := Default()
-	c.DataDir = filepath.Join(base, "data")
-	c.IndexDir = filepath.Join(base, "nested", "index.bleve")
-	if err := c.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Parent of IndexDir should exist; the leaf (index.bleve) is Bleve's job.
-	parent := filepath.Dir(c.IndexDir)
-	if _, err := os.Stat(parent); err != nil {
-		t.Fatalf("IndexDir parent not created: %v", err)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above test dir")
+		}
+		dir = parent
 	}
 }
 
-func TestValidateEmptyIndexDir(t *testing.T) {
-	t.Parallel()
+func TestValidateLayerDMode(t *testing.T) {
+	for _, m := range []string{"", "legacy", "composite", "aggregatePPMI"} {
+		c := Default()
+		c.DataDir = t.TempDir()
+		c.IndexDir = ""
+		c.LayerDMode = m
+		if err := c.Validate(); err != nil {
+			t.Errorf("LayerDMode %q rejected: %v", m, err)
+		}
+	}
 	c := Default()
 	c.DataDir = t.TempDir()
-	c.IndexDir = "" // empty IndexDir should be OK (disabled)
-	if err := c.Validate(); err != nil {
-		t.Fatalf("empty IndexDir should be valid: %v", err)
-	}
-}
-
-func TestSwartznetShareRootXDG(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", "/tmp/xdg-test")
-	got := swartznetShareRoot()
-	want := "/tmp/xdg-test/swartznet"
-	if got != want {
-		t.Errorf("swartznetShareRoot() = %q, want %q", got, want)
-	}
-}
-
-func TestSwartznetShareRootHome(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", "")
-	got := swartznetShareRoot()
-	if !strings.Contains(got, ".local/share/swartznet") {
-		t.Errorf("swartznetShareRoot() = %q, want path containing .local/share/swartznet", got)
+	c.IndexDir = ""
+	c.LayerDMode = "bogus"
+	if err := c.Validate(); err == nil {
+		t.Error("bogus LayerDMode accepted")
 	}
 }

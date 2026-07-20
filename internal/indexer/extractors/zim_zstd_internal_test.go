@@ -7,6 +7,22 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// TestGetZstdDecoderInitializes covers the lazy zstd-decoder
+// constructor used by the ZIM cluster reader. The decoder is
+// process-shared (sync.Once) so we only verify the call returns
+// a non-nil decoder without error; subsequent ZIM tests reuse
+// the same instance.
+func TestGetZstdDecoderInitializes(t *testing.T) {
+	t.Parallel()
+	d, err := getZstdDecoder()
+	if err != nil {
+		t.Fatalf("getZstdDecoder: %v", err)
+	}
+	if d == nil {
+		t.Fatal("getZstdDecoder returned nil decoder with no error")
+	}
+}
+
 // TestReadZimClusterNextPtrReadFails covers readZimCluster's
 // `if num+1 < hdr.ClusterCount { … err arm … }` body. We point
 // ClusterPtrPos right at end-of-file so the second ReadAt for
@@ -29,8 +45,7 @@ func TestReadZimClusterNextPtrReadFails(t *testing.T) {
 
 // TestReadZimDirEntryURLPtrReadFails covers readZimDirEntry's
 // `ra.ReadAt(ptrBuf[:], …); if err != nil { return …, err }`
-// arm at lines 258-260. Point URLPtrPos past EOF so the very
-// first ReadAt fails.
+// arm. Point URLPtrPos past EOF so the very first ReadAt fails.
 func TestReadZimDirEntryURLPtrReadFails(t *testing.T) {
 	t.Parallel()
 	hdr := &zimHeader{URLPtrPos: 1024} // past EOF on a tiny file
@@ -41,10 +56,9 @@ func TestReadZimDirEntryURLPtrReadFails(t *testing.T) {
 
 // TestReadZimMimeListExceedsCap covers readZimMimeList's
 // `if len(all) > zimMaxMimeListBytes { return nil, errors.New(…) }`
-// guard at lines 222-225. We hand it a ReaderAt that returns a
-// stream of non-zero bytes — the function never finds the
-// double-null terminator and bails out once `all` exceeds the
-// 64 KiB cap.
+// guard. We hand it a ReaderAt that returns a stream of non-zero
+// bytes — the function never finds the double-null terminator and
+// bails out once `all` exceeds the 64 KiB cap.
 func TestReadZimMimeListExceedsCap(t *testing.T) {
 	t.Parallel()
 	// 70 KiB of 'a' bytes (no nulls) — well past zimMaxMimeListBytes.
@@ -56,11 +70,11 @@ func TestReadZimMimeListExceedsCap(t *testing.T) {
 }
 
 // TestReadZimClusterZstdHappyPath covers readZimCluster's
-// `case zimCompZstd: …` success arm at lines 361-364. Calling
-// readZimCluster directly with a synthetic ReaderAt + hand-built
-// zimHeader lets us put the cluster bytes at exactly the size we
-// want — a single zstd frame, no trailing padding — so DecodeAll
-// succeeds and the prepend-typeByte success path runs.
+// `case zimCompZstd: …` success arm. Calling readZimCluster
+// directly with a synthetic ReaderAt + hand-built zimHeader lets
+// us put the cluster bytes at exactly the size we want — a single
+// zstd frame, no trailing padding — so DecodeAll succeeds and the
+// prepend-typeByte success path runs.
 func TestReadZimClusterZstdHappyPath(t *testing.T) {
 	t.Parallel()
 

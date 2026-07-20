@@ -208,6 +208,18 @@ while true; do
         pass "at least one seed publisher has emitted a BEP-44 put (pub_count=$pub_count)"
         break
     fi
+    # Timeout so a Layer-D publisher regression (the exact defect this scenario
+    # exists to catch — e.g. a silent BEP-44 put failure leaving last_published
+    # empty) reports FAIL, not an infinite busy-loop. This budget check must live
+    # INSIDE the wait loop; it was previously orphaned in a `while false` block
+    # that never ran, so a broken publisher hung s12 (and `run-testbed.sh all`)
+    # forever instead of failing.
+    if [ $(( $(date +%s) - start )) -ge "$BUDGET_PUB" ]; then
+        echo "--- seed-1 status ---"
+        api_get seed-1 "/status" | python3 -m json.tool || true
+        fail "no seed publisher emitted a BEP-44 put within ${BUDGET_PUB}s"
+    fi
+    sleep 2
 done
 
 # 3b. After the first put event, let the publishers cycle a few
@@ -218,15 +230,6 @@ done
 # item.
 echo "letting DHT puts settle for 20s..."
 sleep 20
-while false; do
-    :
-    if [ $(( $(date +%s) - start )) -ge "$BUDGET_PUB" ]; then
-        echo "--- seed-1 status ---"
-        api_get seed-1 "/status" | python3 -m json.tool || true
-        fail "no seed publisher emitted a BEP-44 put within ${BUDGET_PUB}s"
-    fi
-    sleep 2
-done
 
 # 4. Layer-D search from leech-1. This is the load-bearing
 # assertion: proves the full round-trip (leech DHT query →

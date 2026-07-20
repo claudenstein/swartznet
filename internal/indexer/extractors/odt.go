@@ -65,7 +65,10 @@ func (e *ODTExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, err
 	}
 	defer rc.Close()
 
-	text, err := extractODTText(rc)
+	// Bound the DECOMPRESSED entry stream before it reaches the XML
+	// decoder: the input cap above only limits the compressed bytes,
+	// and a deflate bomb amplifies ~1032:1. See maxDocTextBytes.
+	text, err := extractODTText(io.LimitReader(rc, maxDocTextBytes), maxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -96,9 +99,14 @@ func findODTContentXML(zr *zip.Reader) *zip.File {
 //   - <text:tab>    — tab character (we emit a single space)
 //   - <text:line-break> — soft line break (we emit a single space)
 //
-// Style/font/automatic-style elements are skipped because they
-// can contain noise like font names embedded as character data.
-func extractODTText(r io.Reader) (string, error) {
+// Style/font/automatic-style subtrees are skipped because they can
+// contain noise like font names embedded as character data. maxOut
+// bounds the accumulated output; <= 0 falls back to
+// defaultTextOutputCap.
+func extractODTText(r io.Reader, maxOut int64) (string, error) {
+	if maxOut <= 0 {
+		maxOut = defaultTextOutputCap
+	}
 	dec := xml.NewDecoder(r)
 	dec.Strict = false
 	dec.Entity = xml.HTMLEntity
@@ -110,6 +118,11 @@ func extractODTText(r io.Reader) (string, error) {
 	)
 
 	for {
+		// Output guard against zip-bomb amplification: stop once the
+		// accumulated body text crosses the budget.
+		if int64(out.Len()) > maxOut {
+			break
+		}
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break
@@ -154,14 +167,7 @@ func extractODTText(r io.Reader) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-// init registers the ODT extractor for the canonical OpenDocument
-// Text MIME type.
-func init() {
-	Register(NewODTExtractor(), func(mime string, c Candidate) bool {
-		switch mime {
-		case "application/vnd.oasis.opendocument.text":
-			return true
-		}
-		return false
-	})
+// claimsODT claims the canonical OpenDocument Text MIME type.
+func claimsODT(mime string, c Candidate) bool {
+	return mime == "application/vnd.oasis.opendocument.text"
 }

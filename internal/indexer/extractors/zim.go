@@ -2,6 +2,7 @@ package extractors
 
 import (
 	"bytes"
+	"container/list"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -26,20 +27,20 @@ import (
 //  3. For each article whose MIME is text-like (text/html, text/plain,
 //     application/xhtml+xml), reads the cluster, decompresses if
 //     needed, slices out the blob, and decodes HTML→text via the
-//     existing extractHTMLText helper.
+//     shared extractHTMLText helper.
 //
-// Bounds: the extractor processes at most maxArticles entries and emits
-// at most maxBytes of cumulative text (defaults: 5000 articles, 32 MiB
-// text). These caps keep the extractor useful on a 70 GiB ZIM without
-// blowing through memory or runtime.
+// Bounds: the extractor processes at most zimDefaultMaxArticles entries
+// and emits at most maxBytes of cumulative text (defaults: 5000
+// articles, 32 MiB text). These caps keep the extractor useful on a
+// 70 GiB ZIM without blowing through memory or runtime.
 //
 // Cluster compression types supported in v1:
 //   - 1 (uncompressed)
 //   - 5 (zstd, what every Kiwix release since 2021 uses)
 //
-// Type 4 (XZ / LZMA2) is detected and skipped with a debug-level
-// reason; old pre-2021 ZIMs will index zero articles. Type 4 support
-// would add a third compression dep and is deferred.
+// Type 4 (XZ / LZMA2) is detected and rejected; old pre-2021 ZIMs will
+// index zero articles by design. Type 4 support would add a third
+// compression dep and is deferred.
 type ZimExtractor struct{}
 
 // NewZimExtractor returns a ready-to-use ZIM extractor.
@@ -60,14 +61,16 @@ const (
 
 	zimDefaultMaxArticles = 5000
 	zimDefaultMaxBytes    = 32 * 1024 * 1024
-	zimMaxClusterBytes    = 64 * 1024 * 1024 // hard cap per cluster
+	zimMaxClusterBytes    = 64 * 1024 * 1024  // hard cap per cluster
+	zimMaxCacheBytes      = 128 * 1024 * 1024 // aggregate cap across the cluster cache
 	zimMaxMimeListBytes   = 64 * 1024
 )
 
 // Extract implements Extractor. The reader MUST also implement
 // io.ReaderAt — otherwise random access into the (potentially huge)
 // ZIM file is impossible and the extractor returns an error. The
-// engine's anacrolix file reader satisfies this.
+// engine wraps its torrent reader in a Seek-based ReaderAt shim to
+// satisfy this; genuinely non-seekable input fails closed here.
 func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 	ra, ok := r.(io.ReaderAt)
 	if !ok {
@@ -91,14 +94,14 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 		articleCount = zimDefaultMaxArticles
 	}
 
-	// Keyed cache of decompressed clusters so multiple articles
-	// sharing one cluster only pay decompression once. Bounded by
-	// count, evicting half the entries when full — random eviction,
-	// not LRU, since the URL pointer list is roughly cluster-sorted
-	// in practice and adjacent articles tend to live in the same
-	// cluster.
-	clusterCache := make(map[uint32][]byte)
+	// LRU cache of decompressed clusters so multiple articles sharing
+	// one cluster only pay decompression once. True LRU (container/list
+	// + map) rather than random eviction: the URL pointer list is only
+	// *roughly* cluster-sorted, so evicting the genuinely least-recently
+	// used cluster avoids the thrash a random "drop half" policy can
+	// cause when the working set straddles the cache boundary.
 	const cacheCap = 32
+	clusterCache := newClusterLRU(cacheCap, zimMaxCacheBytes)
 
 	var (
 		chunks  []Chunk
@@ -123,23 +126,13 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 			continue
 		}
 
-		cluster, ok := clusterCache[entry.ClusterNum]
+		cluster, ok := clusterCache.get(entry.ClusterNum)
 		if !ok {
 			cluster, err = readZimCluster(ra, hdr, entry.ClusterNum)
 			if err != nil {
 				continue
 			}
-			if len(clusterCache) >= cacheCap {
-				dropped := 0
-				for k := range clusterCache {
-					delete(clusterCache, k)
-					dropped++
-					if dropped >= cacheCap/2 {
-						break
-					}
-				}
-			}
-			clusterCache[entry.ClusterNum] = cluster
+			clusterCache.put(entry.ClusterNum, cluster)
 		}
 
 		blob, err := getZimBlob(cluster, entry.BlobNum)
@@ -154,6 +147,79 @@ func (*ZimExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 		emitted += int64(len(text))
 	}
 	return chunks, nil
+}
+
+// clusterLRU is a tiny least-recently-used cache of decompressed ZIM
+// clusters keyed by cluster number. It is single-goroutine only (one
+// per Extract call) so it needs no locking. Capacity is fixed at
+// construction; the least-recently-accessed entry is evicted when full.
+type clusterLRU struct {
+	cap      int
+	maxBytes int64      // aggregate cache byte budget (evict until total fits)
+	curBytes int64      // bytes currently resident across all entries
+	ll       *list.List // front = most recently used
+	items    map[uint32]*list.Element
+}
+
+// clusterLRUEntry is the value stored in each list element.
+type clusterLRUEntry struct {
+	key  uint32
+	data []byte
+}
+
+func newClusterLRU(capacity int, maxBytes int64) *clusterLRU {
+	if capacity < 1 {
+		capacity = 1
+	}
+	if maxBytes < 1 {
+		maxBytes = 1
+	}
+	return &clusterLRU{
+		cap:      capacity,
+		maxBytes: maxBytes,
+		ll:       list.New(),
+		items:    make(map[uint32]*list.Element, capacity),
+	}
+}
+
+// get returns the cached cluster and marks it most-recently-used.
+func (c *clusterLRU) get(key uint32) ([]byte, bool) {
+	el, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	c.ll.MoveToFront(el)
+	return el.Value.(*clusterLRUEntry).data, true
+}
+
+// put inserts a cluster, evicting the least-recently-used entry if the
+// cache is at capacity. A repeat key refreshes the existing entry.
+func (c *clusterLRU) put(key uint32, data []byte) {
+	if el, ok := c.items[key]; ok {
+		e := el.Value.(*clusterLRUEntry)
+		c.curBytes += int64(len(data)) - int64(len(e.data))
+		e.data = data
+		c.ll.MoveToFront(el)
+		return
+	}
+	// Evict the least-recently-used entries until BOTH the count cap and the
+	// aggregate BYTE budget admit the new entry. Count alone let 32 clusters at up
+	// to 64 MiB each pin ~2 GiB from a tiny crafted .zim; the byte budget bounds
+	// the total. The `Len() > 0` guard keeps the loop finite when the incoming
+	// entry alone exceeds the budget (it is still admitted — we need it now — but
+	// each cluster is already capped at zimMaxClusterBytes < the budget).
+	for c.ll.Len() > 0 && (c.ll.Len() >= c.cap || c.curBytes+int64(len(data)) > c.maxBytes) {
+		oldest := c.ll.Back()
+		if oldest == nil {
+			break
+		}
+		oe := oldest.Value.(*clusterLRUEntry)
+		c.ll.Remove(oldest)
+		delete(c.items, oe.key)
+		c.curBytes -= int64(len(oe.data))
+	}
+	c.items[key] = c.ll.PushFront(&clusterLRUEntry{key: key, data: data})
+	c.curBytes += int64(len(data))
 }
 
 // zimHeader is the parsed 80-byte file header.
@@ -202,7 +268,7 @@ func readZimHeader(ra io.ReaderAt) (*zimHeader, error) {
 
 // readZimMimeList reads the list of MIME-type strings. Each is a
 // null-terminated UTF-8 string; the list ends with an empty string
-// (i.e. two consecutive nulls).
+// (i.e. two consecutive nulls). Bounded by zimMaxMimeListBytes.
 func readZimMimeList(ra io.ReaderAt, off int64) ([]string, error) {
 	var all []byte
 	pos := off
@@ -280,7 +346,9 @@ func readZimDirEntry(ra io.ReaderAt, hdr *zimHeader, i uint32) (zimDirEntry, err
 
 // zstdDecoderOnce constructs the stateless zstd decoder lazily and
 // shares it across calls. klauspost/compress's NewReader(nil) +
-// DecodeAll path is documented as concurrency-safe.
+// DecodeAll path is documented as concurrency-safe. The decoder's
+// max-memory bound is the per-cluster cap so a hostile frame cannot
+// decompress past it.
 var (
 	zstdDecoder     *zstd.Decoder
 	zstdDecoderOnce sync.Once
@@ -438,11 +506,11 @@ func zimIsExtractableMime(m string) bool {
 }
 
 // zimDecodeArticle turns a raw blob into searchable plaintext. HTML
-// goes through the existing extractHTMLText helper; plain text is
+// goes through the shared extractHTMLText helper; plain text is
 // returned as-is (trimmed).
 func zimDecodeArticle(blob []byte, mime string) string {
 	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "application/xhtml") {
-		text, err := extractHTMLText(bytes.NewReader(blob))
+		text, err := extractHTMLText(bytes.NewReader(blob), maxDocTextBytes)
 		if err != nil {
 			return ""
 		}
@@ -451,14 +519,12 @@ func zimDecodeArticle(blob []byte, mime string) string {
 	return strings.TrimSpace(string(blob))
 }
 
-func init() {
-	Register(NewZimExtractor(), func(mime string, c Candidate) bool {
-		if mime == "application/x-zim" || mime == "application/x-openzim" {
-			return true
-		}
-		if strings.EqualFold(filepath.Ext(c.Path), ".zim") {
-			return true
-		}
-		return false
-	})
+// claimsZIM claims the ZIM MIME types plus a case-insensitive .zim
+// extension fallback. Deliberately no size gate — 70 GiB ZIMs are the
+// point; Extract's article/byte caps bound the work instead.
+func claimsZIM(mime string, c Candidate) bool {
+	if mime == "application/x-zim" || mime == "application/x-openzim" {
+		return true
+	}
+	return strings.EqualFold(filepath.Ext(c.Path), ".zim")
 }

@@ -2,44 +2,38 @@ package dhtindex
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/swartznet/swartznet/contracts/dhtschema"
+	"github.com/swartznet/swartznet/contracts/token"
 )
 
-// PublishTask describes one torrent worth of work for the publisher
-// worker. The worker tokenises the name, then publishes (or queues
-// for refresh) one DHT entry per resulting keyword.
+// PublishTask is one torrent worth of work: the worker tokenizes the NAME
+// (never content) and publishes one keyword entry per resulting token.
 type PublishTask struct {
-	InfoHash  []byte // 20-byte sha1 infohash of the torrent
-	Name      string // human-readable name (gets tokenised)
-	Seeders   int    // last known seeder count
-	FileCount int    // file count in the torrent
-	SizeBytes int64  // total bytes
+	InfoHash  []byte // 20-byte sha1 infohash
+	Name      string // human-readable name (tokenized to keywords)
+	Seeders   int
+	FileCount int
+	SizeBytes int64
 }
 
-// PublisherOptions tunes the publisher worker. The defaults are
-// chosen so a fresh client behaves reasonably; tests override them
-// to drive the worker faster.
+// PublisherOptions tunes the worker and the backend beneath it. RefreshInterval
+// and QueueSize drive the worker; PutTimeout and MinPutInterval drive the
+// legacyKeyword backend. These are code-owned constants (Default vs Regtest),
+// deliberately NOT user config flags.
 type PublisherOptions struct {
-	// RefreshInterval is how often the worker re-publishes every
-	// entry in the manifest. BEP-44 expires items after 2h, so the
-	// safe upper bound is ~1h. Default: 1h.
+	// RefreshInterval re-announces every entry (BEP-44 expires at 2h). Default 1h.
 	RefreshInterval time.Duration
-	// PutTimeout bounds a single Put traversal. Default: 30s.
+	// PutTimeout bounds a single Put traversal. Default 30s.
 	PutTimeout time.Duration
-	// QueueSize is the buffered task channel capacity. Default: 64.
+	// QueueSize is the buffered task channel capacity. Default 64.
 	QueueSize int
-	// MinPutInterval is the hard per-keyword publish budget: if
-	// the same keyword was published less than this long ago,
-	// publishOne skips the put with a debug log rather than
-	// hitting the DHT. This is the M13b v1 blocker-2 mitigation
-	// recommended by the desk research — anacrolix/dht/v2 has no
-	// default rate cap on concurrent mutable-item puts, so
-	// SwartzNet must enforce its own. Default: 55 minutes (just
-	// under RefreshInterval, leaving a small skew budget before
-	// the BEP-44 TTL so refreshes keep items alive).
+	// MinPutInterval is the hard per-keyword publish budget: a keyword put
+	// less than this long ago is skipped. Default 55m (just under
+	// RefreshInterval, leaving skew budget before the 2h TTL). Zero disables.
 	MinPutInterval time.Duration
 }
 
@@ -53,17 +47,10 @@ func DefaultPublisherOptions() PublisherOptions {
 	}
 }
 
-// RegtestPublisherOptions returns the accelerated options used
-// in regtest mode. Every production time constant is shrunk so
-// scenario tests that depend on "what happens after the next
-// refresh" run in seconds instead of hours. Mirrors Bitcoin
-// Core's regtest-chain time-constant overrides.
-//
-// NEVER use this in production — a real node running regtest
-// mode would hammer the mainline DHT and be rate-limited into
-// the ground. The engine logs a prominent warning at startup
-// when Config.Regtest is true so accidental production use is
-// unmissable.
+// RegtestPublisherOptions returns the accelerated regtest options so
+// scenario tests that turn on "after the next refresh" run in seconds. NEVER
+// production: a real node running these would hammer the mainline DHT. The
+// engine logs a prominent warning when Config.Regtest is set.
 func RegtestPublisherOptions() PublisherOptions {
 	return PublisherOptions{
 		RefreshInterval: 5 * time.Second,
@@ -73,14 +60,13 @@ func RegtestPublisherOptions() PublisherOptions {
 	}
 }
 
-// Publisher is the long-running worker that owns the manifest and
-// drives all DHT puts. Construct with NewPublisher, attach via the
-// engine, and Stop on shutdown.
+// Publisher is the long-running worker that drives a RecordBackend: it services
+// Submit() calls and a refresh ticker. It is a thin scheduling shell — format-
+// specific persistence, throttle, and eviction all live inside the backend.
 type Publisher struct {
-	log      *slog.Logger
-	put      Putter
-	manifest *Manifest
-	opts     PublisherOptions
+	log     *slog.Logger
+	backend RecordBackend
+	opts    PublisherOptions
 
 	tasks    chan PublishTask
 	stopOnce sync.Once
@@ -88,31 +74,23 @@ type Publisher struct {
 	wg       sync.WaitGroup
 }
 
-// NewPublisher constructs a Publisher. log may be nil. opts is
-// optional; pass DefaultPublisherOptions for production.
-func NewPublisher(put Putter, manifest *Manifest, opts PublisherOptions, log *slog.Logger) *Publisher {
+// NewPublisher constructs a worker over backend. log may be nil.
+func NewPublisher(backend RecordBackend, opts PublisherOptions, log *slog.Logger) *Publisher {
 	if log == nil {
 		log = slog.Default()
 	}
 	if opts.RefreshInterval <= 0 {
 		opts.RefreshInterval = 1 * time.Hour
 	}
-	if opts.PutTimeout <= 0 {
-		opts.PutTimeout = 30 * time.Second
-	}
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = 64
 	}
-	if opts.MinPutInterval < 0 {
-		opts.MinPutInterval = 0
-	}
 	return &Publisher{
-		log:      log,
-		put:      put,
-		manifest: manifest,
-		opts:     opts,
-		tasks:    make(chan PublishTask, opts.QueueSize),
-		stopCh:   make(chan struct{}),
+		log:     log,
+		backend: backend,
+		opts:    opts,
+		tasks:   make(chan PublishTask, opts.QueueSize),
+		stopCh:  make(chan struct{}),
 	}
 }
 
@@ -122,60 +100,57 @@ func (p *Publisher) Start() {
 	go p.run()
 }
 
-// Stop signals the worker to drain its current task and exit, then
-// waits for it. Idempotent. Persists the manifest one last time.
+// Stop signals the worker to drain its current task and exit, waits for it,
+// then closes the backend (final persistence). Idempotent.
 func (p *Publisher) Stop() {
-	p.stopOnce.Do(func() {
-		close(p.stopCh)
-	})
-	p.wg.Wait()
-	if err := p.manifest.Save(); err != nil {
-		p.log.Warn("dhtindex.publisher.save_on_stop_err", "err", err)
-	}
-}
-
-// Retract scrubs every manifest entry that mentions the given
-// infohash and persists the result. Call this when a torrent is
-// removed from the engine so the publisher stops re-announcing
-// stale hits on every refresh tick. Safe to call from any
-// goroutine; no-op if the publisher has no manifest (e.g. tests
-// that constructed it without one) or the infohash isn't present.
-func (p *Publisher) Retract(infohash []byte) {
-	if p == nil || p.manifest == nil {
+	if p == nil {
 		return
 	}
-	if touched := p.manifest.RemoveAllHits(infohash); touched > 0 {
-		if err := p.manifest.Save(); err != nil {
-			p.log.Warn("dhtindex.publisher.save_after_retract_err", "err", err)
-		}
-		p.log.Debug("dhtindex.publisher.retracted",
-			"infohash", infohash, "keywords", touched)
+	p.stopOnce.Do(func() { close(p.stopCh) })
+	p.wg.Wait()
+	if err := p.backend.Close(); err != nil {
+		p.log.Warn("dhtindex.publisher.close_err", "err", err)
 	}
 }
 
-// Submit enqueues one torrent for publication. Non-blocking; if the
-// queue is full the task is dropped and a warning is logged. The
-// dropped torrent will be picked up on the next refresh tick.
+// Submit enqueues a torrent for publication. Non-blocking; a full queue drops
+// the task with a warning (the next refresh tick will still pick it up if it
+// reached the manifest).
 func (p *Publisher) Submit(task PublishTask) {
+	if p == nil {
+		return
+	}
 	select {
 	case p.tasks <- task:
 	default:
-		p.log.Warn("dhtindex.publisher.queue_full",
-			"infohash", task.InfoHash, "name", task.Name)
+		p.log.Warn("dhtindex.publisher.queue_full", "infohash", task.InfoHash, "name", task.Name)
 	}
 }
 
-// run is the worker loop. It services Submit() calls AND a refresh
-// ticker that re-publishes every entry in the manifest on a regular
-// schedule.
+// Retract scrubs an infohash from everything the backend published. Safe from
+// any goroutine; no-op on a nil publisher.
+func (p *Publisher) Retract(ih [20]byte) {
+	if p == nil {
+		return
+	}
+	if err := p.backend.Retract(context.Background(), ih); err != nil {
+		p.log.Warn("dhtindex.publisher.retract_err", "err", err)
+	}
+}
+
+// Status returns the backend's point-in-time publish state.
+func (p *Publisher) Status() PublisherStatus {
+	if p == nil {
+		return PublisherStatus{}
+	}
+	return p.backend.Status()
+}
+
+// run is the worker loop: Submit() tasks plus a refresh ticker.
 func (p *Publisher) run() {
 	defer p.wg.Done()
-
-	// A context tied to stopCh cancels any in-flight DHT put
-	// traversal the moment Stop is called. Without this, a slow
-	// put could hold the worker for the full PutTimeout
-	// (typically tens of seconds per keyword) after Stop
-	// closes stopCh.
+	// A context tied to stopCh cancels any in-flight put the moment Stop is
+	// called, rather than holding the worker for the full PutTimeout.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -196,142 +171,32 @@ func (p *Publisher) run() {
 			}
 			p.handleTask(ctx, task)
 		case <-tick.C:
-			p.refreshAll(ctx)
+			if err := p.backend.Refresh(ctx); err != nil && ctx.Err() == nil {
+				p.log.Warn("dhtindex.publisher.refresh_err", "err", err)
+			}
 		}
 	}
 }
 
-// handleTask tokenises the torrent name, updates the manifest for
-// each keyword, and triggers a per-keyword publish.
+// handleTask tokenizes the torrent NAME (name-only invariant — content tokens
+// never reach Layer D) and hands the ≤8 keywords plus the hit to the backend.
 func (p *Publisher) handleTask(ctx context.Context, task PublishTask) {
 	if len(task.InfoHash) != 20 {
 		p.log.Debug("dhtindex.publisher.bad_infohash", "len", len(task.InfoHash))
 		return
 	}
-	keywords := Tokenize(task.Name)
+	keywords := token.Tokenize(task.Name)
 	if len(keywords) == 0 {
 		return
 	}
-	hit := KeywordHit{
+	hit := dhtschema.KeywordHit{
 		IH: append([]byte(nil), task.InfoHash...),
 		N:  task.Name,
 		S:  task.Seeders,
 		F:  task.FileCount,
 		Sz: task.SizeBytes,
 	}
-	for _, kw := range keywords {
-		if _, err := p.manifest.AddHit(kw, hit); err != nil {
-			p.log.Warn("dhtindex.publisher.add_hit_err", "kw", kw, "err", err)
-			continue
-		}
-		p.publishOne(ctx, kw)
-	}
-	if err := p.manifest.Save(); err != nil {
-		p.log.Warn("dhtindex.publisher.save_err", "err", err)
+	if err := p.backend.Publish(ctx, keywords, hit); err != nil && ctx.Err() == nil {
+		p.log.Warn("dhtindex.publisher.publish_err", "err", err)
 	}
 }
-
-// publishOne re-publishes the manifest entry for the given keyword.
-// Errors are recorded on the manifest entry and logged but never
-// returned — one bad keyword must not stop the worker.
-//
-// Rate limit (M13b): if the keyword was published less than
-// opts.MinPutInterval ago, skip the put entirely. This is the
-// hard per-keyword budget that prevents SwartzNet from self-DoS'ing
-// the mainline DHT when a client submits the same torrent multiple
-// times in quick succession, or when refreshAll() and a fresh
-// Submit() race for the same keyword.
-func (p *Publisher) publishOne(parent context.Context, keyword string) {
-	snap := p.manifest.Snapshot()
-	entry, ok := snap[keyword]
-	if !ok {
-		return
-	}
-	// Hard per-keyword budget. Skip if we put within the last
-	// MinPutInterval. Zero disables the cap (tests).
-	if p.opts.MinPutInterval > 0 &&
-		!entry.LastPublished.IsZero() &&
-		time.Since(entry.LastPublished) < p.opts.MinPutInterval {
-		p.log.Debug("dhtindex.publisher.put_throttled",
-			"keyword", keyword,
-			"since_last", time.Since(entry.LastPublished).String(),
-			"min_interval", p.opts.MinPutInterval.String(),
-		)
-		return
-	}
-	salt, err := SaltForKeyword(keyword)
-	if err != nil {
-		p.manifest.MarkFailed(keyword, err)
-		return
-	}
-	value := KeywordValue{Hits: entry.Hits}
-	ctx, cancel := context.WithTimeout(parent, p.opts.PutTimeout)
-	defer cancel()
-	if err := p.put.Put(ctx, salt, value); err != nil {
-		p.log.Warn("dhtindex.publisher.put_err",
-			"keyword", keyword, "hits", len(entry.Hits), "err", err)
-		p.manifest.MarkFailed(keyword, err)
-		return
-	}
-	p.manifest.MarkPublished(keyword, time.Now())
-	p.log.Debug("dhtindex.publisher.put_ok",
-		"keyword", keyword, "hits", len(entry.Hits))
-}
-
-// refreshAll re-publishes every entry in the manifest. Called from
-// the refresh ticker. The caller-supplied parent ctx is threaded
-// into every publishOne so Stop can short-circuit the current
-// put rather than wait for its own timeout.
-func (p *Publisher) refreshAll(parent context.Context) {
-	snap := p.manifest.Snapshot()
-	for keyword := range snap {
-		select {
-		case <-p.stopCh:
-			return
-		default:
-		}
-		p.publishOne(parent, keyword)
-	}
-	if err := p.manifest.Save(); err != nil {
-		p.log.Warn("dhtindex.publisher.save_err_after_refresh", "err", err)
-	}
-}
-
-// PublisherStatus returns a point-in-time view of the publisher
-// state suitable for the M4f `swartznet publish status` command.
-type PublisherStatus struct {
-	TotalKeywords int
-	TotalHits     int
-	LastPublishes []PublisherKeywordStatus
-}
-
-// PublisherKeywordStatus is one row in the publisher status output.
-type PublisherKeywordStatus struct {
-	Keyword       string
-	HitsCount     int
-	LastPublished time.Time
-	PublishCount  int
-	LastError     string
-}
-
-// Status returns a snapshot of the manifest as a PublisherStatus.
-func (p *Publisher) Status() PublisherStatus {
-	snap := p.manifest.Snapshot()
-	status := PublisherStatus{TotalKeywords: len(snap)}
-	for kw, entry := range snap {
-		status.TotalHits += len(entry.Hits)
-		status.LastPublishes = append(status.LastPublishes, PublisherKeywordStatus{
-			Keyword:       kw,
-			HitsCount:     len(entry.Hits),
-			LastPublished: entry.LastPublished,
-			PublishCount:  entry.PublishCount,
-			LastError:     entry.LastError,
-		})
-	}
-	return status
-}
-
-// ErrPublisherClosed is returned by helpers that detect the
-// Publisher has been Stopped. Currently unused; reserved for the
-// engine wiring in M4d's second half.
-var ErrPublisherClosed = errors.New("dhtindex: publisher closed")

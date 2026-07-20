@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"crypto/ed25519"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,101 +10,73 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 
+	"github.com/swartznet/swartznet/internal/identity"
 	"github.com/swartznet/swartznet/internal/signing"
 )
 
-// CreateTorrentOptions describes the torrent to build.
+// CreateTorrentOptions parameterizes torrent creation. These are standalone
+// functions, not Engine methods: a plain hash-only create must not bind
+// sockets or create XDG state.
 type CreateTorrentOptions struct {
-	// Root is the file or directory to hash. Required. A directory
-	// produces a multi-file torrent; a regular file produces a
-	// single-file torrent.
+	// Root is the file or directory to hash (required).
 	Root string
-
-	// Name overrides the info.name field. When empty, the basename
-	// of Root is used.
+	// Name overrides info.name (default: basename of Root).
 	Name string
-
-	// PieceLength in bytes. Zero means "pick automatically via
-	// metainfo.ChoosePieceLength" which targets 1024–2048 pieces
-	// total. Must be a power of two ≥ 16 KiB when non-zero.
+	// PieceLength in bytes; 0 = auto (anacrolix targets 1024–2048 pieces).
+	// Non-zero values must be a power of two ≥ 16 KiB.
 	PieceLength int64
-
-	// Trackers is a list of announce URLs. The first URL becomes
-	// the primary (mi.Announce); all URLs go into AnnounceList
-	// as a single tier. Empty is valid (trackerless torrents
-	// discoverable via DHT only).
+	// Trackers: first becomes announce, all become one announce-list tier.
+	// Empty = trackerless (no announce keys emitted).
 	Trackers []string
-
-	// WebSeeds are HTTP(S) URLs that serve the exact content
-	// layout (BEP-19). Optional.
+	// WebSeeds populate url-list (BEP-19).
 	WebSeeds []string
-
-	// Private, when true, marks the torrent as private (BEP-27):
-	// DHT and PEX discovery are disabled; peers come only from
-	// the listed trackers.
+	// Private sets info.private (BEP-27) — inside the info dict, so it
+	// changes the infohash.
 	Private bool
-
-	// Comment is an arbitrary human-readable note baked into the
-	// .torrent file.
+	// Comment is the optional top-level comment.
 	Comment string
-
-	// CreatedBy identifies the tool that built the torrent. When
-	// empty, defaults to "SwartzNet".
+	// CreatedBy defaults to "SwartzNet".
 	CreatedBy string
-
-	// SignWith, when non-nil, is an ed25519 private key used to
-	// sign the resulting torrent per the `internal/signing`
-	// package spec. The public key + signature are added as
-	// optional top-level metainfo fields (`snet.pubkey` and
-	// `snet.sig`); vanilla BitTorrent clients ignore these, so
-	// the torrent remains wire-compatible. Downloaders running
-	// SwartzNet verify the signature at add time and can surface
-	// the signing pubkey in the UI.
-	SignWith ed25519.PrivateKey
+	// SignWith, when non-nil, signs the written .torrent (top-level snet.*
+	// fields; the infohash is unaffected).
+	SignWith *identity.Signer
 }
 
-// CreateTorrent hashes the content at opts.Root and builds an
-// in-memory *metainfo.MetaInfo. The caller can then either write
-// the returned bytes to disk as a .torrent file or pass the
-// MetaInfo to Engine.AddTorrentMetaInfo to start seeding
-// immediately.
-//
-// Piece hashing is synchronous and I/O-bound — expect minutes for
-// large directories. Run from a goroutine if calling from a UI
-// thread. This method does not write any file; it only builds
-// the in-memory structure. See CreateTorrentFile for the
-// write-to-disk convenience wrapper.
-func (e *Engine) CreateTorrent(opts CreateTorrentOptions) (*metainfo.MetaInfo, error) {
+// CreateTorrent builds the metainfo. The infohash depends only on the info
+// dict (content + name + piece length + private); creation date, comment,
+// created-by, trackers, webseeds, and snet.* are all top-level.
+func CreateTorrent(opts CreateTorrentOptions) (*metainfo.MetaInfo, error) {
 	if opts.Root == "" {
-		return nil, errors.New("engine: CreateTorrent requires opts.Root")
+		return nil, fmt.Errorf("engine: CreateTorrent requires opts.Root")
 	}
 	st, err := os.Stat(opts.Root)
 	if err != nil {
 		return nil, fmt.Errorf("stat root: %w", err)
 	}
-	// Pre-compute the total size so we can ask ChoosePieceLength
-	// for a sensible default when the caller didn't specify one.
 	var totalSize int64
+	fileCount := 0
 	if st.IsDir() {
-		// BuildFromFilePath walks the tree itself and hashes every
-		// file; this extra walk just sums sizes so we can pick a
-		// sensible default piece length. Cheap relative to hashing.
-		err = filepath.WalkDir(opts.Root, func(_ string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(opts.Root, func(_ string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if d.IsDir() {
-				return nil
+			if !d.IsDir() {
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				totalSize += info.Size()
+				fileCount++
 			}
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			totalSize += info.Size()
 			return nil
 		})
 		if err != nil {
 			return nil, fmt.Errorf("stat tree: %w", err)
+		}
+		if fileCount == 0 {
+			// Pinned explicitly: an empty directory would otherwise produce a
+			// degenerate zero-file torrent (unverified legacy behavior).
+			return nil, fmt.Errorf("engine: root directory contains no files")
 		}
 	} else {
 		totalSize = st.Size()
@@ -115,20 +85,21 @@ func (e *Engine) CreateTorrent(opts CreateTorrentOptions) (*metainfo.MetaInfo, e
 	pieceLen := opts.PieceLength
 	if pieceLen == 0 {
 		pieceLen = metainfo.ChoosePieceLength(totalSize)
+	} else if pieceLen < 16*1024 || pieceLen&(pieceLen-1) != 0 {
+		// The legacy documented this constraint but never enforced it,
+		// silently producing broken torrents. Fail closed instead.
+		return nil, fmt.Errorf("engine: piece length must be a power of two ≥ 16 KiB (got %d)", pieceLen)
 	}
 
-	info := metainfo.Info{
-		PieceLength: pieceLen,
-	}
+	info := metainfo.Info{PieceLength: pieceLen}
 	if opts.Private {
-		info.Private = &opts.Private
+		private := true
+		info.Private = &private
 	}
-
 	if err := info.BuildFromFilePath(opts.Root); err != nil {
 		return nil, fmt.Errorf("build info: %w", err)
 	}
-	// BuildFromFilePath sets info.Name to filepath.Base(opts.Root);
-	// apply our override after so opts.Name actually takes effect.
+	// The override applies AFTER BuildFromFilePath (which sets basename).
 	if opts.Name != "" {
 		info.Name = opts.Name
 	}
@@ -137,59 +108,54 @@ func (e *Engine) CreateTorrent(opts CreateTorrentOptions) (*metainfo.MetaInfo, e
 	if err != nil {
 		return nil, fmt.Errorf("marshal info: %w", err)
 	}
-
 	mi := &metainfo.MetaInfo{
 		InfoBytes:    infoBytes,
-		Comment:      opts.Comment,
-		UrlList:      opts.WebSeeds,
 		CreationDate: time.Now().Unix(),
+		Comment:      opts.Comment,
 	}
-	if opts.CreatedBy != "" {
-		mi.CreatedBy = opts.CreatedBy
-	} else {
+	mi.CreatedBy = opts.CreatedBy
+	if mi.CreatedBy == "" {
 		mi.CreatedBy = "SwartzNet"
 	}
 	if len(opts.Trackers) > 0 {
 		mi.Announce = opts.Trackers[0]
 		mi.AnnounceList = [][]string{opts.Trackers}
 	}
-
+	if len(opts.WebSeeds) > 0 {
+		mi.UrlList = opts.WebSeeds
+	}
 	return mi, nil
 }
 
-// CreateTorrentFile is CreateTorrent + Write to a .torrent file at
-// outPath. Overwrites an existing file atomically (temp + rename).
-// Returns the infohash (40-char hex) and the MetaInfo.
-func (e *Engine) CreateTorrentFile(opts CreateTorrentOptions, outPath string) (string, *metainfo.MetaInfo, error) {
-	mi, err := e.CreateTorrent(opts)
+// CreateTorrentFile creates and atomically writes a .torrent. Signing (when
+// requested) happens on the marshaled bytes AFTER hashing and BEFORE the
+// write, so the on-disk file carries the signature while the infohash is
+// untouched. Returns the 40-hex infohash and the FINAL written bytes — the
+// signed bytes are what a --seed run must feed the engine, so the creator's
+// own node sees its signature.
+func CreateTorrentFile(opts CreateTorrentOptions, outPath string) (string, []byte, error) {
+	mi, err := CreateTorrent(opts)
 	if err != nil {
 		return "", nil, err
 	}
-
-	// Serialize the metainfo, sign it if requested, then write.
-	// We marshal to bytes first (rather than streaming via
-	// mi.Write) so the signing layer can read/modify the
-	// bencoded form in a single pass.
-	miBytes, err := bencode.Marshal(mi)
+	var buf []byte
+	buf, err = bencode.Marshal(*mi)
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal metainfo: %w", err)
 	}
 	if opts.SignWith != nil {
-		miBytes, err = signing.SignBytes(miBytes, opts.SignWith)
+		buf, err = signing.Sign(buf, *opts.SignWith)
 		if err != nil {
 			return "", nil, fmt.Errorf("sign: %w", err)
 		}
 	}
-
 	tmp := outPath + ".tmp"
-	if err := os.WriteFile(tmp, miBytes, 0o644); err != nil {
+	if err := os.WriteFile(tmp, buf, 0o644); err != nil {
 		return "", nil, fmt.Errorf("write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, outPath); err != nil {
 		_ = os.Remove(tmp)
 		return "", nil, fmt.Errorf("rename: %w", err)
 	}
-
-	ih := mi.HashInfoBytes()
-	return ih.HexString(), mi, nil
+	return mi.HashInfoBytes().HexString(), buf, nil
 }

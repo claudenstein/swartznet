@@ -83,6 +83,27 @@ func TestAddListRemovePersists(t *testing.T) {
 	}
 }
 
+// TestAddRelabelOverwrites pins the idempotent-overwrite arm of
+// Add: a second Add for the same pubkey replaces the label
+// rather than appending a duplicate entry.
+func TestAddRelabelOverwrites(t *testing.T) {
+	t.Parallel()
+	s, _ := trust.LoadOrCreate("")
+	if err := s.Add(fakeKey1, "old"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.Add(fakeKey1, "new"); err != nil {
+		t.Fatalf("Add relabel: %v", err)
+	}
+	entries := s.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry after relabel, got %d", len(entries))
+	}
+	if got := s.Label(fakeKey1); got != "new" {
+		t.Errorf("Label after relabel = %q, want %q", got, "new")
+	}
+}
+
 func TestAddRejectsBadKey(t *testing.T) {
 	t.Parallel()
 	s, _ := trust.LoadOrCreate("")
@@ -91,6 +112,22 @@ func TestAddRejectsBadKey(t *testing.T) {
 	}
 	if err := s.Add("not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hexn", "x"); err == nil {
 		t.Error("expected error for non-hex pubkey (exactly 64 chars of non-hex)")
+	}
+}
+
+// TestAddErrorMessageFrozen pins the exact wording and the
+// length interpolation of the rejection error, which the CLI
+// surfaces verbatim.
+func TestAddErrorMessageFrozen(t *testing.T) {
+	t.Parallel()
+	s, _ := trust.LoadOrCreate("")
+	err := s.Add("tooshort", "x")
+	if err == nil {
+		t.Fatal("expected error for short pubkey")
+	}
+	want := "trust: pubkey must be 64 hex characters, got 8"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -106,6 +143,48 @@ func TestInMemoryStore(t *testing.T) {
 	}
 	if !s.IsTrusted(fakeKey1) {
 		t.Error("added key should be trusted")
+	}
+}
+
+// TestRemoveIdempotent pins that removing an absent key succeeds
+// (no error) and persists without complaint.
+func TestRemoveIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trust.json")
+	s, err := trust.LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	if err := s.Remove(fakeKey1); err != nil {
+		t.Errorf("Remove of absent key should be a no-op success, got %v", err)
+	}
+}
+
+// TestListReturnsSortedCopy pins the sorted-ascending-by-lowercase
+// order and that mutating the returned slice does not affect the
+// store.
+func TestListReturnsSortedCopy(t *testing.T) {
+	t.Parallel()
+	s, _ := trust.LoadOrCreate("")
+	// Add out of order.
+	if err := s.Add(fakeKey2, "Bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add(fakeKey1, "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	got := s.List()
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].PubKeyHex != fakeKey1 || got[1].PubKeyHex != fakeKey2 {
+		t.Errorf("not sorted ascending: %q then %q", got[0].PubKeyHex, got[1].PubKeyHex)
+	}
+	// Mutate the copy; the store must be unaffected.
+	got[0].Label = "tampered"
+	if s.Label(fakeKey1) != "Alice" {
+		t.Error("List returned a shared reference; store mutated by caller")
 	}
 }
 
@@ -198,5 +277,41 @@ func TestLoadNormalisesUppercaseOnDisk(t *testing.T) {
 	entries := s.List()
 	if len(entries) != 1 || entries[0].PubKeyHex != lower {
 		t.Errorf("stored pubkey not normalised: %+v", entries)
+	}
+}
+
+// TestSaveFormatIsPrettyArrayWithOmitEmpty pins the on-disk
+// format: a pretty-printed 2-space-indented JSON array, with an
+// empty label omitted from the object.
+func TestSaveFormatIsPrettyArrayWithOmitEmpty(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trust.json")
+	s, err := trust.LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	// One labelled, one unlabelled (label omitted from JSON).
+	if err := s.Add(fakeKey1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add(fakeKey2, "Bob"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	want := "[\n" +
+		"  {\n" +
+		"    \"pubkey\": \"" + fakeKey1 + "\"\n" +
+		"  },\n" +
+		"  {\n" +
+		"    \"pubkey\": \"" + fakeKey2 + "\",\n" +
+		"    \"label\": \"Bob\"\n" +
+		"  }\n" +
+		"]"
+	if string(body) != want {
+		t.Errorf("on-disk format mismatch:\n got %q\nwant %q", string(body), want)
 	}
 }

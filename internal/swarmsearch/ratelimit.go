@@ -5,96 +5,49 @@ import (
 	"time"
 )
 
-// RateLimit describes the per-peer quota the inbound query
-// handler enforces on incoming sn_search queries. Zero values
-// disable limiting (the field default after DefaultCapabilities),
-// which is the behavior pre-M12f.
-//
-// Design doc §5.4 ("Rate limiting and back-pressure") calls for
-// a token bucket per peer so a single noisy peer can't flood the
-// index query path. Rejected queries get a RejectRateLimited
-// reply so the peer's client can back off rather than hang.
+// RateLimit configures the per-peer inbound-query token bucket. Zero
+// QueriesPerSecond OR zero Burst disables limiting (always allow).
 type RateLimit struct {
-	// QueriesPerSecond is the steady-state rate. 0 disables
-	// limiting entirely.
 	QueriesPerSecond float64
-	// Burst is the maximum number of queries a peer can fire in
-	// quick succession before being throttled. Must be >=1 when
-	// QueriesPerSecond > 0.
-	Burst int
+	Burst            int
 }
 
-// DefaultRateLimit returns the production default — 5 queries/s
-// steady state with a burst of 10. That lets a well-behaved peer
-// run a short burst of queries without tripping the limiter, and
-// caps abuse at 5/s per peer. Tuned conservatively; nothing
-// stops a future operator from overriding via SetRateLimit.
-func DefaultRateLimit() RateLimit {
-	return RateLimit{
-		QueriesPerSecond: 5.0,
-		Burst:            10,
-	}
+// DefaultRateLimit is 5 queries/sec, burst 10.
+func DefaultRateLimit() RateLimit { return RateLimit{QueriesPerSecond: 5.0, Burst: 10} }
+
+type bucket struct {
+	tokens float64
+	last   time.Time
 }
 
-// peerBucket is a single peer's token-bucket state. One entry
-// per peer address, created lazily on first query.
-type peerBucket struct {
-	tokens float64   // current number of tokens (0..Burst)
-	last   time.Time // last time we topped up tokens
-}
-
-// rateLimiter is the per-peer token-bucket tracker. Safe for
-// concurrent use — a single inbound query handler goroutine
-// should Allow() before running the Bleve search.
-//
-// Memory: one entry per active peer address. OnPeerClosed is the
-// lifecycle hook that evicts the entry so long-running daemons
-// don't leak buckets.
+// rateLimiter is a per-peer token bucket, keyed by address. Buckets are lazily
+// created full (tokens = Burst).
 type rateLimiter struct {
-	mu    sync.Mutex
-	cfg   RateLimit
-	peers map[string]*peerBucket
+	mu      sync.Mutex
+	now     func() time.Time // injectable for tests
+	cfg     RateLimit
+	buckets map[string]*bucket
 }
 
 func newRateLimiter(cfg RateLimit) *rateLimiter {
-	return &rateLimiter{
-		cfg:   cfg,
-		peers: make(map[string]*peerBucket),
-	}
+	return &rateLimiter{now: time.Now, cfg: cfg, buckets: make(map[string]*bucket)}
 }
 
-// setConfig swaps the limiter's configuration at runtime. Safe
-// for concurrent use. Existing buckets are left intact — they
-// continue to fill at the new rate on their next Allow() call.
-func (r *rateLimiter) setConfig(cfg RateLimit) {
-	r.mu.Lock()
-	r.cfg = cfg
-	r.mu.Unlock()
-}
-
-// Allow consumes one token from the bucket for the given peer
-// address. Returns true if the query should proceed, false if
-// the peer is over quota. A zero rate (cfg.QueriesPerSecond == 0)
-// or zero burst disables limiting and always returns true — the
-// default for back-compat tests that construct a rateLimiter
-// with a zero RateLimit value.
+// Allow consumes one token for addr, returning whether the query is admitted.
+// A disabled limiter (zero qps or burst) always allows.
 func (r *rateLimiter) Allow(addr string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cfg.QueriesPerSecond <= 0 || r.cfg.Burst <= 0 {
 		return true
 	}
-	now := time.Now()
-	b, ok := r.peers[addr]
-	if !ok {
-		// First query from this peer — start full.
-		b = &peerBucket{
-			tokens: float64(r.cfg.Burst),
-			last:   now,
-		}
-		r.peers[addr] = b
+	now := r.now()
+	b := r.buckets[addr]
+	if b == nil {
+		// Lazily created FULL so a fresh peer gets its whole burst.
+		b = &bucket{tokens: float64(r.cfg.Burst), last: now}
+		r.buckets[addr] = b
 	} else {
-		// Refill based on elapsed time.
 		elapsed := now.Sub(b.last).Seconds()
 		if elapsed > 0 {
 			b.tokens += elapsed * r.cfg.QueriesPerSecond
@@ -111,19 +64,16 @@ func (r *rateLimiter) Allow(addr string) bool {
 	return false
 }
 
-// forget drops the per-peer state for the given address. Called
-// from Protocol.OnPeerClosed so closed connections do not leave
-// bucket entries behind.
-func (r *rateLimiter) forget(addr string) {
+// setConfig swaps the limiter config, keeping existing buckets.
+func (r *rateLimiter) setConfig(cfg RateLimit) {
 	r.mu.Lock()
-	delete(r.peers, addr)
+	r.cfg = cfg
 	r.mu.Unlock()
 }
 
-// knownPeerCount returns the number of peer buckets currently
-// held. Used by TestRateLimiter to assert eviction works.
-func (r *rateLimiter) knownPeerCount() int {
+// forget drops a peer's bucket on disconnect.
+func (r *rateLimiter) forget(addr string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.peers)
+	delete(r.buckets, addr)
+	r.mu.Unlock()
 }

@@ -1,162 +1,213 @@
-package signing_test
+package signing
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"bytes"
 	"errors"
-	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/anacrolix/torrent/bencode"
-	"github.com/swartznet/swartznet/internal/signing"
+	abencode "github.com/anacrolix/torrent/bencode"
+
+	"github.com/swartznet/swartznet/contracts/bencode"
+	"github.com/swartznet/swartznet/internal/identity"
 )
 
-// miniTorrent builds a tiny but valid bencoded .torrent-like
-// dict so we can test signing without dragging in the whole
-// engine. The info dict here is minimal; signing only cares about
-// the bencoded bytes, not their semantic correctness.
-func miniTorrent(t *testing.T) []byte {
-	t.Helper()
-	mi := map[string]interface{}{
-		"announce": "http://tracker.example.com/announce",
-		"info": map[string]interface{}{
-			"name":         "test",
-			"piece length": 16384,
-			"pieces":       string(make([]byte, 20)),
-			"length":       4,
-		},
-		"created by": "SwartzNet test",
-	}
-	out, err := bencode.Marshal(mi)
-	if err != nil {
-		t.Fatalf("marshal mini torrent: %v", err)
-	}
-	return out
+// unsignedFixture mirrors contracts/bencode's frozen single-file vector.
+func unsignedFixture() []byte {
+	info := "d6:lengthi96e4:name11:fixture.bin12:piece lengthi32768e6:pieces20:aaaaaaaaaaaaaaaaaaaae"
+	return []byte("d8:announce20:http://tr.invalid/an4:info" + info + "e")
 }
 
-func newKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+func testSigner(t *testing.T) (identity.Signer, string) {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	id, err := identity.Load(filepath.Join(t.TempDir(), "identity.key"), true)
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		t.Fatal(err)
 	}
-	return pub, priv
+	return id.Signer(), id.PublicKeyHex()
 }
 
-// TestSignVerifyRoundTrip signs a torrent and verifies the result.
 func TestSignVerifyRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	pub, priv := newKey(t)
-	raw := miniTorrent(t)
-
-	signed, err := signing.SignBytes(raw, priv)
+	signer, pubHex := testSigner(t)
+	raw := unsignedFixture()
+	signed, err := Sign(raw, signer)
 	if err != nil {
-		t.Fatalf("SignBytes: %v", err)
+		t.Fatal(err)
 	}
-	if len(signed) <= len(raw) {
-		t.Errorf("signed bytes should be longer than raw: %d vs %d", len(signed), len(raw))
-	}
-
-	sig, err := signing.VerifyBytes(signed)
+	sig, err := Verify(signed)
 	if err != nil {
-		t.Fatalf("VerifyBytes: %v", err)
+		t.Fatal(err)
 	}
-
-	if string(sig.PubKey[:]) != string(pub) {
-		t.Errorf("pubkey mismatch")
+	if sig.PubKeyHex() != pubHex {
+		t.Fatalf("verified pubkey %s, want %s", sig.PubKeyHex(), pubHex)
 	}
-	if sig.InfoHash == [20]byte{} {
-		t.Error("infohash is zero")
+	// Signing adds exactly the two snet fields: 126 bytes.
+	if len(signed)-len(raw) != 126 {
+		t.Fatalf("signing added %d bytes, want exactly 126", len(signed)-len(raw))
 	}
 }
 
-// TestVerifyUnsignedReturnsErrNotSigned covers the "most torrents
-// in the world are not signed" case.
-func TestVerifyUnsignedReturnsErrNotSigned(t *testing.T) {
-	t.Parallel()
-
-	raw := miniTorrent(t)
-	_, err := signing.VerifyBytes(raw)
-	if !errors.Is(err, signing.ErrNotSigned) {
-		t.Errorf("got %v, want ErrNotSigned", err)
+// TestTwinInfohashAndInfoBytes is THE Slice-3 property: the info value passes
+// through byte-identically, so signed/unsigned twins share one infohash.
+func TestTwinInfohashAndInfoBytes(t *testing.T) {
+	signer, _ := testSigner(t)
+	raw := unsignedFixture()
+	signed, err := Sign(raw, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPlain, err := bencode.ParseMetainfo(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mSigned, err := bencode.ParseMetainfo(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mPlain.InfoHash != mSigned.InfoHash {
+		t.Fatal("signing changed the infohash")
+	}
+	if !bytes.Equal(mPlain.InfoBytes, mSigned.InfoBytes) {
+		t.Fatal("info bytes not byte-identical after signing")
+	}
+	// Unknown top-level keys survive.
+	if !bytes.Contains(signed, []byte("8:announce20:http://tr.invalid/an")) {
+		t.Fatal("announce key lost during signing")
 	}
 }
 
-// TestVerifyTamperedInfoFailsSignature signs a torrent, then
-// modifies the info dict and verifies that the signature no
-// longer checks.
-func TestVerifyTamperedInfoFailsSignature(t *testing.T) {
-	t.Parallel()
-
-	_, priv := newKey(t)
-	raw := miniTorrent(t)
-	signed, err := signing.SignBytes(raw, priv)
+func TestResignReplacesSignature(t *testing.T) {
+	signer1, _ := testSigner(t)
+	signer2, pub2 := testSigner(t)
+	signed1, err := Sign(unsignedFixture(), signer1)
 	if err != nil {
-		t.Fatalf("SignBytes: %v", err)
+		t.Fatal(err)
 	}
-
-	// Decode, mutate the info dict's name field, re-encode.
-	var mi map[string]bencode.Bytes
-	if err := bencode.Unmarshal(signed, &mi); err != nil {
-		t.Fatalf("unmarshal signed: %v", err)
-	}
-	var info map[string]interface{}
-	if err := bencode.Unmarshal(mi["info"], &info); err != nil {
-		t.Fatalf("unmarshal info: %v", err)
-	}
-	info["name"] = "different"
-	tamperedInfo, err := bencode.Marshal(info)
+	signed2, err := Sign(signed1, signer2)
 	if err != nil {
-		t.Fatalf("remarshal info: %v", err)
+		t.Fatal(err)
 	}
-	mi["info"] = tamperedInfo
-	tampered, err := bencode.Marshal(mi)
+	sig, err := Verify(signed2)
 	if err != nil {
-		t.Fatalf("remarshal mi: %v", err)
+		t.Fatal(err)
 	}
-
-	_, err = signing.VerifyBytes(tampered)
-	if !errors.Is(err, signing.ErrBadSignature) {
-		t.Errorf("got %v, want ErrBadSignature", err)
+	if sig.PubKeyHex() != pub2 {
+		t.Fatalf("re-sign did not replace: verified %s, want %s", sig.PubKeyHex(), pub2)
 	}
 }
 
-// TestSignVerifyFileRoundTrip exercises the on-disk wrappers.
-func TestSignVerifyFileRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	pub, priv := newKey(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "mini.torrent")
-	if err := os.WriteFile(path, miniTorrent(t), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	if err := signing.SignFile(path, priv); err != nil {
-		t.Fatalf("SignFile: %v", err)
-	}
-	sig, err := signing.VerifyFile(path)
+func TestVerifyTaxonomy(t *testing.T) {
+	signer, _ := testSigner(t)
+	signed, err := Sign(unsignedFixture(), signer)
 	if err != nil {
-		t.Fatalf("VerifyFile: %v", err)
+		t.Fatal(err)
 	}
-	if string(sig.PubKey[:]) != string(pub) {
-		t.Error("pubkey mismatch after round-trip")
-	}
-}
 
-// TestPubKeyHex verifies the hex encoding.
-func TestPubKeyHex(t *testing.T) {
-	t.Parallel()
+	t.Run("unsigned is ErrNotSigned", func(t *testing.T) {
+		_, err := Verify(unsignedFixture())
+		if !errors.Is(err, ErrNotSigned) {
+			t.Fatalf("err = %v", err)
+		}
+	})
 
-	var sig signing.Signature
-	for i := range sig.PubKey {
-		sig.PubKey[i] = byte(i)
-	}
-	got := sig.PubKeyHex()
-	want := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-	if got != want {
-		t.Errorf("got %s, want %s", got, want)
-	}
+	t.Run("one field without the other is ErrNotSigned", func(t *testing.T) {
+		top, err := bencode.DecodeDict(signed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delete(top, "snet.sig")
+		partial, err := bencode.EncodeDict(top)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Verify(partial); !errors.Is(err, ErrNotSigned) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("byte-flipped sig is ErrBadSignature with populated Signature", func(t *testing.T) {
+		flipped := append([]byte(nil), signed...)
+		// Flip a byte inside the signature value (the last 5 bytes are
+		// within snet.sig's 64-byte payload before the trailing 'e').
+		flipped[len(flipped)-5] ^= 0x01
+		sig, err := Verify(flipped)
+		if !errors.Is(err, ErrBadSignature) {
+			t.Fatalf("err = %v", err)
+		}
+		if sig.PubKeyHex() == "" || sig.PubKeyHex() == strings.Repeat("0", 64) {
+			t.Fatal("Signature not populated on ErrBadSignature")
+		}
+	})
+
+	t.Run("wrong pubkey length is a plain error", func(t *testing.T) {
+		top, err := bencode.DecodeDict(signed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		short, _ := abencode.Marshal("tooshort")
+		top["snet.pubkey"] = bencode.Bytes(short)
+		mangled, err := bencode.EncodeDict(top)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = Verify(mangled)
+		if err == nil || errors.Is(err, ErrNotSigned) || errors.Is(err, ErrBadSignature) ||
+			!strings.Contains(err.Error(), "bad pubkey length 8") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("undecodable pubkey is a plain decode error", func(t *testing.T) {
+		top, err := bencode.DecodeDict(signed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		intVal, _ := abencode.Marshal(42)
+		top["snet.pubkey"] = bencode.Bytes(intVal)
+		mangled, err := bencode.EncodeDict(top)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = Verify(mangled)
+		if err == nil || errors.Is(err, ErrNotSigned) || errors.Is(err, ErrBadSignature) ||
+			!strings.Contains(err.Error(), "decode pubkey") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("missing info fires before not-signed", func(t *testing.T) {
+		_, err := Verify([]byte("d11:snet.pubkey3:abce"))
+		if err == nil || errors.Is(err, ErrNotSigned) ||
+			!strings.Contains(err.Error(), "missing info dict") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("garbage is a decode error", func(t *testing.T) {
+		_, err := Verify([]byte("not bencode"))
+		if err == nil || !strings.Contains(err.Error(), "signing: decode metainfo:") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("singleton-list-wrapped fields verify (lenient, pinned)", func(t *testing.T) {
+		// anacrolix Unmarshal unwraps a one-element list into a scalar. The
+		// leniency is pinned as accepted surface: a signature wrapped as
+		// l32:<pk>e / l64:<sig>e still verifies. Frozen so a future codec
+		// change is a deliberate decision, not silent drift.
+		top, err := bencode.DecodeDict(signed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		top["snet.pubkey"] = bencode.Bytes("l" + string(top["snet.pubkey"]) + "e")
+		top["snet.sig"] = bencode.Bytes("l" + string(top["snet.sig"]) + "e")
+		wrapped, err := bencode.EncodeDict(top)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Verify(wrapped); err != nil {
+			t.Fatalf("singleton-list leniency changed: %v", err)
+		}
+	})
 }

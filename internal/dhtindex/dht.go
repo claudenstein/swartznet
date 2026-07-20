@@ -1,48 +1,77 @@
 package dhtindex
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/sha1"
 	"errors"
 	"fmt"
-	"sync"
+	"math"
 	"time"
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/bep44"
 	"github.com/anacrolix/dht/v2/exts/getput"
+	"github.com/anacrolix/dht/v2/traversal"
 	"github.com/anacrolix/torrent/bencode"
+
+	"github.com/swartznet/swartznet/contracts/dhtschema"
 )
 
-// Putter writes a KeywordValue to the DHT under the publisher's
-// (pubkey, keyword) target. Implementations must sign the value with
-// the publisher's private key per BEP-44.
+// Putter writes a KeywordValue to the DHT under the publisher's (pubkey,
+// keyword) target and signs it per BEP-44. Getter reads one back under a
+// specific (pubkey, salt) pair. They live beneath the RecordBackend seam so
+// every backend shares the same wire path and the same fail-closed guard.
 type Putter interface {
-	// Put stores the given value under salt. Returns an error if
-	// the put traversal cannot reach a quorum of nodes or if the
-	// value exceeds MaxValueBytes.
-	Put(ctx context.Context, salt []byte, value KeywordValue) error
+	Put(ctx context.Context, salt []byte, value dhtschema.KeywordValue) error
+	// PublicKey is the publisher pubkey the Putter signs as.
+	PublicKey() [32]byte
 }
 
-// Getter looks up a KeywordValue from the DHT under a specific
-// (pubkey, salt) pair. Implementations must verify the BEP-44
-// signature against the requested pubkey before returning a result.
+// Getter reads a signed KeywordValue. The signature is verified inside the
+// anacrolix get path against the requested pubkey.
 type Getter interface {
-	Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error)
+	Get(ctx context.Context, pubkey [32]byte, salt []byte) (dhtschema.KeywordValue, error)
 }
 
-// AnacrolixPutter is the production Putter, backed by an
-// anacrolix/dht/v2 *dht.Server. Construct with NewAnacrolixPutter
-// after pulling the *dht.Server out of the engine via Engine.DHTServer.
+// nextSeq returns seq+1, clamped at math.MaxInt64. BEP-44 requires strictly
+// monotonic sequence numbers; the clamp keeps the closure signature total
+// (seqToPut returns bep44.Put with no error path) and turns an otherwise-
+// undefined int64 wrap into graceful degradation. Unreachable in practice: a
+// publisher would have to push 2^63 updates to reach it.
+func nextSeq(seq int64) int64 {
+	if seq >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return seq + 1
+}
+
+// checkPutStats asserts a getput.Put traversal actually reached at least one
+// DHT node. getput.Put returns a nil error even when the get-traversal reached
+// zero nodes (a cold routing table, a transient partition, or a value every
+// peer rejected) — in that case the BEP-44 item never lands, so the put must
+// FAIL CLOSED instead of recording success for an item nobody can fetch. It is
+// shared across every put path (keyword, BEP-46 pointer, and the Slice-12
+// Aggregate paths) so the guard cannot drift; `what` names the path for the
+// error message. Failing closed makes the publisher call MarkFailed (NOT
+// advance LastPublished), so the 55m throttle does not suppress the retry of
+// an undiscoverable keyword.
+func checkPutStats(stats *traversal.Stats, what string) error {
+	if stats == nil || stats.NumResponses == 0 {
+		return fmt.Errorf("dhtindex: %s reached zero DHT nodes", what)
+	}
+	return nil
+}
+
+// AnacrolixPutter is the production Putter, backed by an anacrolix *dht.Server.
 type AnacrolixPutter struct {
 	server  *dht.Server
 	private ed25519.PrivateKey
 	public  [32]byte
 }
 
-// NewAnacrolixPutter wires a Putter against a live anacrolix DHT
-// server. The private key is used to sign every put.
+// NewAnacrolixPutter wires a Putter against a live DHT server. The private key
+// signs every put.
 func NewAnacrolixPutter(server *dht.Server, priv ed25519.PrivateKey) (*AnacrolixPutter, error) {
 	if server == nil {
 		return nil, errors.New("dhtindex: nil DHT server")
@@ -56,41 +85,95 @@ func NewAnacrolixPutter(server *dht.Server, priv ed25519.PrivateKey) (*Anacrolix
 	}
 	var pubArr [32]byte
 	copy(pubArr[:], pub)
-	return &AnacrolixPutter{
-		server:  server,
-		private: priv,
-		public:  pubArr,
-	}, nil
+	return &AnacrolixPutter{server: server, private: priv, public: pubArr}, nil
 }
 
-// PublicKey returns the publisher's public key as a [32]byte. Useful
-// for log output and for advertising "the pubkey at which my hits
-// can be found" to other nodes.
+// PublicKey returns the publisher's public key.
 func (a *AnacrolixPutter) PublicKey() [32]byte { return a.public }
 
-// PutInfohashPointer publishes a BEP-46-style mutable item whose
-// value is `{"ih": <20-byte infohash>}` under the given salt.
-// This is the M11c publisher primitive used to advertise a
-// companion content-index torrent at a deterministic
-// (publisher_pubkey, salt) target. Subscribers fetch the
-// pointer, read the infohash, and download the underlying
-// torrent through normal BitTorrent.
-//
-// The salt is typically the well-known constant
-// "_sn_content_index" (from the companion package) but the
-// caller passes whatever bytes they like — anything ≤ 64 bytes
-// is legal per BEP-44.
+// Put encodes the value, computes SHA1(pubkey||salt), and publishes to the
+// closest DHT nodes via getput.Put. The value is re-decoded to an interface{}
+// before signing so bep44.Put.Sign re-marshals byte-identically to what
+// EncodeValue produced (the contracts/dhtschema re-marshal-identity guarantee).
+// The put fails closed on a zero-node traversal.
+func (a *AnacrolixPutter) Put(ctx context.Context, salt []byte, value dhtschema.KeywordValue) error {
+	encoded, err := dhtschema.EncodeValue(value)
+	if err != nil {
+		return err
+	}
+	var v interface{}
+	if err := bencode.Unmarshal(encoded, &v); err != nil {
+		return fmt.Errorf("dhtindex: re-decode for put: %w", err)
+	}
+	target := bep44.MakeMutableTarget(a.public, salt)
+	pubArr := a.public
+	seqToPut := func(seq int64) bep44.Put {
+		put := bep44.Put{V: v, K: &pubArr, Salt: salt, Seq: nextSeq(seq)}
+		put.Sign(a.private)
+		return put
+	}
+	stats, err := getput.Put(ctx, target, a.server, salt, seqToPut)
+	if err != nil {
+		return fmt.Errorf("dhtindex: put traversal: %w", err)
+	}
+	return checkPutStats(stats, "put")
+}
+
+// AnacrolixGetter is the production Getter, backed by an anacrolix *dht.Server.
+// It needs no private key.
+type AnacrolixGetter struct {
+	server *dht.Server
+}
+
+// NewAnacrolixGetter wires a Getter against a live DHT server.
+func NewAnacrolixGetter(server *dht.Server) (*AnacrolixGetter, error) {
+	if server == nil {
+		return nil, errors.New("dhtindex: nil DHT server")
+	}
+	return &AnacrolixGetter{server: server}, nil
+}
+
+// Get computes the SHA1(pubkey||salt) target, runs the BEP-44 get traversal,
+// and decodes the highest-seq response. Signature verification happens inside
+// the anacrolix get path; DecodeValue still re-applies the ≤1000 pre-unmarshal
+// cap against a non-conforming node.
+func (a *AnacrolixGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte) (dhtschema.KeywordValue, error) {
+	target := bep44.MakeMutableTarget(pubkey, salt)
+	res, _, err := getput.Get(ctx, target, a.server, nil, salt)
+	if err != nil {
+		return dhtschema.KeywordValue{}, fmt.Errorf("dhtindex: get %x: %w", target, err)
+	}
+	return dhtschema.DecodeValue([]byte(res.V))
+}
+
+// bep46Pointer is the typed shape of a BEP-46 mutable-item pointer value. A
+// struct gives deterministic bencode output. TS (the publisher's wall-clock
+// unix seconds at put time) is omitempty so pre-ts publishers round-trip as
+// {"ih":...} without a ts:0 entry; decoders that don't know ts ignore it.
+type bep46Pointer struct {
+	IH []byte `bencode:"ih"`
+	TS int64  `bencode:"ts,omitempty"`
+}
+
+// PointerInfo is the decoded BEP-46 pointer: the 20-byte infohash plus the
+// publisher-asserted timestamp (zero when the publisher pre-dates the field).
+type PointerInfo struct {
+	InfoHash [20]byte
+	TS       int64
+}
+
+// PutInfohashPointer publishes a BEP-46-style mutable item {"ih":<20B>,
+// "ts":<unix>} under salt. This is the companion-index advertisement primitive
+// consumed by Slice 10 (the salt is typically the well-known
+// "_sn_content_index"). It fails closed via the shared checkPutStats.
 func (a *AnacrolixPutter) PutInfohashPointer(ctx context.Context, salt []byte, infohash [20]byte) error {
 	if len(salt) == 0 {
 		return errors.New("dhtindex: empty salt")
 	}
-	if len(salt) > 64 {
-		return fmt.Errorf("dhtindex: salt %d bytes exceeds BEP-44 cap of 64", len(salt))
+	if len(salt) > dhtschema.MaxSaltBytes {
+		return fmt.Errorf("dhtindex: salt %d bytes exceeds BEP-44 cap of %d", len(salt), dhtschema.MaxSaltBytes)
 	}
-	// Encode the value the same way subscribers will expect.
-	// Using a typed struct with a single "ih" field gives us
-	// stable bencode output regardless of map iteration order.
-	v := bep46Pointer{IH: infohash[:]}
+	v := bep46Pointer{IH: infohash[:], TS: time.Now().Unix()}
 	encoded, err := bencode.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("dhtindex: marshal pointer: %w", err)
@@ -99,38 +182,24 @@ func (a *AnacrolixPutter) PutInfohashPointer(ctx context.Context, salt []byte, i
 	if err := bencode.Unmarshal(encoded, &decoded); err != nil {
 		return fmt.Errorf("dhtindex: re-decode pointer: %w", err)
 	}
-
 	target := bep44.MakeMutableTarget(a.public, salt)
 	pubArr := a.public
 	seqToPut := func(seq int64) bep44.Put {
-		put := bep44.Put{
-			V:    decoded,
-			K:    &pubArr,
-			Salt: salt,
-			Seq:  seq + 1,
-		}
+		put := bep44.Put{V: decoded, K: &pubArr, Salt: salt, Seq: nextSeq(seq)}
 		put.Sign(a.private)
 		return put
 	}
-	if _, err := getput.Put(ctx, target, a.server, salt, seqToPut); err != nil {
+	stats, err := getput.Put(ctx, target, a.server, salt, seqToPut)
+	if err != nil {
 		return fmt.Errorf("dhtindex: put pointer: %w", err)
 	}
-	return nil
+	return checkPutStats(stats, "pointer put")
 }
 
-// bep46Pointer is the typed shape of a BEP-46 mutable item value.
-// We use a struct so the bencoded output is deterministic and
-// matches whatever the M11d subscriber side will decode.
-type bep46Pointer struct {
-	IH []byte `bencode:"ih"`
-}
-
-// GetInfohashPointer is the matching read-side helper. Returns
-// the 20-byte infohash from a BEP-46 mutable item under
-// (pubkey, salt). Used by the M11d subscriber to discover
-// companion content indexes published by other nodes.
-func (a *AnacrolixGetter) GetInfohashPointer(ctx context.Context, pubkey [32]byte, salt []byte) ([20]byte, error) {
-	var zero [20]byte
+// GetInfohashPointerInfo fetches a BEP-46 pointer under (pubkey, salt),
+// returning the infohash and the publisher-asserted timestamp.
+func (a *AnacrolixGetter) GetInfohashPointerInfo(ctx context.Context, pubkey [32]byte, salt []byte) (PointerInfo, error) {
+	var zero PointerInfo
 	if len(salt) == 0 {
 		return zero, errors.New("dhtindex: empty salt")
 	}
@@ -139,262 +208,48 @@ func (a *AnacrolixGetter) GetInfohashPointer(ctx context.Context, pubkey [32]byt
 	if err != nil {
 		return zero, fmt.Errorf("dhtindex: get pointer %x: %w", target, err)
 	}
+	return decodePointerValue([]byte(res.V))
+}
+
+// GetInfohashPointer returns just the infohash from a BEP-46 pointer.
+func (a *AnacrolixGetter) GetInfohashPointer(ctx context.Context, pubkey [32]byte, salt []byte) ([20]byte, error) {
+	info, err := a.GetInfohashPointerInfo(ctx, pubkey, salt)
+	if err != nil {
+		return [20]byte{}, err
+	}
+	return info.InfoHash, nil
+}
+
+// decodePointerValue validates and decodes a remote-supplied BEP-46 pointer.
+// The value is signature-verified by the get path but is still untrusted
+// publisher input, so it is bounded by the same ≤MaxValueBytes cap BEFORE
+// unmarshal that the keyword decoder applies.
+func decodePointerValue(raw []byte) (PointerInfo, error) {
+	var zero PointerInfo
+	if len(raw) > dhtschema.MaxValueBytes {
+		return zero, fmt.Errorf("dhtindex: pointer value %d bytes exceeds BEP-44 cap of %d", len(raw), dhtschema.MaxValueBytes)
+	}
 	var v bep46Pointer
-	if err := bencode.Unmarshal([]byte(res.V), &v); err != nil {
+	// Bound the parsed string length: the outer len(raw) cap above does NOT stop
+	// alloc amplification, because anacrolix bencode.Unmarshal leaves MaxStrLen at
+	// its ~128 MiB default and does make([]byte, declaredLen) BEFORE reading — so
+	// a tiny signed value like `d2:ih134217727:e` (declares a 128 MiB ih string)
+	// passes the 1000-byte cap yet forces a ~128 MiB transient allocation. A
+	// bencoded string can't exceed its payload, so MaxStrLen = len(raw) rejects
+	// only impossible/hostile lengths. Same defense as contracts/dhtschema (the
+	// keyword-value decoder) and contracts/ltepwire; this pointer decoder is a
+	// sibling site that shipped without the bound.
+	d := bencode.NewDecoder(bytes.NewReader(raw))
+	if n := int64(len(raw)); n > 0 {
+		d.MaxStrLen = n
+	}
+	if err := d.Decode(&v); err != nil {
 		return zero, fmt.Errorf("dhtindex: decode pointer: %w", err)
 	}
 	if len(v.IH) != 20 {
 		return zero, fmt.Errorf("dhtindex: pointer ih has %d bytes, want 20", len(v.IH))
 	}
-	var out [20]byte
-	copy(out[:], v.IH)
+	out := PointerInfo{TS: v.TS}
+	copy(out.InfoHash[:], v.IH)
 	return out, nil
-}
-
-// Put implements Putter. It encodes the value, computes the BEP-44
-// target from (publisher_pubkey, salt), and uses anacrolix's getput.Put
-// to publish to the closest k DHT nodes. The provided ctx bounds the
-// total operation time including the get-traversal that getput.Put
-// performs internally to discover the current sequence number.
-func (a *AnacrolixPutter) Put(ctx context.Context, salt []byte, value KeywordValue) error {
-	encoded, err := EncodeValue(value)
-	if err != nil {
-		return err
-	}
-	// We pre-decode the encoded bytes back into an interface{} so
-	// the bep44.Put.Sign call uses bencode.MustMarshal on a value
-	// that round-trips identically to what we just encoded.
-	var v interface{}
-	if err := bencode.Unmarshal(encoded, &v); err != nil {
-		return fmt.Errorf("dhtindex: re-decode for put: %w", err)
-	}
-
-	target := bep44.MakeMutableTarget(a.public, salt)
-	pubArr := a.public
-	seqToPut := func(seq int64) bep44.Put {
-		put := bep44.Put{
-			V:    v,
-			K:    &pubArr,
-			Salt: salt,
-			Seq:  seq + 1,
-		}
-		put.Sign(a.private)
-		return put
-	}
-	if _, err := getput.Put(ctx, target, a.server, salt, seqToPut); err != nil {
-		return fmt.Errorf("dhtindex: put traversal: %w", err)
-	}
-	return nil
-}
-
-// AnacrolixGetter is the production Getter backed by an anacrolix
-// *dht.Server. The Getter does not need a private key.
-type AnacrolixGetter struct {
-	server *dht.Server
-}
-
-// NewAnacrolixGetter wires a Getter against a live anacrolix DHT
-// server.
-func NewAnacrolixGetter(server *dht.Server) (*AnacrolixGetter, error) {
-	if server == nil {
-		return nil, errors.New("dhtindex: nil DHT server")
-	}
-	return &AnacrolixGetter{server: server}, nil
-}
-
-// Get implements Getter. It computes the SHA1(pubkey || salt) target,
-// runs the BEP-44 get traversal, decodes the highest-seq response,
-// and returns the parsed KeywordValue. Signature verification is
-// performed inside the anacrolix get path.
-func (a *AnacrolixGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error) {
-	target := bep44.MakeMutableTarget(pubkey, salt)
-	res, _, err := getput.Get(ctx, target, a.server, nil, salt)
-	if err != nil {
-		return KeywordValue{}, fmt.Errorf("dhtindex: get %x: %w", target, err)
-	}
-	return DecodeValue([]byte(res.V))
-}
-
-// MemoryPutterGetter is an in-process Putter+Getter backed by a
-// concurrent map. It exists so the publisher worker (M4d) and the
-// lookup path (M4e) can be unit-tested without spinning up a real
-// DHT server. Production code should never use this directly.
-type MemoryPutterGetter struct {
-	mu        sync.Mutex
-	store     map[[20]byte]storedItem
-	ppmiStore map[[20]byte]ppmiStoredItem
-	priv      ed25519.PrivateKey
-	pub       [32]byte
-}
-
-type storedItem struct {
-	pubkey [32]byte
-	salt   []byte
-	value  KeywordValue
-	seq    int64
-	stored time.Time
-}
-
-// NewMemoryPutterGetter constructs an in-memory store. The provided
-// private key is used to sign every Put so the on-disk seq numbers
-// behave the same way they would in production. Pass nil to skip
-// signing (the test still works because the in-memory Get path does
-// not verify signatures).
-func NewMemoryPutterGetter(priv ed25519.PrivateKey) *MemoryPutterGetter {
-	m := &MemoryPutterGetter{
-		store:     make(map[[20]byte]storedItem),
-		ppmiStore: make(map[[20]byte]ppmiStoredItem),
-	}
-	if priv != nil {
-		m.priv = priv
-		if pub, ok := priv.Public().(ed25519.PublicKey); ok {
-			copy(m.pub[:], pub)
-		}
-	}
-	return m
-}
-
-// PubKey returns the public key derived from the private key the
-// memory store was constructed with, as a [32]byte. Used by tests
-// that need to query under the same pubkey the memory store
-// signed puts as.
-func (m *MemoryPutterGetter) PubKey() [32]byte { return m.pub }
-
-// Put stores a value under the (pub, salt) target.
-func (m *MemoryPutterGetter) Put(ctx context.Context, salt []byte, value KeywordValue) error {
-	if _, err := EncodeValue(value); err != nil {
-		return err
-	}
-	target := sha1.Sum(append(m.pub[:], salt...))
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	prev := m.store[target]
-	m.store[target] = storedItem{
-		pubkey: m.pub,
-		salt:   append([]byte(nil), salt...),
-		value:  value,
-		seq:    prev.seq + 1,
-		stored: time.Now(),
-	}
-	return nil
-}
-
-// Get fetches the value at (pubkey, salt) from the in-memory store.
-func (m *MemoryPutterGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error) {
-	target := sha1.Sum(append(pubkey[:], salt...))
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	item, ok := m.store[target]
-	if !ok {
-		return KeywordValue{}, errors.New("dhtindex: not found")
-	}
-	return item.value, nil
-}
-
-// Items returns a snapshot of every entry in the store, sorted by
-// the time they were last updated. Used by tests to assert what got
-// stored without poking at internal fields.
-func (m *MemoryPutterGetter) Items() []KeywordValue {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]KeywordValue, 0, len(m.store))
-	for _, it := range m.store {
-		out = append(out, it.value)
-	}
-	return out
-}
-
-// SharedMemoryStore is a multi-publisher in-process key-value
-// map for BEP-44-style mutable items. Unlike MemoryPutterGetter
-// (one fixed publisher), a SharedMemoryStore can issue a Putter
-// per publisher while sharing the same underlying storage, so
-// multiple in-process nodes can publish under their own ed25519
-// keys and every node's Getter reads from the same view.
-//
-// Used by the internal/testlab package to run Layer-D scenarios
-// without a real DHT. Production code should never use this.
-type SharedMemoryStore struct {
-	mu    sync.Mutex
-	store map[[20]byte]storedItem
-}
-
-// NewSharedMemoryStore constructs an empty shared store.
-func NewSharedMemoryStore() *SharedMemoryStore {
-	return &SharedMemoryStore{
-		store: make(map[[20]byte]storedItem),
-	}
-}
-
-// PutterFor returns a Putter that writes to the shared store
-// under the given ed25519 private key. The key is captured at
-// call time; later changes to the key slice have no effect.
-func (s *SharedMemoryStore) PutterFor(priv ed25519.PrivateKey) Putter {
-	var pub [32]byte
-	if p, ok := priv.Public().(ed25519.PublicKey); ok {
-		copy(pub[:], p)
-	}
-	return &sharedPutter{store: s, priv: priv, pub: pub}
-}
-
-// Getter returns a Getter that reads from the shared store.
-// Multiple calls return independent handles but they all read
-// from the same underlying map.
-func (s *SharedMemoryStore) Getter() Getter {
-	return &sharedGetter{store: s}
-}
-
-// Items returns every KeywordValue currently in the store, in
-// unspecified order. Used by tests to assert what was published.
-func (s *SharedMemoryStore) Items() []KeywordValue {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]KeywordValue, 0, len(s.store))
-	for _, it := range s.store {
-		out = append(out, it.value)
-	}
-	return out
-}
-
-// sharedPutter is a Putter bound to one publisher key, writing
-// to a SharedMemoryStore.
-type sharedPutter struct {
-	store *SharedMemoryStore
-	priv  ed25519.PrivateKey
-	pub   [32]byte
-}
-
-func (p *sharedPutter) Put(ctx context.Context, salt []byte, value KeywordValue) error {
-	if _, err := EncodeValue(value); err != nil {
-		return err
-	}
-	target := sha1.Sum(append(p.pub[:], salt...))
-	p.store.mu.Lock()
-	defer p.store.mu.Unlock()
-	prev := p.store.store[target]
-	p.store.store[target] = storedItem{
-		pubkey: p.pub,
-		salt:   append([]byte(nil), salt...),
-		value:  value,
-		seq:    prev.seq + 1,
-		stored: time.Now(),
-	}
-	return nil
-}
-
-// sharedGetter is a Getter reading from a SharedMemoryStore.
-// The Get path does not verify signatures — it's a test-only
-// fake — so any caller can look up any (pubkey, salt) target.
-type sharedGetter struct {
-	store *SharedMemoryStore
-}
-
-func (g *sharedGetter) Get(ctx context.Context, pubkey [32]byte, salt []byte) (KeywordValue, error) {
-	target := sha1.Sum(append(pubkey[:], salt...))
-	g.store.mu.Lock()
-	defer g.store.mu.Unlock()
-	item, ok := g.store.store[target]
-	if !ok {
-		return KeywordValue{}, errors.New("dhtindex: not found")
-	}
-	return item.value, nil
 }

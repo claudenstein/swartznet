@@ -53,6 +53,7 @@ func TestZimExtractorDispatchByExtension(t *testing.T) {
 
 // TestZimExtractorRejectsNonReaderAt confirms the extractor refuses
 // streaming readers — random access is required for a 70 GiB file.
+// The exact error string is contract-pinned.
 func TestZimExtractorRejectsNonReaderAt(t *testing.T) {
 	t.Parallel()
 	// streamReader wraps *bytes.Reader but hides its ReaderAt
@@ -60,7 +61,10 @@ func TestZimExtractorRejectsNonReaderAt(t *testing.T) {
 	r := streamReader{r: bytes.NewReader([]byte("ZIM\x04stub"))}
 	_, err := NewZimExtractor().Extract(r, 0)
 	if err == nil {
-		t.Error("expected error for non-ReaderAt input")
+		t.Fatal("expected error for non-ReaderAt input")
+	}
+	if got, want := err.Error(), "zim: extractor requires io.ReaderAt"; got != want {
+		t.Errorf("error = %q, want %q", got, want)
 	}
 }
 

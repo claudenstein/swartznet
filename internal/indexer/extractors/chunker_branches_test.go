@@ -39,11 +39,7 @@ func TestChunkTextZeroTargetBytesUsesDefault(t *testing.T) {
 func TestChunkTextJoinsParagraphsWithBlankLine(t *testing.T) {
 	t.Parallel()
 	short := "ab cd ef." // 9 bytes
-	body := short + "\n\n" + short + "\n\n" + short + "\n\n" + short + "\n\n" + short
-	// targetBytes = 50: smallFileFactor*50 = 62.5 < len(body)=53*1+8
-	// Wait: body = 9*5 + 4*2 = 53 bytes. Need > 62 for chunker to run.
-	// Use 7 paras instead.
-	body = ""
+	var body string
 	for i := 0; i < 8; i++ {
 		body += short
 		if i < 7 {

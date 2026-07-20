@@ -12,7 +12,7 @@ import (
 //   - mimetype (must be the first entry, stored uncompressed)
 //   - META-INF/container.xml (points at the OPF — we don't read it)
 //   - content.opf (we don't read it either)
-//   - chapter01.xhtml + chapter02.xhtml with the test text
+//   - the caller's chapter files
 //
 // Real EPUBs are more elaborate (NCX/nav, manifest, spine), but
 // our extractor only iterates .xhtml entries so this minimal
@@ -48,8 +48,6 @@ func buildMinimalEPUB(t *testing.T, chapters map[string]string) []byte {
 		t.Fatal(err)
 	}
 
-	// Add chapter files in the order the caller passed them
-	// (which the test relies on for assertion ordering).
 	for name, body := range chapters {
 		if err := writeZipEntry(w, name, body); err != nil {
 			t.Fatal(err)

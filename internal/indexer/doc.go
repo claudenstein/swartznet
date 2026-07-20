@@ -1,17 +1,18 @@
-// Package indexer owns SwartzNet's local full-text search index (Layer L
-// in the design doc).
+// Package indexer owns SwartzNet's local full-text search index — Layer L.
 //
-// M2.0 — the current scope — indexes torrent-level metadata only: torrent
-// name, infohash, file list (paths + sizes), trackers, and bookkeeping. It
-// gives the user an immediate "search what I've added" capability and
-// validates the Bleve integration before M2.1 adds piece-to-file completion
-// tracking and M2.2 layers on text extractors for actual file content.
+// One Bleve scorch index (SchemaVersion 3) holds two document types keyed
+// by the "type" field: "torrent" (one per torrent: name, file list,
+// trackers, signer) and "content" (one per extracted-text chunk, linked to
+// its torrent via the infohash field). Doc IDs are deterministic
+// ("t:<infohash>" / "c:<infohash>:<fileIdx>:<chunkIdx>") so re-indexing is
+// always a pure replace, never a duplicate.
 //
-// The schema is intentionally open-ended so that M2.2 can add nested
-// Content documents without rebuilding the index. See docs/05-integration-design.md
-// §4.1 for the design rationale and §6 for the ingestion pipeline the
-// indexer will eventually plug into.
+// The package never touches the wire and never learns which peer or HTTP
+// request triggered a query: Layer S consumes SearchResponse through its
+// own adapter, and the HTTP API talks to the daemon's collaborator seam,
+// not to this package directly.
 //
-// Concurrency: Index is safe for concurrent use by many goroutines. Open
-// returns a single handle; close it exactly once via Close.
+// Concurrency: Index is safe for concurrent use by many goroutines; every
+// method serializes on one global mutex. Open returns a single handle;
+// close it exactly once via Close (idempotent).
 package indexer

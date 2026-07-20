@@ -3,55 +3,48 @@ package httpapi
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 )
 
-// CompanionController is the narrow interface the HTTP API needs
-// from the companion package's publisher and subscriber workers
-// to power the M11e GUI integration. The cmd/swartznet binary
-// supplies a small adapter that wraps the running *companion.Publisher
-// and *companion.SubscriberWorker.
-//
-// Defined as a local interface so the httpapi package keeps zero
-// dependency on internal/companion — the same adapter pattern as
-// the existing TorrentController.
+// CompanionController is the companion pub/sub surface (Slice 10). httpapi
+// declares it locally so it never imports internal/companion; the daemon adapts.
 type CompanionController interface {
-	// PublisherStatus returns a snapshot of the publisher worker
-	// state. Empty PubKeyHex means the publisher was not started
-	// (no DHT or no identity).
 	PublisherStatus() CompanionPublisherStatus
-	// RefreshNow asks the publisher to perform an out-of-band
-	// refresh, subject to MinInterval throttling. Returns the
-	// "too soon" error verbatim so the GUI can show it.
 	RefreshNow() error
-
-	// SubscriberStatus returns a snapshot of every followed
-	// publisher with its last sync result.
 	SubscriberStatus() []CompanionFollowStatus
-	// Follow adds a publisher to the subscriber's follow list and
-	// persists the new list to disk. label is a human-readable
-	// name shown in the GUI; the pubkey is the unique identifier.
 	Follow(pubkey [32]byte, label string) error
-	// Unfollow removes a publisher from the subscriber's follow
-	// list and persists the new list to disk.
 	Unfollow(pubkey [32]byte) error
 }
 
-// CompanionPublisherStatus mirrors companion.PublisherStatus but
-// is re-declared here so the httpapi package does not import
-// internal/companion. The cmd/swartznet adapter copies fields
-// across.
-type CompanionPublisherStatus struct {
-	LastRefresh    time.Time `json:"last_refresh"`
-	LastInfoHash   string    `json:"last_infohash"`
-	LastError      string    `json:"last_error,omitempty"`
-	PublishedCount int       `json:"published_count"`
-	PubKeyHex      string    `json:"pubkey_hex,omitempty"`
+// ErrCompanionUnavailable signals that a companion operation cannot proceed
+// because the relevant leg (publisher or subscriber) is not wired on this node
+// — e.g. when the DHT is disabled. Handlers map it to 503 (feature unavailable),
+// distinct from 500 (a real failure of a wired subsystem), so a client can
+// disable the control instead of surfacing it as an error. The daemon adapter
+// wraps this sentinel when a leg is absent.
+var ErrCompanionUnavailable = errors.New("companion feature not available on this node")
+
+// companionErrStatus maps a controller error to an HTTP status: 503 when the
+// feature is simply not wired, 500 for a genuine failure.
+func companionErrStatus(err error) int {
+	if errors.Is(err, ErrCompanionUnavailable) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusInternalServerError
 }
 
-// CompanionFollowStatus is one row in the subscriber view: a
-// followed publisher and its most recent sync result.
+// CompanionPublisherStatus reports the companion publisher.
+type CompanionPublisherStatus struct {
+	LastRefresh    time.Time `json:"last_refresh"`
+	LastInfoHash   string    `json:"last_infohash,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
+	PublishedCount int       `json:"published_count"`
+	PubKeyHex      string    `json:"pubkey_hex,omitempty"` // empty ⇒ publisher not started
+}
+
+// CompanionFollowStatus reports one followed publisher's last sync.
 type CompanionFollowStatus struct {
 	PubKeyHex        string    `json:"pubkey_hex"`
 	Label            string    `json:"label,omitempty"`
@@ -63,50 +56,59 @@ type CompanionFollowStatus struct {
 	PointerInfoHash  string    `json:"pointer_infohash,omitempty"`
 }
 
-// CompanionStatusResponse is the body returned from GET /companion.
+// CompanionStatusResponse is the GET /companion document.
 type CompanionStatusResponse struct {
 	Publisher  CompanionPublisherStatus `json:"publisher"`
 	Subscriber []CompanionFollowStatus  `json:"subscriber"`
 }
 
-// followRequestBody is the JSON shape POST /companion/follow
-// expects: {pubkey:"<64-char hex>", label:"<name>"}.
+// followRequestBody is the POST /companion/follow & /unfollow body.
 type followRequestBody struct {
 	PubKey string `json:"pubkey"`
 	Label  string `json:"label,omitempty"`
 }
 
-// handleCompanionStatus serves GET /companion.
-func (s *Server) handleCompanionStatus(w http.ResponseWriter, _ *http.Request) {
-	if s.companion == nil {
-		http.Error(w, "companion controller not configured", http.StatusServiceUnavailable)
-		return
-	}
-	resp := CompanionStatusResponse{
-		Publisher:  s.companion.PublisherStatus(),
-		Subscriber: s.companion.SubscriberStatus(),
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+func (s *Server) companionRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /companion", s.handleCompanionStatus)
+	mux.HandleFunc("POST /companion/refresh", s.handleCompanionRefresh)
+	mux.HandleFunc("POST /companion/follow", s.handleCompanionFollow)
+	mux.HandleFunc("POST /companion/unfollow", s.handleCompanionUnfollow)
 }
 
-// handleCompanionRefresh serves POST /companion/refresh.
-func (s *Server) handleCompanionRefresh(w http.ResponseWriter, _ *http.Request) {
-	if s.companion == nil {
+func (s *Server) handleCompanionStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.opts.Companion == nil {
 		http.Error(w, "companion controller not configured", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.companion.RefreshNow(); err != nil {
+	subs := s.opts.Companion.SubscriberStatus()
+	if subs == nil {
+		subs = []CompanionFollowStatus{}
+	}
+	writeJSON(w, CompanionStatusResponse{
+		Publisher:  s.opts.Companion.PublisherStatus(),
+		Subscriber: subs,
+	})
+}
+
+func (s *Server) handleCompanionRefresh(w http.ResponseWriter, _ *http.Request) {
+	if s.opts.Companion == nil {
+		http.Error(w, "companion controller not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.opts.Companion.RefreshNow(); err != nil {
+		if errors.Is(err, ErrCompanionUnavailable) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		// Otherwise the refresh was throttled (ErrTooSoon), the common case.
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// handleCompanionFollow serves POST /companion/follow.
 func (s *Server) handleCompanionFollow(w http.ResponseWriter, r *http.Request) {
-	if s.companion == nil {
+	if s.opts.Companion == nil {
 		http.Error(w, "companion controller not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -120,18 +122,16 @@ func (s *Server) handleCompanionFollow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.companion.Follow(pub, body.Label); err != nil {
-		http.Error(w, "follow: "+err.Error(), http.StatusInternalServerError)
+	if err := s.opts.Companion.Follow(pub, body.Label); err != nil {
+		http.Error(w, "follow: "+err.Error(), companionErrStatus(err))
 		return
 	}
 	s.log.Info("httpapi.companion_follow", "pubkey", body.PubKey, "label", body.Label)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// handleCompanionUnfollow serves POST /companion/unfollow.
 func (s *Server) handleCompanionUnfollow(w http.ResponseWriter, r *http.Request) {
-	if s.companion == nil {
+	if s.opts.Companion == nil {
 		http.Error(w, "companion controller not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -145,33 +145,24 @@ func (s *Server) handleCompanionUnfollow(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.companion.Unfollow(pub); err != nil {
-		http.Error(w, "unfollow: "+err.Error(), http.StatusInternalServerError)
+	if err := s.opts.Companion.Unfollow(pub); err != nil {
+		http.Error(w, "unfollow: "+err.Error(), companionErrStatus(err))
 		return
 	}
 	s.log.Info("httpapi.companion_unfollow", "pubkey", body.PubKey)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// parseFollowPubKey decodes a 64-char hex string into a [32]byte.
+// parseFollowPubKey validates a 64-hex publisher pubkey.
 func parseFollowPubKey(s string) ([32]byte, error) {
 	var out [32]byte
 	if len(s) != 64 {
-		return out, errHTTP("pubkey must be 64 hex characters")
+		return out, errors.New("pubkey must be 64 hex characters")
 	}
 	raw, err := hex.DecodeString(s)
 	if err != nil {
-		return out, errHTTP("pubkey is not valid hex: " + err.Error())
+		return out, errors.New("pubkey is not valid hex: " + err.Error())
 	}
 	copy(out[:], raw)
 	return out, nil
 }
-
-// errHTTP is a tiny helper for building plain-text error values
-// that handlers can pass to http.Error verbatim.
-type httpErr string
-
-func (e httpErr) Error() string { return string(e) }
-
-func errHTTP(s string) error { return httpErr(s) }

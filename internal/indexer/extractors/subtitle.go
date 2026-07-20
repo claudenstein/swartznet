@@ -19,9 +19,8 @@ import (
 // treated as a timestamp line; anything below that (until the next blank
 // line) is dialog.
 //
-// Subtitle files for TV shows and movies are often the single most
-// valuable text content inside a video torrent — they are the reason
-// we special-case this format.
+// Output is exactly ONE Chunk (the full trimmed dialog, Offset 0) —
+// subtitle does not run chunkText.
 type SubtitleExtractor struct{}
 
 // NewSubtitleExtractor returns a ready-to-use SubtitleExtractor.
@@ -44,27 +43,36 @@ var htmlTag = regexp.MustCompile(`<[^>]+>`)
 // that sometimes leak into SRT exports.
 var assTag = regexp.MustCompile(`\{[^}]*\}`)
 
-// Extract implements Extractor. It ignores its maxBytes parameter
-// because subtitle files are always small (usually <1 MiB) and we want
-// the entire dialog track.
+// subtitleMaxInputBytes is the default read cap for subtitle files
+// when the caller passes maxBytes <= 0. A legitimate subtitle file
+// never approaches this; the cap exists purely to fail closed on a
+// hostile multi-GB ".srt".
+const subtitleMaxInputBytes = 16 * 1024 * 1024
+
+// subtitleMaxFileBytes is the dispatch-time size ceiling. No real
+// subtitle track exceeds a few MiB of text; anything larger is either
+// not a subtitle file or an attempted resource-exhaustion payload.
+const subtitleMaxFileBytes = 16 * 1024 * 1024
+
+// Extract implements Extractor. Subtitle files are always small
+// (usually <1 MiB) and we want the entire dialog track, but we still
+// bound the read via io.LimitReader so a hostile multi-GB ".srt"
+// cannot exhaust memory.
 func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
+	if maxBytes <= 0 {
+		maxBytes = subtitleMaxInputBytes
+	}
 	var (
 		out     strings.Builder
-		scanner = bufio.NewScanner(r)
+		scanner = bufio.NewScanner(io.LimitReader(r, maxBytes))
 	)
 	// Subtitle lines can be very long when styling tags are present;
 	// give the scanner a generous buffer.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	// A small state machine with three possible states:
-	//   headerPending  — we are still looking at WebVTT header / SRT cue
-	//                    numbers, before any real content appears.
-	//   cueMeta        — we just saw a timecode line and are now reading
-	//                    dialog until the next blank line.
-	//   cueText        — inside a dialog block.
-	//
-	// The enum is implicit: a boolean for "in cue" is enough because
-	// header lines are simply ignored by default.
+	// Implicit two-state machine: lines before the first timecode
+	// (WebVTT header, NOTE blocks, cue ids) are skipped; a timecode
+	// line enters cue state; a blank line leaves it.
 	inCue := false
 
 	for scanner.Scan() {
@@ -78,11 +86,8 @@ func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error
 		}
 
 		// WebVTT header ("WEBVTT" plus optional description), NOTE
-		// comments, and cue-identifier lines all get skipped. A WebVTT
-		// NOTE block spans to the next blank line.
+		// comments, and cue-identifier lines all get skipped.
 		if !inCue {
-			// Skip WEBVTT header, STYLE and NOTE blocks, and numeric
-			// cue ids. If it's a blank line we stay in "not in cue".
 			continue
 		}
 
@@ -93,9 +98,7 @@ func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error
 			continue
 		}
 
-		// Dialog line — strip HTML/ASS overrides, unescape HTML
-		// entities would belong here too but SRT hardly ever uses
-		// them.
+		// Dialog line — strip HTML/ASS overrides.
 		clean := htmlTag.ReplaceAllString(line, "")
 		clean = assTag.ReplaceAllString(clean, "")
 		clean = strings.TrimSpace(clean)
@@ -104,6 +107,13 @@ func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error
 		}
 		out.WriteString(clean)
 		out.WriteByte('\n')
+
+		// Output guard: stop accumulating once the dialog text exceeds
+		// the byte budget — return the partial text rather than letting
+		// a hostile input balloon memory.
+		if int64(out.Len()) > maxBytes {
+			break
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -117,12 +127,16 @@ func (e *SubtitleExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error
 	return []Chunk{{Text: text, Offset: 0}}, nil
 }
 
-func init() {
-	Register(NewSubtitleExtractor(), func(mime string, c Candidate) bool {
-		switch mime {
-		case "application/x-subrip", "text/vtt", "text/x-ssa":
-			return true
-		}
+// claimsSubtitle claims the exact subtitle MIMEs only (covering
+// .srt/.vtt/.ass/.ssa via extTypes) and refuses anything larger than
+// subtitleMaxFileBytes so a hostile multi-GB ".srt" is never opened.
+func claimsSubtitle(mime string, c Candidate) bool {
+	if c.Size > subtitleMaxFileBytes {
 		return false
-	})
+	}
+	switch mime {
+	case "application/x-subrip", "text/vtt", "text/x-ssa":
+		return true
+	}
+	return false
 }

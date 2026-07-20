@@ -16,41 +16,26 @@ import (
 	"github.com/swartznet/swartznet/internal/indexer"
 )
 
-// cmdSearch implements `swartznet search <query>`.
-//
-// Two modes:
-//
-//   - Default (no --swarm): opens the Bleve index directly and runs a
-//     local-only search. Works without a running daemon but only sees
-//     torrents already indexed on disk.
-//   - --swarm: POSTs to the running `swartznet add` daemon's HTTP API
-//     (see internal/httpapi), which runs the same local search AND a
-//     distributed sn_search fan-out across connected peers.
+// cmdSearch searches Layer L. It runs against the daemon's HTTP API when any
+// networked layer (--swarm/--dht) or the --signed-by filter is requested;
+// otherwise it opens the Bleve index directly (works with no daemon running),
+// and if that index is locked by a running daemon it transparently falls back
+// to a local-only search routed through that daemon — so a plain `search
+// <query>` works in both cases.
 func cmdSearch(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var (
-		indexDir    string
-		limit       int
-		asJSON      bool
-		useSwarm    bool
-		useDHT      bool
-		apiAddr     string
-		swarmTimeMs int
-		dhtTimeMs   int
-		signedBy    string
-	)
-	fs.StringVar(&indexDir, "index-dir", "", "path to the Bleve index (default: ~/.local/share/swartznet/index)")
-	fs.IntVar(&limit, "limit", 20, "maximum results to return")
-	fs.BoolVar(&asJSON, "json", false, "emit JSON instead of text")
-	fs.BoolVar(&useSwarm, "swarm", false, "also query search-capable peers (requires a running `swartznet add` daemon)")
-	fs.BoolVar(&useDHT, "dht", false, "also query the BEP-44 DHT keyword index across known indexer pubkeys")
-	fs.StringVar(&apiAddr, "api-addr", "localhost:7654", "address of the running swartznet HTTP API")
-	fs.IntVar(&swarmTimeMs, "swarm-timeout-ms", 2000, "swarm fan-out timeout in milliseconds")
-	fs.IntVar(&dhtTimeMs, "dht-timeout-ms", 5000, "DHT lookup timeout in milliseconds")
-	fs.StringVar(&signedBy, "signed-by", "", "restrict local results to torrents signed by this 64-char hex pubkey")
+	indexDir := fs.String("index-dir", "", "path to the Bleve index (default: ~/.local/share/swartznet/index)")
+	limit := fs.Int("limit", 20, "max results")
+	asJSON := fs.Bool("json", false, "emit JSON instead of text")
+	signedBy := fs.String("signed-by", "", "restrict local results to torrents signed by this 64-char hex pubkey")
+	apiAddr := fs.String("api-addr", "localhost:7654", "address of the running swartznet HTTP API")
+	swarm := fs.Bool("swarm", false, "also query connected peers (Layer S)")
+	dht := fs.Bool("dht", false, "also query the DHT keyword index (Layer D)")
+	swarmTimeout := fs.Int("swarm-timeout-ms", 2000, "Layer-S timeout")
+	dhtTimeout := fs.Int("dht-timeout-ms", 5000, "Layer-D timeout")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage
+		return parseErrExit(err)
 	}
 	if fs.NArg() == 0 {
 		fmt.Fprintln(stderr, "usage: swartznet search [--limit N] [--json] [--swarm] [--dht] <query...>")
@@ -58,63 +43,164 @@ func cmdSearch(args []string, stdout, stderr io.Writer) int {
 	}
 	query := strings.Join(fs.Args(), " ")
 
-	if useSwarm || useDHT || signedBy != "" {
-		// Route through the daemon API so the signed-by filter
-		// rides on the same JSON shape used everywhere else.
-		// (The local-index-only path also accepts the filter,
-		// but the API route lets us combine it with swarm/DHT
-		// fan-outs in one call.)
-		return cmdSearchViaAPI(stdout, stderr, apiAddr, query, limit, swarmTimeMs, dhtTimeMs, useSwarm, useDHT, signedBy, asJSON)
+	// --signed-by/--swarm/--dht require the shared JSON shape, so they route
+	// through the daemon API.
+	if *swarm || *dht || *signedBy != "" {
+		return searchViaAPI(*apiAddr, query, *limit, *signedBy, *swarm, *dht, *swarmTimeout, *dhtTimeout, *asJSON, stdout, stderr)
 	}
+	return searchDirect(*apiAddr, *indexDir, query, *limit, *swarmTimeout, *dhtTimeout, *asJSON, stdout, stderr)
+}
 
-	// Direct local-only path: open the Bleve index in-process.
+func searchDirect(apiAddr, indexDir, query string, limit, swarmTimeout, dhtTimeout int, asJSON bool, stdout, stderr io.Writer) int {
 	cfg := config.Default()
 	if indexDir != "" {
 		cfg.IndexDir = indexDir
 	}
-
-	idx, err := indexer.Open(cfg.IndexDir)
+	// Bleve's on-disk index is single-writer: a running daemon holds the lock
+	// and a direct open would block forever. Bound the open; if it times out a
+	// daemon is holding the index, so fall back to a LOCAL-only search routed
+	// through that daemon — this way `search <query>` works whether or not a
+	// daemon is running, instead of failing in the common (daemon-up) case.
+	idx, err := openIndexWithTimeout(cfg.IndexDir, 3*time.Second)
 	if err != nil {
+		if err == errIndexOpenTimeout {
+			return searchViaAPI(apiAddr, query, limit, "", false, false, swarmTimeout, dhtTimeout, asJSON, stdout, stderr)
+		}
 		return reportRunErr(err, stderr)
 	}
 	defer idx.Close()
 
-	res, err := idx.Search(indexer.SearchRequest{Query: query, Limit: limit})
+	resp, err := idx.Search(indexer.SearchRequest{Query: query, Limit: limit, Highlight: true})
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
-
 	if asJSON {
-		return emitJSON(stdout, res, stderr)
+		// Emit the SAME `{"local":{...}}` envelope the daemon-routed path emits,
+		// so `search --json` yields ONE stable schema whether or not a daemon is
+		// running (the lock-fallback routes through searchViaAPI, which dumps the
+		// httpapi shape; a bare direct dump of indexer.SearchResponse would be a
+		// different, incompatible schema for the identical invocation).
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(httpapi.SearchResponse{Local: toAPILocalBlock(*resp)})
+		return exitOK
 	}
-	return emitText(stdout, res, query)
+	emitSearchText(stdout, query, resp)
+	return exitOK
 }
 
-// cmdSearchViaAPI talks to a running `swartznet add` daemon over the
-// local HTTP API to run a combined local + swarm + DHT search.
-func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swarmTimeoutMs, dhtTimeoutMs int, useSwarm, useDHT bool, signedBy string, asJSON bool) int {
-	body, err := json.Marshal(httpapi.SearchRequest{
-		Q:              query,
-		Limit:          limit,
-		Swarm:          useSwarm,
-		DHT:            useDHT,
-		SwarmTimeoutMs: swarmTimeoutMs,
-		DHTTimeoutMs:   dhtTimeoutMs,
-		SignedBy:       signedBy,
-	})
-	if err != nil {
-		return reportRunErr(err, stderr)
+// toAPILocalBlock converts a direct indexer result into the httpapi local block,
+// so the CLI's direct and daemon-routed --json outputs share one schema.
+func toAPILocalBlock(r indexer.SearchResponse) httpapi.LocalBlock {
+	hits := make([]httpapi.LocalHit, 0, len(r.Hits))
+	for _, h := range r.Hits {
+		hits = append(hits, httpapi.LocalHit{
+			DocType:   h.DocType,
+			InfoHash:  h.InfoHash,
+			Name:      h.Name,
+			SizeBytes: h.SizeBytes,
+			FileIndex: h.FileIndex,
+			FilePath:  h.FilePath,
+			Mime:      h.Mime,
+			Extractor: h.Extractor,
+			Score:     h.Score,
+			SignedBy:  h.SignedBy,
+			Fragments: h.Fragments,
+		})
 	}
+	return httpapi.LocalBlock{Total: r.Total, Hits: hits}
+}
 
-	deadline := swarmTimeoutMs + dhtTimeoutMs + 2000
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(deadline)*time.Millisecond)
+var errIndexOpenTimeout = fmt.Errorf("index open timed out")
+
+// openIndexWithTimeout opens the Bleve index, giving up after d (the index
+// is single-writer, so a running daemon holding the lock would otherwise
+// block forever). A late successful open is closed so it can't leak.
+func openIndexWithTimeout(dir string, d time.Duration) (*indexer.Index, error) {
+	type result struct {
+		idx *indexer.Index
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		idx, err := indexer.Open(dir)
+		ch <- result{idx, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.idx, r.err
+	case <-time.After(d):
+		go func() {
+			if r := <-ch; r.idx != nil {
+				_ = r.idx.Close()
+			}
+		}()
+		return nil, errIndexOpenTimeout
+	}
+}
+
+func emitSearchText(w io.Writer, query string, resp *indexer.SearchResponse) {
+	fmt.Fprintf(w, "Query: %s\n", query)
+	fmt.Fprintf(w, "Total: %d hits  (returning %d, took %s)\n", resp.Total, len(resp.Hits), resp.Took)
+	if len(resp.Hits) == 0 {
+		fmt.Fprintln(w, "(no results — try `swartznet add <magnet>` to build up the local index)")
+		return
+	}
+	for i, h := range resp.Hits {
+		if h.DocType == "content" {
+			fmt.Fprintf(w, "%3d. [content] score=%.3f  mime=%s  extractor=%s\n", i+1, h.Score, h.Mime, h.Extractor)
+			fmt.Fprintf(w, "     %s  (%s)\n", h.FilePath, humanBytes(h.FileSize))
+			fmt.Fprintf(w, "     in torrent: %s\n", h.InfoHash)
+		} else {
+			fmt.Fprintf(w, "%3d. [torrent] [%s] score=%.3f  files=%d  size=%s\n", i+1, h.InfoHash, h.Score, h.FileCount, humanBytes(h.SizeBytes))
+			fmt.Fprintf(w, "     %s\n", h.Name)
+			if len(h.Trackers) > 0 {
+				line := "     tracker: " + h.Trackers[0]
+				if more := len(h.Trackers) - 1; more > 0 {
+					line += fmt.Sprintf(" (+%d more)", more)
+				}
+				fmt.Fprintln(w, line)
+			}
+		}
+		if snip := firstFragment(h.Fragments); snip != "" {
+			fmt.Fprintf(w, "     … %s\n", stripMarks(snip))
+		}
+	}
+}
+
+// firstFragment returns the first available highlighted fragment, preferring
+// the content body.
+func firstFragment(frags map[string][]string) string {
+	for _, field := range []string{"text", "name", "files"} {
+		if f := frags[field]; len(f) > 0 {
+			return f[0]
+		}
+	}
+	return ""
+}
+
+// stripMarks removes the <mark> wrappers for plain-text rendering (Bleve
+// pre-escapes the text, so the result is safe to print).
+func stripMarks(s string) string {
+	s = strings.ReplaceAll(s, "<mark>", "")
+	return strings.ReplaceAll(s, "</mark>", "")
+}
+
+func searchViaAPI(apiAddr, query string, limit int, signedBy string, swarm, dht bool, swarmTimeout, dhtTimeout int, asJSON bool, stdout, stderr io.Writer) int {
+	body, _ := json.Marshal(httpapi.SearchRequestBody{
+		Q: query, Limit: limit, SignedBy: signedBy,
+		Swarm: swarm, DHT: dht,
+		SwarmTimeout: swarmTimeout, DHTTimeout: dhtTimeout,
+		Highlight: true,
+	})
+	timeout := time.Duration(swarmTimeout+dhtTimeout+2000) * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+apiAddr+"/search", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+apiAddr+"/search", bytes.NewReader(body))
 	if err != nil {
 		return reportRunErr(err, stderr)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "swartznet: cannot reach the daemon at %s (%v)\n", apiAddr, err)
@@ -122,143 +208,63 @@ func cmdSearchViaAPI(stdout, stderr io.Writer, apiAddr, query string, limit, swa
 		return exitRuntime
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, data)
+		b, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(stderr, "swartznet: api status %d: %s\n", resp.StatusCode, b)
 		return exitRuntime
 	}
-
-	var apiResp httpapi.SearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+	raw, _ := io.ReadAll(resp.Body)
+	if asJSON {
+		var pretty bytes.Buffer
+		if json.Indent(&pretty, raw, "", "  ") == nil {
+			stdout.Write(pretty.Bytes())
+			fmt.Fprintln(stdout)
+		} else {
+			stdout.Write(raw)
+		}
+		return exitOK
+	}
+	var out httpapi.SearchResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return reportRunErr(err, stderr)
 	}
-
-	if asJSON {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(apiResp); err != nil {
-			return reportRunErr(err, stderr)
-		}
-		return exitOK
-	}
-	return emitSwarmText(stdout, &apiResp, query)
-}
-
-// emitSwarmText prints a combined local + swarm + DHT result set in
-// the human-readable text format.
-func emitSwarmText(w io.Writer, res *httpapi.SearchResponse, query string) int {
-	fmt.Fprintf(w, "Query: %s\n", query)
-	fmt.Fprintf(w, "Local: %d hits\n", res.Local.Total)
-	if res.Swarm != nil {
-		fmt.Fprintf(w, "Swarm: asked=%d, responded=%d, rejected=%d, hits=%d\n",
-			res.Swarm.Asked, res.Swarm.Responded, res.Swarm.Rejected, len(res.Swarm.Hits))
-		if res.Swarm.Error != "" {
-			fmt.Fprintf(w, "Swarm error: %s\n", res.Swarm.Error)
-		}
-	}
-	if res.DHT != nil {
-		fmt.Fprintf(w, "DHT:   asked=%d, responded=%d, hits=%d\n",
-			res.DHT.IndexersAsked, res.DHT.IndexersResponded, len(res.DHT.Hits))
-		if res.DHT.Error != "" {
-			fmt.Fprintf(w, "DHT error: %s\n", res.DHT.Error)
-		}
-	}
-	fmt.Fprintln(w)
-
-	emptyLocal := len(res.Local.Hits) == 0
-	emptySwarm := res.Swarm == nil || len(res.Swarm.Hits) == 0
-	emptyDHT := res.DHT == nil || len(res.DHT.Hits) == 0
-	if emptyLocal && emptySwarm && emptyDHT {
-		fmt.Fprintln(w, "(no results)")
-		return exitOK
-	}
-
-	if !emptyLocal {
-		fmt.Fprintln(w, "=== LOCAL ===")
-		for i, h := range res.Local.Hits {
-			printLocalHit(w, i+1, h)
-		}
-	}
-	if !emptySwarm {
-		fmt.Fprintln(w, "=== SWARM ===")
-		for i, h := range res.Swarm.Hits {
-			printSwarmHit(w, i+1, h)
-		}
-	}
-	if !emptyDHT {
-		fmt.Fprintln(w, "=== DHT ===")
-		for i, h := range res.DHT.Hits {
-			printDHTHit(w, i+1, h)
-		}
-	}
-	return exitOK
-}
-
-func printDHTHit(w io.Writer, n int, h httpapi.DHTHit) {
-	fmt.Fprintf(w, "%3d. %s\n", n, h.Name)
-	fmt.Fprintf(w, "     infohash: %s  size=%s  seeders=%d  files=%d  sources=%d\n",
-		h.InfoHash, humanBytes(h.Size), h.Seeders, h.Files, len(h.Sources))
-	fmt.Fprintln(w)
-}
-
-func printLocalHit(w io.Writer, n int, h httpapi.LocalHit) {
-	switch h.DocType {
-	case "content":
-		fmt.Fprintf(w, "%3d. [content] %s  (%s)  extractor=%s\n",
-			n, h.FilePath, humanBytes(h.SizeBytes), h.Extractor)
-		fmt.Fprintf(w, "     infohash: %s  score=%.3f\n", h.InfoHash, h.Score)
-	default:
-		fmt.Fprintf(w, "%3d. [torrent] %s\n", n, h.Name)
-		fmt.Fprintf(w, "     infohash: %s  size=%s  score=%.3f\n",
-			h.InfoHash, humanBytes(h.SizeBytes), h.Score)
-	}
-	fmt.Fprintln(w)
-}
-
-func printSwarmHit(w io.Writer, n int, h httpapi.SwarmHit) {
-	fmt.Fprintf(w, "%3d. %s\n", n, h.Name)
-	fmt.Fprintf(w, "     infohash: %s  size=%s  seeders=%d  score=%d  sources=%d\n",
-		h.InfoHash, humanBytes(h.Size), h.Seeders, h.Score, len(h.Sources))
-	fmt.Fprintln(w)
-}
-
-func emitJSON(w io.Writer, res *indexer.SearchResponse, errW io.Writer) int {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(res); err != nil {
-		return reportRunErr(err, errW)
-	}
-	return exitOK
-}
-
-func emitText(w io.Writer, res *indexer.SearchResponse, query string) int {
-	fmt.Fprintf(w, "Query: %s\n", query)
-	fmt.Fprintf(w, "Total: %d hits  (returning %d, took %s)\n\n", res.Total, len(res.Hits), res.Took)
-	if len(res.Hits) == 0 {
-		fmt.Fprintln(w, "(no results — try `swartznet add <magnet>` to build up the local index)")
-		return exitOK
-	}
-	for i, h := range res.Hits {
-		switch h.DocType {
-		case "content":
-			fmt.Fprintf(w, "%3d. [content] score=%.3f  mime=%s  extractor=%s\n",
-				i+1, h.Score, h.Mime, h.Extractor)
-			fmt.Fprintf(w, "     %s  (%s)\n", h.FilePath, humanBytes(h.FileSize))
-			fmt.Fprintf(w, "     in torrent: %s\n", h.InfoHash)
-		default: // "torrent" or anything unexpected
-			fmt.Fprintf(w, "%3d. [torrent] [%s] score=%.3f  files=%d  size=%s\n",
-				i+1, h.InfoHash, h.Score, h.FileCount, humanBytes(h.SizeBytes))
-			fmt.Fprintf(w, "     %s\n", h.Name)
-			if len(h.Trackers) > 0 {
-				preview := h.Trackers[0]
-				if len(h.Trackers) > 1 {
-					preview = fmt.Sprintf("%s (+%d more)", preview, len(h.Trackers)-1)
-				}
-				fmt.Fprintf(w, "     tracker: %s\n", preview)
+	fmt.Fprintf(stdout, "Query: %s\n", query)
+	fmt.Fprintf(stdout, "Local: %d hits\n\n", out.Local.Total)
+	if len(out.Local.Hits) > 0 {
+		fmt.Fprintln(stdout, "=== LOCAL ===")
+		for i, h := range out.Local.Hits {
+			if h.DocType == "content" {
+				fmt.Fprintf(stdout, "%3d. [content] %s  (%s)  extractor=%s\n", i+1, h.FilePath, h.Mime, h.Extractor)
+				fmt.Fprintf(stdout, "     infohash: %s  score=%.3f\n", h.InfoHash, h.Score)
+			} else {
+				fmt.Fprintf(stdout, "%3d. [torrent] %s\n", i+1, h.Name)
+				fmt.Fprintf(stdout, "     infohash: %s  size=%s  score=%.3f\n", h.InfoHash, humanBytes(h.SizeBytes), h.Score)
+			}
+			if snip := firstFragment(h.Fragments); snip != "" {
+				fmt.Fprintf(stdout, "     … %s\n", stripMarks(snip))
 			}
 		}
-		fmt.Fprintln(w)
+	}
+	if out.Swarm != nil {
+		fmt.Fprintf(stdout, "\n=== SWARM (Layer S) === asked=%d responded=%d\n", out.Swarm.Asked, out.Swarm.Responded)
+		if out.Swarm.Error != "" {
+			fmt.Fprintf(stdout, "     (error: %s)\n", out.Swarm.Error)
+		}
+		for i, h := range out.Swarm.Hits {
+			fmt.Fprintf(stdout, "%3d. %s  %s  seeders=%d  sources=%d\n", i+1, h.InfoHash, h.Name, h.Seeders, len(h.Sources))
+		}
+	}
+	if out.Dht != nil {
+		fmt.Fprintf(stdout, "\n=== DHT (Layer D) === indexers=%d/%d\n", out.Dht.IndexersResponded, out.Dht.IndexersAsked)
+		if out.Dht.Error != "" {
+			fmt.Fprintf(stdout, "     (error: %s)\n", out.Dht.Error)
+		}
+		for i, h := range out.Dht.Hits {
+			fmt.Fprintf(stdout, "%3d. %s  %s  seeders=%d  score=%.3f  sources=%d\n", i+1, h.InfoHash, h.Name, h.Seeders, h.Score, len(h.Sources))
+		}
+	}
+	if len(out.Local.Hits) == 0 && out.Swarm == nil && out.Dht == nil {
+		fmt.Fprintln(stdout, "(no results)")
 	}
 	return exitOK
 }

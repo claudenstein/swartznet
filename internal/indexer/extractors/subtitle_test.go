@@ -141,7 +141,8 @@ func TestSubtitleTimestampsOnly(t *testing.T) {
 func TestSubtitleDispatchBeatsPlaintext(t *testing.T) {
 	t.Parallel()
 	// A .srt file must be claimed by the subtitle extractor, not
-	// plaintext. This test protects the registration-order decoupling.
+	// plaintext. This test protects the registration-order decoupling
+	// (plaintext explicitly declines the subtitle MIMEs).
 	e, mime := Dispatch(Candidate{Path: "episode.en.srt", Size: 16 * 1024})
 	if e == nil {
 		t.Fatal("no extractor dispatched for .srt file")

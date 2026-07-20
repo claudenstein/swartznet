@@ -2,7 +2,6 @@ package engine
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,56 +9,19 @@ import (
 	"sync"
 )
 
-// session is the on-disk record of which torrents the engine had
-// open when it was last running, plus per-torrent state (paused,
-// indexing, queue order). On daemon startup the engine reads the
-// session and re-adds every entry; the underlying anacrolix
-// Storage backend detects existing piece data on disk and resumes
-// each torrent from where it left off.
-//
-// Without this, restarting the daemon (or the GUI, which spawns
-// its own daemon) drops every torrent from the in-memory map and
-// the user sees an empty download list — the bug that motivated
-// this file.
-//
-// The manifest lives at <DataDir>/session.json and accompanying
-// .torrent file copies (one per file-added torrent) live under
-// <DataDir>/torrents/<infohash>.torrent. Magnet-added torrents
-// don't need a .torrent on disk for restore — the magnet URI is
-// stored in the manifest and re-added directly. When metadata
-// arrives for a magnet-added torrent, the engine serialises the
-// in-memory metainfo to the torrents/ dir and upgrades the
-// manifest entry to AddedVia="file" so future restarts skip the
-// metadata-fetch round trip.
-type session struct {
-	path        string
-	torrentsDir string
-
-	mu      sync.Mutex
-	entries map[string]sessionEntry // keyed by 40-char hex infohash
-}
-
-// sessionEntry is one row in the on-disk manifest. JSON-stable.
+// sessionEntry is one persisted torrent. The JSON shape is frozen — existing
+// session.json files must keep loading.
 type sessionEntry struct {
 	InfoHash    string `json:"infohash"`
-	AddedVia    string `json:"added_via"` // "magnet" | "file" | "infohash" | "metainfo"
+	AddedVia    string `json:"added_via"` // magnet | file | infohash | metainfo
 	MagnetURI   string `json:"magnet_uri,omitempty"`
 	TorrentFile string `json:"torrent_file,omitempty"` // basename under <DataDir>/torrents/
 	Paused      bool   `json:"paused,omitempty"`
-	Indexing    bool   `json:"indexing"`
+	Indexing    bool   `json:"indexing"` // deliberately NOT omitempty
 	QueueOrder  int64  `json:"queue_order,omitempty"`
 	SignedBy    string `json:"signed_by,omitempty"`
-
-	// DataPath is the per-torrent storage parent directory, set
-	// when the torrent was added with content already living
-	// outside of cfg.DataDir — typically a Create-Torrent flow
-	// where the user picked a Root somewhere on their disk and
-	// then started seeding it. anacrolix's default storage roots
-	// every torrent at cfg.DataDir, so without this override the
-	// post-add VerifyData finds zero bytes and the torrent shows
-	// 0% even though the source content is sitting on disk
-	// already. Empty means "use the engine's default storage".
-	DataPath string `json:"data_path,omitempty"`
+	DataPath    string `json:"data_path,omitempty"`    // seed-from parent directory
+	ContentName string `json:"content_name,omitempty"` // real on-disk basename
 }
 
 type sessionFile struct {
@@ -67,63 +29,66 @@ type sessionFile struct {
 	Torrents []sessionEntry `json:"torrents"`
 }
 
-const sessionFileVersion = 1
+// session persists the torrent set. DataDir=="" yields an in-memory session
+// where every save is a no-op.
+type session struct {
+	mu          sync.Mutex
+	path        string // "" = in-memory
+	torrentsDir string // "" = in-memory
+	entries     map[string]sessionEntry
+}
 
-// loadSession opens the session manifest under dataDir. A missing
-// file is not an error; the returned session starts empty and the
-// first save creates the file. A corrupt manifest is logged at the
-// caller side (this returns the parse error) so restart can fall
-// back gracefully.
-//
-// dataDir == "" yields an in-memory-only session (every save is a
-// no-op). Useful for tests and ephemeral engines.
+func newMemorySession() *session {
+	return &session{entries: make(map[string]sessionEntry)}
+}
+
+// loadSession loads <dataDir>/session.json and prepares <dataDir>/torrents/.
+// A missing or empty file is an empty session; corrupt JSON is an error the
+// engine downgrades to a warning (never fails New).
 func loadSession(dataDir string) (*session, error) {
-	s := &session{entries: make(map[string]sessionEntry)}
 	if dataDir == "" {
-		return s, nil
+		return newMemorySession(), nil
 	}
-	s.path = filepath.Join(dataDir, "session.json")
-	s.torrentsDir = filepath.Join(dataDir, "torrents")
-
+	s := &session{
+		path:        filepath.Join(dataDir, "session.json"),
+		torrentsDir: filepath.Join(dataDir, "torrents"),
+		entries:     make(map[string]sessionEntry),
+	}
+	// A nil session return is FATAL to engine.New: without torrents/ no add
+	// can persist, so the whole run would silently lose state.
 	if err := os.MkdirAll(s.torrentsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("engine: mkdir torrents: %w", err)
 	}
-
 	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return s, nil
-		}
-		return nil, fmt.Errorf("engine: read session: %w", err)
-	}
-	if len(raw) == 0 {
+	if os.IsNotExist(err) || (err == nil && len(raw) == 0) {
 		return s, nil
 	}
-	var sf sessionFile
-	if err := json.Unmarshal(raw, &sf); err != nil {
-		return nil, fmt.Errorf("engine: decode session: %w", err)
+	if err != nil {
+		// The session itself (with paths) is still returned so persistence
+		// self-heals: the next save rewrites a valid manifest.
+		return s, fmt.Errorf("engine: read session: %w", err)
 	}
-	for _, e := range sf.Torrents {
-		if len(e.InfoHash) != 40 {
-			continue
+	var f sessionFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return s, fmt.Errorf("engine: decode session: %w", err)
+	}
+	for _, ent := range f.Torrents {
+		if len(ent.InfoHash) != 40 {
+			continue // silently drop malformed rows
 		}
-		s.entries[e.InfoHash] = e
+		s.entries[ent.InfoHash] = ent
 	}
 	return s, nil
 }
 
-// list returns every entry in queue-order (lowest first), then
-// infohash as a tiebreaker. Returned slice is a copy.
+// list returns entries sorted by queue_order asc, then infohash asc.
 func (s *session) list() []sessionEntry {
-	if s == nil {
-		return nil
-	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]sessionEntry, 0, len(s.entries))
 	for _, e := range s.entries {
 		out = append(out, e)
 	}
-	s.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].QueueOrder != out[j].QueueOrder {
 			return out[i].QueueOrder < out[j].QueueOrder
@@ -133,61 +98,86 @@ func (s *session) list() []sessionEntry {
 	return out
 }
 
-// update applies mut to the entry for infoHash (creating a new
-// entry if none exists), then persists. Idempotent.
+// update upserts the entry for infoHash and saves.
 func (s *session) update(infoHash string, mut func(*sessionEntry)) error {
-	if s == nil {
-		return nil
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.entries[infoHash]
-	if !ok {
-		e = sessionEntry{InfoHash: infoHash}
-	}
-	mut(&e)
-	e.InfoHash = infoHash
-	s.entries[infoHash] = e
+	ent := s.entries[infoHash]
+	ent.InfoHash = infoHash
+	mut(&ent)
+	s.entries[infoHash] = ent
 	return s.saveLocked()
 }
 
-// remove drops the entry for infoHash and deletes the matching
-// .torrent file copy (if any). Idempotent.
-func (s *session) remove(infoHash string) error {
-	if s == nil {
-		return nil
-	}
+// updateExisting mutates the entry only if it still exists — background
+// writers (the magnet→metainfo upgrade) must never resurrect an entry a
+// concurrent RemoveTorrent deleted. Reports whether the entry existed.
+func (s *session) updateExisting(infoHash string, mut func(*sessionEntry)) (bool, error) {
 	s.mu.Lock()
-	e, had := s.entries[infoHash]
+	defer s.mu.Unlock()
+	ent, ok := s.entries[infoHash]
+	if !ok {
+		return false, nil
+	}
+	mut(&ent)
+	s.entries[infoHash] = ent
+	return true, s.saveLocked()
+}
+
+// updateGuarded upserts the entry for infoHash UNLESS abort reports the add was
+// cancelled (the handle removed). The abort check runs UNDER s.mu, atomically
+// with the upsert; RemoveTorrent closes h.removed before its own s.mu-guarded
+// remove(), so a create here can never resurrect an entry a concurrent
+// RemoveTorrent already deleted. Reports whether the entry was written.
+func (s *session) updateGuarded(infoHash string, abort func() bool, mut func(*sessionEntry)) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if abort != nil && abort() {
+		return false, nil
+	}
+	ent := s.entries[infoHash]
+	ent.InfoHash = infoHash
+	mut(&ent)
+	s.entries[infoHash] = ent
+	return true, s.saveLocked()
+}
+
+// remove deletes the entry, saves, and best-effort removes the .torrent copy.
+// It RETURNS the save error (rather than swallowing it) so the caller can surface
+// a non-durable removal: if the on-disk session cannot be rewritten (ENOSPC, a
+// read-only remount) the in-memory removal still holds for this run, but the
+// stale entry survives on disk and would resurrect the torrent on the next
+// restart — the caller must at least log that.
+func (s *session) remove(infoHash string) error {
+	s.mu.Lock()
+	ent, ok := s.entries[infoHash]
 	delete(s.entries, infoHash)
 	err := s.saveLocked()
+	dir := s.torrentsDir
 	s.mu.Unlock()
-	if had && e.TorrentFile != "" && s.torrentsDir != "" {
-		_ = os.Remove(filepath.Join(s.torrentsDir, e.TorrentFile))
+	if ok && ent.TorrentFile != "" && dir != "" {
+		_ = os.Remove(filepath.Join(dir, ent.TorrentFile))
 	}
 	return err
 }
 
-// saveLocked writes the in-memory entries to disk atomically.
-// Caller must hold s.mu. No-op when path == "".
+// saveLocked rewrites the whole file atomically (.tmp+rename). No-op for
+// in-memory sessions.
 func (s *session) saveLocked() error {
 	if s.path == "" {
 		return nil
 	}
-	out := make([]sessionEntry, 0, len(s.entries))
+	entries := make([]sessionEntry, 0, len(s.entries))
 	for _, e := range s.entries {
-		out = append(out, e)
+		entries = append(entries, e)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].QueueOrder != out[j].QueueOrder {
-			return out[i].QueueOrder < out[j].QueueOrder
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].QueueOrder != entries[j].QueueOrder {
+			return entries[i].QueueOrder < entries[j].QueueOrder
 		}
-		return out[i].InfoHash < out[j].InfoHash
+		return entries[i].InfoHash < entries[j].InfoHash
 	})
-	body, err := json.MarshalIndent(sessionFile{
-		Version:  sessionFileVersion,
-		Torrents: out,
-	}, "", "  ")
+	body, err := json.MarshalIndent(sessionFile{Version: 1, Torrents: entries}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("engine: marshal session: %w", err)
 	}
@@ -202,23 +192,66 @@ func (s *session) saveLocked() error {
 	return nil
 }
 
-// writeTorrentCopy persists raw .torrent bytes under the torrents/
-// dir as <infoHash>.torrent. The returned basename is what callers
-// store in sessionEntry.TorrentFile. Returns "" when the session
-// has no torrents/ dir (in-memory-only mode).
+// writeTorrentCopy stores a byte-exact .torrent copy as <ih>.torrent and
+// returns its basename ("" for in-memory sessions).
 func (s *session) writeTorrentCopy(infoHash string, raw []byte) (string, error) {
-	if s == nil || s.torrentsDir == "" {
+	s.mu.Lock()
+	dir := s.torrentsDir
+	s.mu.Unlock()
+	if dir == "" {
 		return "", nil
 	}
 	name := infoHash + ".torrent"
-	target := filepath.Join(s.torrentsDir, name)
-	tmp := target + ".tmp"
+	dst := filepath.Join(dir, name)
+	tmp := dst + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return "", fmt.Errorf("engine: write torrent copy: %w", err)
 	}
-	if err := os.Rename(tmp, target); err != nil {
+	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("engine: rename torrent copy: %w", err)
 	}
 	return name, nil
+}
+
+// persistAdd records an add. MagnetURI/TorrentFile are written only when
+// non-empty so a raced magnet→metainfo upgrade is never clobbered with "".
+func (e *Engine) persistAdd(h *Handle, via, magnetURI, torrentFile string) {
+	// updateGuarded, NOT update: persistAdd runs after Add releases e.mu, so a
+	// concurrent RemoveTorrent on the same infohash can delete the row (or be
+	// about to) before this create runs — an unconditional upsert would resurrect
+	// it and silently rejoin, on the next restart, a swarm the user left.
+	if _, err := e.sess.updateGuarded(h.InfoHashHex(), h.isRemoved, func(ent *sessionEntry) {
+		ent.AddedVia = via
+		if magnetURI != "" {
+			ent.MagnetURI = magnetURI
+		}
+		if torrentFile != "" {
+			ent.TorrentFile = torrentFile
+		}
+		ent.Indexing = h.isIndexing()
+		ent.Paused = h.isPaused()
+		ent.QueueOrder = h.getQueueOrder()
+		if sb := h.SignedBy(); sb != "" {
+			ent.SignedBy = sb
+		}
+	}); err != nil {
+		e.log.Warn("engine.session_update_err", "err", err)
+	}
+}
+
+// persistState records a paused/indexing/queue-order mutation. It uses
+// updateExisting, NOT update: a pause/resume/set-indexing request can race a
+// concurrent RemoveTorrent (RemoveTorrent releases e.mu between deleting the
+// handle and removing the session row), and an unconditional upsert here would
+// resurrect the just-removed entry — which then re-adds the torrent on the next
+// restart, silently rejoining a swarm the user explicitly left.
+func (e *Engine) persistState(h *Handle) {
+	if _, err := e.sess.updateExisting(h.InfoHashHex(), func(ent *sessionEntry) {
+		ent.Paused = h.isPaused()
+		ent.Indexing = h.isIndexing()
+		ent.QueueOrder = h.getQueueOrder()
+	}); err != nil {
+		e.log.Warn("engine.session_update_err", "err", err)
+	}
 }

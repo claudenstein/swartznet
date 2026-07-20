@@ -2,10 +2,10 @@ package extractors
 
 import "testing"
 
-// TestNextParagraphCRLFBlankLine covers the previously-uncovered
-// `\r\n\r\n` paragraph-separator branch in nextParagraph. CRLF
-// is the wire-form on Windows-edited text files; the chunker
-// must split on it just like \n\n.
+// TestNextParagraphCRLFBlankLine covers the `\r\n\r\n`
+// paragraph-separator branch in nextParagraph. CRLF is the
+// wire-form on Windows-edited text files; the chunker must split
+// on it just like \n\n.
 func TestNextParagraphCRLFBlankLine(t *testing.T) {
 	t.Parallel()
 	// "para1" + CRLF + CRLF + "para2"

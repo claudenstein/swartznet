@@ -8,337 +8,155 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/swartznet/swartznet/internal/config"
+	"github.com/swartznet/swartznet/contracts/ltepwire"
 	"github.com/swartznet/swartznet/internal/daemon"
-	"github.com/swartznet/swartznet/internal/swarmsearch"
 )
 
+// licenseLine is the first-party license shown in About. SwartzNet code is
+// Apache-2.0 (the legacy §6 defect claimed "MIT"); the MPL-2.0 anacrolix engine
+// dependency is noted separately.
+const licenseLine = "Apache-2.0 (SwartzNet) · engine anacrolix/torrent: MPL-2.0"
+
+// settingsTab exposes rate limits, the sharing/capabilities prefs, and the
+// About/version dialog. No poll loop — settings are read once and on save.
 type settingsTab struct {
 	content fyne.CanvasObject
 	d       *daemon.Daemon
-
-	shareRadio  *widget.RadioGroup
-	fileHitsChk *widget.Check
-	contentChk  *widget.Check
-
-	uploadEntry   *widget.Entry
-	downloadEntry *widget.Entry
-
-	maxActiveEntry *widget.Entry
-}
-
-var shareLevels = []string{
-	"L0 - Don't answer queries",
-	"L1 - In-swarm peers only",
-	"L2 - Full local index",
+	win     func() fyne.Window
 }
 
 func newSettingsTab(d *daemon.Daemon) *settingsTab {
-	st := &settingsTab{d: d}
+	se := &settingsTab{d: d}
 
-	st.shareRadio = widget.NewRadioGroup(shareLevels, nil)
-	st.fileHitsChk = widget.NewCheck("Share file paths in search results", nil)
-	st.contentChk = widget.NewCheck("Share content text snippets", nil)
-
-	// Load current capabilities.
-	st.loadCurrent()
-
-	saveBtn := widget.NewButton("Save", func() {
-		st.save()
-	})
-
-	sharingCard := widget.NewCard("Sharing Capabilities", "Controls what this node shares with sn_search peers", container.NewVBox(
-		widget.NewLabel("Share level:"),
-		st.shareRadio,
-		widget.NewSeparator(),
-		st.fileHitsChk,
-		st.contentChk,
-		widget.NewSeparator(),
-		saveBtn,
-	))
-
-	// Rate limiting card.
-	st.uploadEntry = widget.NewEntry()
-	st.uploadEntry.SetPlaceHolder("0 (unlimited)")
-	st.downloadEntry = widget.NewEntry()
-	st.downloadEntry.SetPlaceHolder("0 (unlimited)")
-	st.loadRateLimits()
-
-	applyLimitsBtn := widget.NewButton("Apply", func() {
-		st.applyRateLimits()
-	})
-
-	rateCard := widget.NewCard("Bandwidth Limits", "Zero means unlimited. Applies immediately.", container.NewVBox(
-		widget.NewForm(
-			widget.NewFormItem("Download (KiB/s)", st.downloadEntry),
-			widget.NewFormItem("Upload (KiB/s)", st.uploadEntry),
-		),
-		applyLimitsBtn,
-	))
-
-	// Queue management card.
-	st.maxActiveEntry = widget.NewEntry()
-	st.maxActiveEntry.SetPlaceHolder("0 (unlimited)")
-	st.loadQueueSettings()
-	applyQueueBtn := widget.NewButton("Apply", func() {
-		st.applyQueueSettings()
-	})
-	queueCard := widget.NewCard("Queue Management", "Cap concurrent active downloads. Zero means unlimited. Paused/complete torrents don't count.", container.NewVBox(
-		widget.NewForm(
-			widget.NewFormItem("Max active downloads", st.maxActiveEntry),
-		),
-		applyQueueBtn,
-	))
-
-	// Storage paths card — DataDir / IndexDir live on disk and
-	// are wired into the engine + indexer at startup, so changing
-	// them requires a restart. We persist edits to the user
-	// config file and tell the user to restart for them to take
-	// effect; reflecting them live would mean tearing down and
-	// re-bringing-up the engine, indexer, and companion publisher
-	// in-place, which is not safe to do while torrents are
-	// active.
-	dataDirEntry := widget.NewEntry()
-	dataDirEntry.SetText(d.Cfg.DataDir)
-	indexDirEntry := widget.NewEntry()
-	indexDirEntry.SetText(d.Cfg.IndexDir)
-
-	browseDataBtn := widget.NewButton("Browse...", func() {
-		fd := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
-			if err != nil || lu == nil {
-				return
-			}
-			dataDirEntry.SetText(lu.Path())
-		}, st.win())
-		if cur := strings.TrimSpace(dataDirEntry.Text); cur != "" {
-			if loc, err := storage.ListerForURI(storage.NewFileURI(cur)); err == nil {
-				fd.SetLocation(loc)
-			}
+	ulEntry := widget.NewEntry()
+	dlEntry := widget.NewEntry()
+	maxEntry := widget.NewEntry()
+	if e := d.Eng; e != nil {
+		ulEntry.SetText(strconv.FormatInt(e.UploadLimitBytesPerSec(), 10))
+		dlEntry.SetText(strconv.FormatInt(e.DownloadLimitBytesPerSec(), 10))
+		maxEntry.SetText(strconv.Itoa(e.MaxActiveDownloads()))
+	}
+	saveRates := widget.NewButton("Apply", func() {
+		if e := d.Eng; e != nil {
+			e.SetUploadLimitBytesPerSec(parseInt64(ulEntry.Text))
+			e.SetDownloadLimitBytesPerSec(parseInt64(dlEntry.Text))
+			e.SetMaxActiveDownloads(int(parseInt64(maxEntry.Text)))
 		}
-		fd.Show()
 	})
-	browseIndexBtn := widget.NewButton("Browse...", func() {
-		fd := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
-			if err != nil || lu == nil {
-				return
-			}
-			indexDirEntry.SetText(lu.Path())
-		}, st.win())
-		if cur := strings.TrimSpace(indexDirEntry.Text); cur != "" {
-			if loc, err := storage.ListerForURI(storage.NewFileURI(cur)); err == nil {
-				fd.SetLocation(loc)
-			}
-		}
-		fd.Show()
-	})
-
-	saveDirsBtn := widget.NewButton("Save", func() {
-		st.savePaths(dataDirEntry.Text, indexDirEntry.Text)
-	})
-	resetDirsBtn := widget.NewButton("Reset to defaults", func() {
-		def := config.Default()
-		dataDirEntry.SetText(def.DataDir)
-		indexDirEntry.SetText(def.IndexDir)
-	})
-
-	dataRow := container.NewBorder(nil, nil, nil, browseDataBtn, dataDirEntry)
-	indexRow := container.NewBorder(nil, nil, nil, browseIndexBtn, indexDirEntry)
-
-	dirsCard := widget.NewCard(
-		"Storage Paths",
-		"Where downloaded content and the local search index live. Changes take effect on next restart.",
-		container.NewVBox(
-			widget.NewLabel("Data directory"),
-			dataRow,
-			widget.NewLabel("Index directory"),
-			indexRow,
-			container.NewHBox(saveDirsBtn, resetDirsBtn),
-		),
-	)
-
-	// Read-only details for the rest of the runtime config.
-	cfgInfo := widget.NewCard("Runtime", "", container.NewVBox(
-		labelRow("Listen port:", widget.NewLabel(portStr(d.Cfg.ListenPort))),
-		labelRow("DHT:", widget.NewLabel(boolStr(!d.Cfg.DisableDHT))),
+	rates := widget.NewCard("Rate limits & queue", "0 = unlimited", container.NewVBox(
+		labeledRow("Upload B/s", ulEntry),
+		labeledRow("Download B/s", dlEntry),
+		labeledRow("Max active downloads", maxEntry),
+		saveRates,
 	))
 
-	st.content = container.NewVBox(sharingCard, rateCard, queueCard, dirsCard, cfgInfo)
+	// Sharing prefs (the operator half of the sn_search capability mask).
+	shareLocal := widget.NewCheck("Answer local-index queries (ShareLocal=2)", nil)
+	fileHits := widget.NewCheck("Share file hits", nil)
+	contentHits := widget.NewCheck("Share content hits", nil)
+	if e := d.Eng; e != nil {
+		s := e.Sharing()
+		shareLocal.SetChecked(s.ShareLocal > 0)
+		fileHits.SetChecked(s.FileHits)
+		contentHits.SetChecked(s.ContentHits)
+	}
+	saveShare := widget.NewButton("Apply", func() {
+		if e := d.Eng; e != nil {
+			s := ltepwire.Sharing{FileHits: fileHits.Checked, ContentHits: contentHits.Checked}
+			if shareLocal.Checked {
+				s.ShareLocal = 2
+			}
+			e.SetSharing(s)
+		}
+	})
+	sharing := widget.NewCard("Sharing (sn_search)", "", container.NewVBox(shareLocal, fileHits, contentHits, saveShare))
 
-	return st
+	aboutBtn := widget.NewButton("About SwartzNet", func() {
+		if w := se.window(); w != nil {
+			ShowAbout(w, se.d, "", "")
+		}
+	})
+
+	se.content = container.NewVScroll(container.NewVBox(rates, sharing, aboutBtn))
+	return se
 }
 
-// savePaths persists the user's edits to data/index directories
-// and tells the user a restart is needed to pick them up.
-// Refusing empty values keeps the next launch from falling back
-// to "" → Validate failure on startup.
-func (st *settingsTab) savePaths(dataDir, indexDir string) {
-	dataDir = strings.TrimSpace(dataDir)
-	indexDir = strings.TrimSpace(indexDir)
-	if dataDir == "" {
-		dialog.ShowError(fmt.Errorf("data directory must not be empty"), st.win())
-		return
+// ShowAbout renders the About dialog with the corrected first-party license.
+// version/buildDate come from the single build-stamped source (main.go); an
+// empty buildDate renders "(dev build)".
+func ShowAbout(w fyne.Window, d *daemon.Daemon, version, buildDate string) {
+	if buildDate == "" {
+		buildDate = "(dev build)"
 	}
-	if indexDir == "" {
-		dialog.ShowError(fmt.Errorf("index directory must not be empty"), st.win())
-		return
+	pubKey, port, api := "unknown", "unknown", "disabled"
+	if d != nil && d.Identity != nil {
+		pubKey = d.Identity.PublicKeyHex()
 	}
-	if err := config.SaveUserOverrides(config.DefaultUserConfigPath(), dataDir, indexDir); err != nil {
-		dialog.ShowError(err, st.win())
-		return
+	if d != nil && d.Eng != nil {
+		if p := d.Eng.LocalPort(); p > 0 {
+			port = strconv.Itoa(p)
+		}
 	}
-	dialog.ShowInformation(
-		"Saved",
-		"Data and index directories saved.\n\nRestart SwartzNet to switch over to the new paths. Existing torrents and indexed content stay where they are; the new paths apply to future downloads and indexing only.",
-		st.win(),
-	)
+	if d != nil && d.API != nil {
+		if a := d.API.Addr(); a != "" {
+			api = a
+		}
+	}
+	items := []*widget.FormItem{
+		widget.NewFormItem("Version", widget.NewLabel(orDash(version))),
+		widget.NewFormItem("Built", widget.NewLabel(buildDate)),
+		widget.NewFormItem("Identity", identityRow(pubKey)),
+		widget.NewFormItem("BitTorrent port", widget.NewLabel(port)),
+		widget.NewFormItem("HTTP API", widget.NewLabel(api)),
+		widget.NewFormItem("License", widget.NewLabel(licenseLine)),
+	}
+	dialog.ShowForm("About SwartzNet", "Close", "", items, func(bool) {}, w)
 }
 
-func (st *settingsTab) loadQueueSettings() {
-	n := st.d.Eng.MaxActiveDownloads()
-	st.maxActiveEntry.SetText(strconv.Itoa(n))
+// identityRow shows the node's publisher pubkey (wrapped so all 64 hex chars are
+// visible) with a Copy button, so the operator can copy their publisher id. When
+// no identity is loaded it is a plain label.
+func identityRow(pubKey string) fyne.CanvasObject {
+	lbl := widget.NewLabel(pubKey)
+	lbl.Wrapping = fyne.TextWrapBreak
+	if pubKey == "" || pubKey == "unknown" {
+		return lbl
+	}
+	copyBtn := widget.NewButton("Copy", func() {
+		if app := fyne.CurrentApp(); app != nil {
+			app.Clipboard().SetContent(pubKey)
+		}
+	})
+	copyBtn.Importance = widget.LowImportance
+	return container.NewBorder(nil, nil, nil, copyBtn, lbl)
 }
 
-func (st *settingsTab) applyQueueSettings() {
-	s := strings.TrimSpace(st.maxActiveEntry.Text)
-	if s == "" {
-		s = "0"
-	}
-	n, err := strconv.Atoi(s)
+func labeledRow(label string, e *widget.Entry) fyne.CanvasObject {
+	return container.NewBorder(nil, nil, widget.NewLabel(label), nil, e)
+}
+
+func parseInt64(s string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil || n < 0 {
-		dialog.ShowError(fmt.Errorf("must be a non-negative integer"), st.win())
-		return
+		return 0
 	}
-	st.d.Eng.SetMaxActiveDownloads(n)
-	label := strconv.Itoa(n)
-	if n == 0 {
-		label = "unlimited"
-	}
-	dialog.ShowInformation("Saved",
-		fmt.Sprintf("Max active downloads: %s", label), st.win())
+	return n
 }
 
-func (st *settingsTab) loadRateLimits() {
-	ul := st.d.Eng.UploadLimitBytesPerSec()
-	dl := st.d.Eng.DownloadLimitBytesPerSec()
-	st.uploadEntry.SetText(kibStr(ul))
-	st.downloadEntry.SetText(kibStr(dl))
-}
-
-func (st *settingsTab) applyRateLimits() {
-	ulKiB, err := parseKiB(st.uploadEntry.Text)
-	if err != nil {
-		dialog.ShowError(fmt.Errorf("upload: %w", err), st.win())
-		return
-	}
-	dlKiB, err := parseKiB(st.downloadEntry.Text)
-	if err != nil {
-		dialog.ShowError(fmt.Errorf("download: %w", err), st.win())
-		return
-	}
-	st.d.Eng.SetUploadLimitBytesPerSec(ulKiB * 1024)
-	st.d.Eng.SetDownloadLimitBytesPerSec(dlKiB * 1024)
-	dialog.ShowInformation("Saved",
-		fmt.Sprintf("Upload: %s KiB/s\nDownload: %s KiB/s",
-			limitDisplay(ulKiB), limitDisplay(dlKiB)), st.win())
-}
-
-// parseKiB accepts an empty string (= 0) or a non-negative integer
-// count of KiB/s. Returns the parsed value in KiB/s.
-func parseKiB(s string) (int64, error) {
-	s = strings.TrimSpace(s)
+func orDash(s string) string {
 	if s == "" {
-		return 0, nil
+		return "-"
 	}
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("must be a whole number")
-	}
-	if v < 0 {
-		return 0, fmt.Errorf("must be ≥ 0")
-	}
-	return v, nil
+	return s
 }
 
-func kibStr(bytesPerSec int64) string {
-	if bytesPerSec <= 0 {
-		return "0"
+func (se *settingsTab) window() fyne.Window {
+	if se.win != nil {
+		return se.win()
 	}
-	return strconv.FormatInt(bytesPerSec/1024, 10)
+	return nil
 }
 
-func limitDisplay(kib int64) string {
-	if kib == 0 {
-		return "unlimited"
-	}
-	return strconv.FormatInt(kib, 10)
-}
-
-func (st *settingsTab) loadCurrent() {
-	sw := st.d.Eng.SwarmSearch()
-	if sw == nil {
-		return
-	}
-	caps := sw.Capabilities()
-	switch caps.ShareLocal {
-	case 0:
-		st.shareRadio.SetSelected(shareLevels[0])
-	case 1:
-		st.shareRadio.SetSelected(shareLevels[1])
-	default:
-		st.shareRadio.SetSelected(shareLevels[2])
-	}
-	st.fileHitsChk.SetChecked(caps.FileHits == 1)
-	st.contentChk.SetChecked(caps.ContentHits == 1)
-}
-
-func (st *settingsTab) save() {
-	sw := st.d.Eng.SwarmSearch()
-	if sw == nil {
-		return
-	}
-
-	var shareLocal int
-	switch st.shareRadio.Selected {
-	case shareLevels[0]:
-		shareLocal = 0
-	case shareLevels[1]:
-		shareLocal = 1
-	case shareLevels[2]:
-		shareLocal = 2
-	}
-
-	caps := swarmsearch.Capabilities{
-		ShareLocal:  shareLocal,
-		FileHits:    boolInt(st.fileHitsChk.Checked),
-		ContentHits: boolInt(st.contentChk.Checked),
-	}
-	sw.SetCapabilities(caps)
-
-	dialog.ShowInformation("Saved", "Sharing capabilities updated", st.win())
-}
-
-func (st *settingsTab) win() fyne.Window { return windowForObject(st.content) }
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "enabled"
-	}
-	return "disabled"
-}
-
-func portStr(p int) string {
-	if p == 0 {
-		return "OS-assigned"
-	}
-	return fmt.Sprintf("%d", p)
-}
+var _ = fmt.Sprintf

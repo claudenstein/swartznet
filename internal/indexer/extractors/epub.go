@@ -10,21 +10,20 @@ import (
 	"strings"
 )
 
-// EPUBExtractor extracts text from EPUB ebooks. EPUB is a ZIP
-// archive containing XHTML files plus a small amount of metadata
-// (OPF spine + NCX/nav table of contents). For full-text search we
-// only need the XHTML body content of every chapter.
+// EPUBExtractor extracts text from EPUB ebooks. EPUB is a ZIP archive
+// containing XHTML files plus a small amount of metadata (OPF spine +
+// NCX/nav table of contents). For full-text search we only need the
+// XHTML body content of every chapter.
 //
 // The implementation deliberately ignores the OPF spine and just
 // iterates every .xhtml/.html/.htm file in the archive in lexical
-// order. Reading order is wrong for human consumption (chapters
-// might be out of sequence) but completely irrelevant to a
-// keyword index — and avoiding the OPF parser keeps the extractor
-// to ~80 lines of pure stdlib + golang.org/x/net/html.
+// order. Reading order is wrong for human consumption (chapters might
+// be out of sequence) but completely irrelevant to a keyword index —
+// and avoiding the OPF parser keeps the extractor to pure stdlib +
+// golang.org/x/net/html.
 //
-// Encrypted DRM-protected EPUBs (Adobe DE, B&N, Kindle/MOBI) are
-// not supported and will produce empty or garbage text. The
-// extractor handles them by returning nil chunks rather than
+// Encrypted DRM-protected EPUBs are not supported and will produce
+// empty or garbage text; the extractor returns nil chunks rather than
 // erroring.
 type EPUBExtractor struct{}
 
@@ -88,8 +87,24 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 	})
 
 	var combined strings.Builder
+	// decompressBudget bounds the TOTAL decompressed bytes read across ALL
+	// chapters, charged by bytes CONSUMED (not by output text). The per-chapter
+	// output budget alone is insufficient: a chapter that decompresses gigabytes
+	// but emits ZERO visible text (e.g. a huge <script> body) never grows
+	// `combined`, so an output-only budget stays full for every chapter and a
+	// crafted book of such chapters drives ~1000x total decompression (a CPU/time
+	// DoS + a leaked, still-decompressing extract goroutine).
+	decompressBudget := int64(maxEpubTotalDecompress)
 	for _, f := range chapters {
-		text, err := extractChapter(f)
+		remaining := int64(maxDocTextBytes) - int64(combined.Len())
+		if remaining <= 0 {
+			break // output budget exhausted; index what we have
+		}
+		if decompressBudget <= 0 {
+			break // total-decompression budget exhausted (a zero-text bomb)
+		}
+		text, consumed, err := extractChapter(f, remaining, decompressBudget)
+		decompressBudget -= consumed
 		if err != nil {
 			// One bad chapter does not poison the rest of the book.
 			continue
@@ -107,15 +122,39 @@ func (e *EPUBExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 	return chunkText(combined.String(), DefaultChunkTargetBytes), nil
 }
 
-// extractChapter opens one zip entry, runs it through the shared
-// HTML text extractor, and returns the visible text.
-func extractChapter(f *zip.File) (string, error) {
+// extractChapter opens one zip entry, runs it through the shared HTML text
+// extractor, and returns the visible text AND the number of decompressed bytes
+// consumed. The chapter's decompression is bounded by the TIGHTER of maxOut (the
+// remaining output budget) and maxDecompress (the remaining shared total-
+// decompression budget), so a chapter that emits no text still depletes the
+// shared budget by what it decompressed (f.Open hands back a raw deflate reader,
+// so without a limit a bomb chapter buffers its whole decompressed body).
+func extractChapter(f *zip.File, maxOut, maxDecompress int64) (string, int64, error) {
 	rc, err := f.Open()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer rc.Close()
-	return extractHTMLText(rc)
+	limit := maxOut
+	if maxDecompress < limit {
+		limit = maxDecompress
+	}
+	counter := &countingReader{r: io.LimitReader(rc, limit)}
+	text, err := extractHTMLText(counter, maxOut)
+	return text, counter.n, err
+}
+
+// countingReader tallies bytes read so a caller can charge decompressed bytes to
+// a shared budget even when the parser discards them (produces no output).
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // isXHTMLChapter reports whether a zip entry is a candidate
@@ -138,15 +177,12 @@ func isXHTMLChapter(name string) bool {
 	return false
 }
 
-// init registers the EPUB extractor in the dispatch table for the
-// canonical EPUB MIME type. Two .epub MIME aliases are accepted in
-// the wild; we cover both.
-func init() {
-	Register(NewEPUBExtractor(), func(mime string, c Candidate) bool {
-		switch mime {
-		case "application/epub+zip", "application/epub":
-			return true
-		}
-		return false
-	})
+// claimsEPUB claims the canonical EPUB MIME type plus the shorter
+// alias seen in the wild. No size gate; Extract caps its own input.
+func claimsEPUB(mime string, c Candidate) bool {
+	switch mime {
+	case "application/epub+zip", "application/epub":
+		return true
+	}
+	return false
 }

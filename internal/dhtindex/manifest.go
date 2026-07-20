@@ -9,47 +9,37 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/swartznet/swartznet/contracts/dhtschema"
 )
 
-// Manifest is the persistent record of every (publisher, keyword)
-// entry this node has published, plus the hits that live inside it.
-// It exists so a fresh process can:
-//
-//   - resume publishing without losing the old hit list (BEP-44
-//     does not let you incrementally update; we hold the full hit
-//     list locally and re-publish the whole value on every change),
-//   - run a periodic refresh ticker (every BEP-44 entry expires
-//     after 2h without re-announcement, so we re-publish hourly),
-//   - report status to the user via `swartznet publish status`
-//     in M4f.
-//
-// The on-disk form is JSON; we accept the size overhead in exchange
-// for forward-compatible reads if the schema picks up new fields.
+// Manifest is the persistent record of every keyword this node publishes, plus
+// the hits inside each. BEP-44 has no incremental update, so the full hit list
+// is held locally and the whole value is re-published on every change; the
+// refresh ticker re-announces before the 2h expiry. The on-disk form is JSON
+// (forward-compatible reads over a compact wire).
 type Manifest struct {
 	mu sync.Mutex
 
 	// path is the on-disk path; empty for in-memory test manifests.
 	path string
 
-	// Entries is the keyword → ManifestEntry map. Exposed (lower-
-	// case keys) for direct test inspection.
+	// Entries is the keyword → *ManifestEntry map. Exported for test
+	// inspection; every present key maps to a non-nil entry post-load.
 	Entries map[string]*ManifestEntry `json:"entries"`
 }
 
-// ManifestEntry is one (publisher, keyword) record. The Hits slice
-// is the full set we last published; the publisher rewrites it
-// in-memory and re-publishes when a torrent is added or removed.
+// ManifestEntry is one keyword's published state.
 type ManifestEntry struct {
-	Hits          []KeywordHit `json:"hits"`
-	LastPublished time.Time    `json:"last_published"`
-	LastError     string       `json:"last_error,omitempty"`
-	PublishCount  int          `json:"publish_count"`
+	Hits          []dhtschema.KeywordHit `json:"hits"`
+	LastPublished time.Time              `json:"last_published"`
+	LastError     string                 `json:"last_error,omitempty"`
+	PublishCount  int                    `json:"publish_count"`
 }
 
-// LoadOrCreateManifest reads a manifest from disk if it exists,
-// otherwise returns an empty manifest bound to the same path so the
-// next Save persists to that location. Pass an empty path for an
-// in-memory test manifest.
+// LoadOrCreateManifest reads a manifest if it exists, else returns an empty one
+// bound to path so the next Save persists there. An empty path yields an
+// in-memory manifest (Save is a no-op).
 func LoadOrCreateManifest(path string) (*Manifest, error) {
 	m := &Manifest{path: path, Entries: make(map[string]*ManifestEntry)}
 	if path == "" {
@@ -71,10 +61,8 @@ func LoadOrCreateManifest(path string) (*Manifest, error) {
 	if m.Entries == nil {
 		m.Entries = make(map[string]*ManifestEntry)
 	}
-	// Normalise: a hand-edited or truncated manifest can contain
-	// JSON null under a valid key, which decodes to a nil pointer.
-	// Drop those so the in-memory invariant "every key maps to a
-	// non-nil entry" holds for every subsequent method.
+	// Drop JSON-null entries (a hand-edited or truncated file) so the
+	// "every key maps to a non-nil entry" invariant holds.
 	for k, v := range m.Entries {
 		if v == nil {
 			delete(m.Entries, k)
@@ -84,8 +72,8 @@ func LoadOrCreateManifest(path string) (*Manifest, error) {
 	return m, nil
 }
 
-// Save serialises the manifest to disk. No-op for in-memory test
-// manifests (empty path). Atomic via tempfile + rename.
+// Save serialises the manifest atomically (tempfile + rename). No-op for an
+// in-memory manifest.
 func (m *Manifest) Save() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,42 +91,29 @@ func (m *Manifest) Save() error {
 		return fmt.Errorf("dhtindex: write manifest tmp: %w", err)
 	}
 	if err := os.Rename(tmp, m.path); err != nil {
-		// Clean up so repeated rename failures (e.g. EXDEV,
-		// ENOSPC) don't accumulate orphan *.tmp files next to
-		// the real manifest.
 		_ = os.Remove(tmp)
 		return fmt.Errorf("dhtindex: rename manifest: %w", err)
 	}
 	return nil
 }
 
-// AddHit appends or updates a hit under the given keyword. If the
-// infohash is already in the entry's Hits list, the existing entry
-// is replaced (so seeder counts and names stay fresh). Returns the
-// number of total hits in the entry after the update.
-//
-// AddHit is responsible for keeping the encoded entry size below
-// MaxValueBytes; if adding the hit would push the encoded value
-// past the cap, the oldest hit is evicted to make room.
-func (m *Manifest) AddHit(keyword string, hit KeywordHit) (totalHits int, err error) {
+// AddHit appends or updates a hit under keyword. A hit with a matching
+// infohash is replaced (so seeders/name stay fresh). AddHit keeps the encoded
+// entry under MaxValueBytes by evicting the OLDEST hit while the estimated
+// encoded size would exceed the cap — a replacement can be larger than what it
+// displaced, so eviction runs even without a net count change. Returns the hit
+// count after the update.
+func (m *Manifest) AddHit(keyword string, hit dhtschema.KeywordHit) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if keyword == "" {
 		return 0, errors.New("dhtindex: empty keyword")
 	}
 	entry, ok := m.Entries[keyword]
-	// A hand-edited or truncated on-disk manifest can decode to
-	// Entries[k] == nil (JSON null under a valid key). Treat that
-	// the same as "no entry" rather than nil-panic on access below.
 	if !ok || entry == nil {
 		entry = &ManifestEntry{}
 		m.Entries[keyword] = entry
 	}
-	// Replace any existing hit with the same infohash. Fall
-	// through to the eviction loop afterwards — a replacement
-	// can be *larger* than what it displaced (longer name,
-	// richer metadata), so the entry can still end up past
-	// MaxValueBytes even without a net hit-count change.
 	replaced := false
 	for i, h := range entry.Hits {
 		if string(h.IH) == string(hit.IH) {
@@ -150,45 +125,32 @@ func (m *Manifest) AddHit(keyword string, hit KeywordHit) (totalHits int, err er
 	if !replaced {
 		entry.Hits = append(entry.Hits, hit)
 	}
-
-	// Eviction loop: drop the oldest hit while the encoded form
-	// would exceed the cap.
-	for len(entry.Hits) > 0 && EstimateValueSize(KeywordValue{Hits: entry.Hits}) > MaxValueBytes {
+	// Evict the oldest hits until the value fits — but NEVER drop the last hit.
+	// A single over-cap hit means a pathologically long cached name; truncate the
+	// name to fit rather than leaving an empty list, which would publish a useless
+	// empty BEP-44 item and make the torrent undiscoverable under its own keyword.
+	for len(entry.Hits) > 1 && dhtschema.EstimateValueSize(dhtschema.KeywordValue{Hits: entry.Hits}) > dhtschema.MaxValueBytes {
 		entry.Hits = entry.Hits[1:]
+	}
+	if len(entry.Hits) == 1 {
+		entry.Hits[0] = fitHitToCap(entry.Hits[0])
 	}
 	return len(entry.Hits), nil
 }
 
-// RemoveHit drops a hit by infohash. No-op if the keyword or hit is
-// absent. If the removal empties the entry's Hits slice, the keyword
-// is dropped from the manifest entirely so refreshAll() doesn't keep
-// re-publishing an empty value forever — and so the manifest doesn't
-// grow without bound for a long-running publisher that adds and
-// removes torrents over time.
-func (m *Manifest) RemoveHit(keyword string, infohash []byte) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	entry, ok := m.Entries[keyword]
-	if !ok || entry == nil {
-		return
+// fitHitToCap trims a hit's cached name until a single-hit KeywordValue fits
+// under the BEP-44 size cap. An infohash-only hit (empty name) is tiny, so this
+// always converges to a publishable, still-discoverable hit.
+func fitHitToCap(h dhtschema.KeywordHit) dhtschema.KeywordHit {
+	for len(h.N) > 0 && dhtschema.EstimateValueSize(dhtschema.KeywordValue{Hits: []dhtschema.KeywordHit{h}}) > dhtschema.MaxValueBytes {
+		h.N = h.N[:len(h.N)*3/4] // shrink ~25% per pass; converges in a few steps
 	}
-	out := entry.Hits[:0]
-	for _, h := range entry.Hits {
-		if string(h.IH) != string(infohash) {
-			out = append(out, h)
-		}
-	}
-	entry.Hits = out
-	if len(entry.Hits) == 0 {
-		delete(m.Entries, keyword)
-	}
+	return h
 }
 
-// RemoveAllHits scrubs the given infohash from every keyword entry in
-// the manifest. Empty entries left behind are dropped. Returns the
-// number of keyword entries touched (i.e. that contained the infohash
-// and had it removed). Used by the engine when a torrent is removed
-// so its hits stop being republished on the next refresh tick.
+// RemoveAllHits scrubs infohash from every keyword. Emptied entries are dropped
+// so refresh never re-announces an empty value and the manifest stays bounded
+// for a long-running publisher. Returns the number of keyword entries touched.
 func (m *Manifest) RemoveAllHits(infohash []byte) int {
 	if len(infohash) == 0 {
 		return 0
@@ -221,20 +183,17 @@ func (m *Manifest) RemoveAllHits(infohash []byte) int {
 	return touched
 }
 
-// Snapshot returns a deep copy of every entry. Used by the
-// publisher worker so it can iterate without holding the lock for
-// the entire put traversal.
+// Snapshot returns a deep copy of every entry so the publisher worker can
+// iterate without holding the lock across a put traversal.
 func (m *Manifest) Snapshot() map[string]*ManifestEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make(map[string]*ManifestEntry, len(m.Entries))
 	for k, v := range m.Entries {
 		if v == nil {
-			// Skip null entries from a hand-edited or truncated
-			// on-disk manifest rather than nil-panic.
 			continue
 		}
-		hits := make([]KeywordHit, len(v.Hits))
+		hits := make([]dhtschema.KeywordHit, len(v.Hits))
 		copy(hits, v.Hits)
 		out[k] = &ManifestEntry{
 			Hits:          hits,
@@ -246,37 +205,30 @@ func (m *Manifest) Snapshot() map[string]*ManifestEntry {
 	return out
 }
 
-// MarkPublished records that the entry for keyword was successfully
-// published at the given time. The publish counter is incremented
-// and any prior LastError is cleared.
+// MarkPublished records a successful publish: sets LastPublished, clears
+// LastError, bumps PublishCount.
 func (m *Manifest) MarkPublished(keyword string, when time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry, ok := m.Entries[keyword]
-	if !ok || entry == nil {
-		return
+	if entry, ok := m.Entries[keyword]; ok && entry != nil {
+		entry.LastPublished = when
+		entry.LastError = ""
+		entry.PublishCount++
 	}
-	entry.LastPublished = when
-	entry.LastError = ""
-	entry.PublishCount++
 }
 
-// MarkFailed records that the most recent publish attempt failed.
-// PublishCount is not incremented.
+// MarkFailed records the most recent publish failure without bumping
+// PublishCount (so a stuck keyword does not look "published").
 func (m *Manifest) MarkFailed(keyword string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry, ok := m.Entries[keyword]
-	if !ok || entry == nil {
-		return
-	}
-	if err != nil {
+	if entry, ok := m.Entries[keyword]; ok && entry != nil && err != nil {
 		entry.LastError = err.Error()
 	}
 }
 
-// Keywords returns a sorted slice of every keyword in the manifest.
-// Useful for stable iteration in tests and for `publish status`.
+// Keywords returns a sorted slice of every keyword. Stable iteration for tests
+// and status.
 func (m *Manifest) Keywords() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()

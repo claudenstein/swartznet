@@ -2,9 +2,9 @@ package companion
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -14,59 +14,11 @@ import (
 	"github.com/swartznet/swartznet/internal/indexer"
 )
 
-// PointerGetter is the narrow interface companion.Subscriber needs
-// from a BEP-44 mutable-item get implementation. The
-// dhtindex.AnacrolixGetter satisfies it via GetInfohashPointer.
-//
-// Defined as a local interface so the companion package keeps no
-// hard dependency on internal/dhtindex.
-type PointerGetter interface {
-	GetInfohashPointer(ctx context.Context, pubkey [32]byte, salt []byte) ([20]byte, error)
-}
-
-// CompanionFetcher is the narrow interface companion.Subscriber
-// needs from the engine in order to download a companion-index
-// torrent given only its infohash. Implementations should:
-//
-//  1. Add the infohash to the engine (e.g. AddInfoHash).
-//  2. Wait for metadata to arrive over the swarm.
-//  3. Wait for the (single) file inside the torrent to fully
-//     download.
-//  4. Return the absolute on-disk path to that file.
-//
-// The provided ctx may be cancelled at any time; the fetcher
-// should respect cancellation and return ctx.Err().
-//
-// The engine.Engine.FetchCompanionTorrent method satisfies this
-// interface.
-type CompanionFetcher interface {
-	FetchCompanionTorrent(ctx context.Context, infohash [20]byte) (path string, err error)
-}
-
-// Ingester is the narrow interface the subscriber needs to write
-// imported records into the local index. *indexer.Index satisfies
-// it directly via IndexTorrent and IndexContent. The interface
-// exists so the unit tests can supply an in-memory recorder
-// without spinning up a Bleve directory.
-type Ingester interface {
-	IndexTorrent(doc indexer.TorrentDoc) error
-	IndexContent(doc indexer.ContentDoc) error
-}
-
-// SubscriberOptions tunes how the subscriber behaves. The defaults
-// are sensible for a normal desktop install.
+// SubscriberOptions tunes the subscriber.
 type SubscriberOptions struct {
-	// FetchTimeout bounds a single companion-torrent download.
-	// Default: 5 minutes. Companion JSONs are typically a few MB
-	// so this is generous; tune up if you publish very large
-	// indexes.
-	FetchTimeout time.Duration
-	// PointerTimeout bounds a single BEP-44 get traversal.
-	// Default: 30s.
-	PointerTimeout time.Duration
-	// Interval is how often the worker re-syncs every followed
-	// publisher. Default: 1 hour.
-	Interval time.Duration
+	FetchTimeout   time.Duration // bounds one companion download; default 5m
+	PointerTimeout time.Duration // bounds one BEP-44 get traversal; default 30s
+	Interval       time.Duration // worker re-sync period; default 1h
 }
 
 // DefaultSubscriberOptions returns the production defaults.
@@ -78,55 +30,41 @@ func DefaultSubscriberOptions() SubscriberOptions {
 	}
 }
 
-// SyncResult is the per-publisher outcome of a single Sync call.
-// Returned to the caller (and recorded on the worker for status
-// reporting) so the GUI can show what was imported and when.
+// SyncResult is the outcome of one Sync.
 type SyncResult struct {
-	// Publisher is the 64-char hex form of the publisher's
-	// ed25519 public key.
-	Publisher string
-	// PointerInfoHash is the infohash that the BEP-46 pointer
-	// resolved to. Empty when the pointer fetch failed.
-	PointerInfoHash [20]byte
-	// TorrentsImported is the number of TorrentRecord rows that
-	// were written to the local index.
+	Publisher        string   // 64-hex followed pubkey
+	PointerInfoHash  [20]byte // zero on pointer failure
 	TorrentsImported int
-	// ContentImported is the number of ContentChunk rows that
-	// were written to the local index.
-	ContentImported int
-	// GeneratedAt is the publisher-side timestamp from the
-	// imported snapshot. Used by the worker to skip duplicate
-	// imports of an unchanged snapshot.
-	GeneratedAt int64
-	// Err is non-nil if any step failed.
-	Err error
+	ContentImported  int
+	GeneratedAt      int64 // publisher-side snapshot ts; 0 unless decode succeeded
+	Deduped          bool  // true when an unchanged snapshot was skipped
+	Err              error
 }
 
-// Subscriber is the read-side of the F3 companion-index story.
-// It resolves the BEP-46 pointer published at salt
-// SaltContentIndex by a given publisher, downloads the wrapping
-// torrent, decodes the gzipped JSON payload, and ingests every
-// record into the local index.
-//
-// Subscriber holds no state of its own; the periodic worker is
-// SubscriberWorker.
+// Subscriber resolves a followed publisher's companion pointer, fetches the
+// .torrent FAIL-CLOSED, VERIFIES the snapshot was authored by the followed
+// publisher, dedups by GeneratedAt, and imports records stamped with the
+// followed pubkey. It never imports internal/dhtindex or internal/engine.
 type Subscriber struct {
 	getter   PointerGetter
 	fetcher  CompanionFetcher
 	ingester Ingester
 	opts     SubscriberOptions
 	log      *slog.Logger
+
+	mu       sync.Mutex
+	imported map[[32]byte]int64    // pubkey → last successfully-imported GeneratedAt
+	lastIH   map[[32]byte][20]byte // pubkey → last successfully-imported companion infohash
+	// epoch counts Forget calls per pubkey. A Sync captures the epoch when it
+	// starts and only commits its dedup state if the epoch is unchanged at the
+	// end — so an Unfollow (Forget) that races an in-flight Sync is never
+	// resurrected by that Sync's late write. Never deleted (keeping it monotonic
+	// avoids a re-follow colliding with a still-in-flight older Sync's snapshot).
+	epoch map[[32]byte]uint64
 }
 
-// NewSubscriber constructs a Subscriber. Returns an error if any
-// collaborator is nil.
-func NewSubscriber(
-	getter PointerGetter,
-	fetcher CompanionFetcher,
-	ingester Ingester,
-	opts SubscriberOptions,
-	log *slog.Logger,
-) (*Subscriber, error) {
+// NewSubscriber validates its ports and defaults its options.
+func NewSubscriber(getter PointerGetter, fetcher CompanionFetcher, ingester Ingester, opts SubscriberOptions, log *slog.Logger) (*Subscriber, error) {
 	if getter == nil {
 		return nil, errors.New("companion: nil pointer getter")
 	}
@@ -154,23 +92,25 @@ func NewSubscriber(
 		ingester: ingester,
 		opts:     opts,
 		log:      log,
+		imported: make(map[[32]byte]int64),
+		lastIH:   make(map[[32]byte][20]byte),
+		epoch:    make(map[[32]byte]uint64),
 	}, nil
 }
 
-// Sync runs one full pipeline pass for a single publisher:
-//  1. Resolve the BEP-46 pointer at (pubkey, SaltContentIndex).
-//  2. Fetch the underlying companion torrent.
-//  3. Read + decode the JSON payload.
-//  4. Ingest every record into the local index.
-//
-// Returns a SyncResult describing the outcome. The result is
-// always populated even on failure (with Publisher set and Err
-// non-nil) so callers can record it without doing nil checks.
+// Sync runs the full pipeline for one followed publisher. res is populated even
+// on failure (callers never nil-check).
 func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
-	pubHex := hexEncode(pubkey[:])
+	pubHex := hex.EncodeToString(pubkey[:])
 	res := SyncResult{Publisher: pubHex}
 
-	// Step 1: pointer.
+	// Snapshot the Forget epoch at the start. Any dedup-state commit below is
+	// suppressed if this changes mid-Sync (an Unfollow raced us), so an in-flight
+	// Sync never resurrects state for a publisher we no longer follow.
+	s.mu.Lock()
+	startEpoch := s.epoch[pubkey]
+	s.mu.Unlock()
+
 	getCtx, cancel := context.WithTimeout(ctx, s.opts.PointerTimeout)
 	ih, err := s.getter.GetInfohashPointer(getCtx, pubkey, []byte(SaltContentIndex))
 	cancel()
@@ -180,7 +120,19 @@ func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 	}
 	res.PointerInfoHash = ih
 
-	// Step 2: torrent download.
+	// Dedup on the pointer infohash BEFORE fetching: an unchanged pointer
+	// (publisher offline, or a re-sync within the interval) needs no re-fetch.
+	// The companion payload's GeneratedAt changes the infohash whenever content
+	// changes, so a changed pointer means new content worth fetching.
+	s.mu.Lock()
+	prevIH, seenIH := s.lastIH[pubkey]
+	s.mu.Unlock()
+	if seenIH && prevIH == ih {
+		res.Deduped = true
+		s.log.Debug("companion.subscriber.deduped_pointer", "publisher", pubHex)
+		return res
+	}
+
 	fetchCtx, cancel := context.WithTimeout(ctx, s.opts.FetchTimeout)
 	path, err := s.fetcher.FetchCompanionTorrent(fetchCtx, ih)
 	cancel()
@@ -189,7 +141,6 @@ func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 		return res
 	}
 
-	// Step 3 + 4: decode + ingest.
 	idx, err := s.decodeFile(path)
 	if err != nil {
 		res.Err = fmt.Errorf("decode %s: %w", path, err)
@@ -197,39 +148,74 @@ func (s *Subscriber) Sync(ctx context.Context, pubkey [32]byte) SyncResult {
 	}
 	res.GeneratedAt = idx.GeneratedAt
 
-	tCount, cCount, err := s.ingest(idx)
+	// FIX (§6): the snapshot MUST be authored by the publisher we follow. A
+	// pointer/infohash swap or a snapshot signed by a different key is rejected
+	// BEFORE any record touches the local index.
+	if strings.ToLower(idx.Publisher) != pubHex {
+		res.Err = fmt.Errorf("publisher mismatch: snapshot authored by %q, following %q", idx.Publisher, pubHex)
+		return res
+	}
+
+	// The pointer-infohash dedup above already skips an UNCHANGED snapshot, so a
+	// changed infohash here means genuinely new content. Only guard against a
+	// ROLLBACK/replay — a new pointer to an OLDER snapshot (GeneratedAt regressed)
+	// — and, crucially, still advance lastIH on that reject so we don't re-fetch
+	// the same infohash every interval. (The old code used `prev == GeneratedAt`,
+	// which dropped new content whenever the publisher reused a timestamp and
+	// NEVER advanced lastIH — a permanent freeze + unbounded per-interval refetch.)
+	s.mu.Lock()
+	prev, ok := s.imported[pubkey]
+	s.mu.Unlock()
+	if ok && idx.GeneratedAt != 0 && idx.GeneratedAt < prev {
+		res.Deduped = true
+		s.commitDedup(pubkey, startEpoch, 0, ih, false)
+		s.log.Debug("companion.subscriber.rollback_ignored", "publisher", pubHex,
+			"generated_at", idx.GeneratedAt, "last_imported", prev)
+		return res
+	}
+
+	tCount, cCount, err := s.ingest(pubHex, idx)
 	res.TorrentsImported = tCount
 	res.ContentImported = cCount
 	if err != nil {
 		res.Err = fmt.Errorf("ingest: %w", err)
 		return res
 	}
-	s.log.Info("companion.subscriber.synced",
-		"publisher", pubHex,
-		"infohash", fmt.Sprintf("%x", ih),
-		"torrents_imported", tCount,
-		"content_imported", cCount,
-	)
+	s.commitDedup(pubkey, startEpoch, idx.GeneratedAt, ih, true)
+	s.log.Info("companion.subscriber.synced", "publisher", pubHex,
+		"infohash", fmt.Sprintf("%x", ih), "torrents_imported", tCount, "content_imported", cCount)
 	return res
 }
 
-// IngestReader decodes a companion payload from the given reader
-// and writes its records to the local index. Exposed so callers
-// who already have an io.Reader (e.g. an in-process test) can
-// skip the file path step. Returns the parsed CompanionIndex
-// alongside per-record counts.
-func (s *Subscriber) IngestReader(r io.Reader) (CompanionIndex, int, int, error) {
-	idx, err := Decode(r)
-	if err != nil {
-		return CompanionIndex{}, 0, 0, fmt.Errorf("decode: %w", err)
-	}
-	tCount, cCount, err := s.ingest(idx)
-	return idx, tCount, cCount, err
+// Forget drops a publisher's dedup state (last imported GeneratedAt + last
+// pointer infohash) so an Unfollow does not leak these maps for the daemon's
+// whole lifetime. A later refollow starts fresh.
+func (s *Subscriber) Forget(pubkey [32]byte) {
+	s.mu.Lock()
+	delete(s.imported, pubkey)
+	delete(s.lastIH, pubkey)
+	s.epoch[pubkey]++ // invalidate any in-flight Sync's pending dedup commit
+	s.mu.Unlock()
 }
 
-// decodeFile opens the on-disk file at path and runs Decode on
-// it. The file must be the gzipped JSON payload (not the
-// wrapping torrent).
+// commitDedup records dedup state for pubkey after a successful import (or a
+// rollback-reject, which advances only lastIH). It NO-OPs when a Forget bumped
+// the epoch since the Sync began — an Unfollow that raced this Sync must win, so
+// the maps are not resurrected for a publisher we no longer follow. Returns
+// false when the commit was suppressed.
+func (s *Subscriber) commitDedup(pubkey [32]byte, startEpoch uint64, generatedAt int64, ih [20]byte, setImported bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epoch[pubkey] != startEpoch {
+		return false
+	}
+	if setImported {
+		s.imported[pubkey] = generatedAt
+	}
+	s.lastIH[pubkey] = ih
+	return true
+}
+
 func (s *Subscriber) decodeFile(path string) (CompanionIndex, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -239,28 +225,30 @@ func (s *Subscriber) decodeFile(path string) (CompanionIndex, error) {
 	return Decode(f)
 }
 
-// ingest writes every record in idx into the local indexer.Index.
-// Returns the number of TorrentDoc and ContentDoc rows written
-// (separately, since each can fail independently).
-//
-// Records that fail validation (empty infohash, empty content
-// text) are skipped with a debug log. The first hard error
-// (e.g. index closed) aborts the loop and is returned.
-func (s *Subscriber) ingest(idx CompanionIndex) (int, int, error) {
-	var (
-		torrents int
-		contents int
-	)
+// IngestReader is a test/in-process shortcut: decode then ingest, stamping
+// SignedBy with pubHex. It performs NO publisher verification or dedup (those
+// live in Sync) — callers pass the pubkey hex they intend to stamp.
+func (s *Subscriber) IngestReader(pubHex string, r interface{ Read([]byte) (int, error) }) (CompanionIndex, int, int, error) {
+	idx, err := Decode(r)
+	if err != nil {
+		return idx, 0, 0, fmt.Errorf("decode: %w", err)
+	}
+	t, c, err := s.ingest(pubHex, idx)
+	return idx, t, c, err
+}
+
+// ingest imports the snapshot into the local index, STAMPING every torrent doc
+// with SignedBy = the followed pubkey (§6 fix). The first hard write error
+// aborts and is returned with partial counts; validation-skips (bad infohash,
+// empty text) do not abort.
+func (s *Subscriber) ingest(pubHex string, idx CompanionIndex) (torrents, contents int, err error) {
 	for _, tr := range idx.Torrents {
 		ih := strings.ToLower(tr.InfoHash)
 		if len(ih) != 40 {
-			s.log.Debug("companion.subscriber.skip_torrent",
-				"reason", "bad infohash",
-				"infohash", ih,
-			)
+			s.log.Debug("companion.subscriber.skip_torrent", "reason", "bad infohash", "infohash", ih)
 			continue
 		}
-		paths := make([]string, 0, len(tr.Files))
+		var paths []string
 		for _, f := range tr.Files {
 			if f.Path != "" {
 				paths = append(paths, f.Path)
@@ -272,15 +260,26 @@ func (s *Subscriber) ingest(idx CompanionIndex) (int, int, error) {
 			SizeBytes: tr.Size,
 			FilePaths: paths,
 			FileCount: len(paths),
+			SignedBy:  pubHex,
+			// The snapshot proves the publisher authored the LIST, not that it
+			// signed this torrent — never hijack an existing different attribution.
+			PreserveExistingSigner: true,
 		}
 		if tr.AddedAt > 0 {
 			td.AddedAt = time.Unix(tr.AddedAt, 0).UTC()
 		}
 		if err := s.ingester.IndexTorrent(td); err != nil {
+			if errors.Is(err, indexer.ErrForeignTorrent) {
+				// The node already attributes this torrent to a different
+				// publisher — the snapshot proves the publisher authored the LIST,
+				// not that it owns this torrent. Skip it entirely (metadata AND
+				// content); do not count it and do not fail the whole sync.
+				s.log.Debug("companion.subscriber.skip_foreign_torrent", "publisher", pubHex, "infohash", ih)
+				continue
+			}
 			return torrents, contents, fmt.Errorf("index torrent %s: %w", ih, err)
 		}
 		torrents++
-
 		for _, fr := range tr.Files {
 			for ci, ch := range fr.Chunks {
 				if ch.Text == "" {
@@ -295,203 +294,15 @@ func (s *Subscriber) ingest(idx CompanionIndex) (int, int, error) {
 					Extractor:  fr.Extractor,
 					Text:       ch.Text,
 					ChunkIndex: ci,
+					// Never overwrite the node's own locally-extracted content.
+					PreserveExisting: true,
 				}
 				if err := s.ingester.IndexContent(cd); err != nil {
-					return torrents, contents, fmt.Errorf("index content %s/%d/%d: %w",
-						ih, fr.Index, ci, err)
+					return torrents, contents, fmt.Errorf("index content %s/%d/%d: %w", ih, fr.Index, ci, err)
 				}
 				contents++
 			}
 		}
 	}
 	return torrents, contents, nil
-}
-
-// SubscriberWorker is the long-running periodic worker that
-// re-syncs every followed publisher every Interval. Construct via
-// NewSubscriberWorker and call Start; tear down via Stop.
-//
-// Followed publishers are identified by their 32-byte ed25519
-// pubkey and added/removed via Follow / Unfollow. The worker
-// holds no on-disk state; the caller is responsible for
-// persisting the follow list across restarts (typically into a
-// JSON file under ~/.local/share/swartznet).
-//
-// Concurrent-safe.
-type SubscriberWorker struct {
-	sub *Subscriber
-
-	mu        sync.Mutex
-	follows   map[[32]byte]string // pubkey → human label
-	lastSync  map[[32]byte]SyncResult
-	stopCh    chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
-	trigger   chan struct{}
-	interval  time.Duration
-	totalRuns int
-}
-
-// NewSubscriberWorker constructs a worker around an existing
-// Subscriber. The worker takes its Interval from the
-// Subscriber's options.
-func NewSubscriberWorker(sub *Subscriber) (*SubscriberWorker, error) {
-	if sub == nil {
-		return nil, errors.New("companion: nil subscriber")
-	}
-	return &SubscriberWorker{
-		sub:      sub,
-		follows:  make(map[[32]byte]string),
-		lastSync: make(map[[32]byte]SyncResult),
-		stopCh:   make(chan struct{}),
-		trigger:  make(chan struct{}, 1),
-		interval: sub.opts.Interval,
-	}, nil
-}
-
-// Follow adds a publisher to the worker's follow list. Label is a
-// human-readable name for status output. Calling Follow on an
-// already-followed publisher updates the label. Triggers a
-// background sync of the new publisher within a few moments.
-func (w *SubscriberWorker) Follow(pubkey [32]byte, label string) {
-	w.mu.Lock()
-	w.follows[pubkey] = label
-	w.mu.Unlock()
-	// Wake the worker so it picks up the new publisher promptly
-	// instead of waiting for the next tick.
-	select {
-	case w.trigger <- struct{}{}:
-	default:
-	}
-}
-
-// Unfollow removes a publisher from the worker's follow list.
-// In-flight syncs of that publisher are NOT cancelled — they
-// will run to completion and then be discarded.
-func (w *SubscriberWorker) Unfollow(pubkey [32]byte) {
-	w.mu.Lock()
-	delete(w.follows, pubkey)
-	delete(w.lastSync, pubkey)
-	w.mu.Unlock()
-}
-
-// Following returns a snapshot of the current follow list as
-// (pubkey, label) pairs.
-func (w *SubscriberWorker) Following() map[[32]byte]string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make(map[[32]byte]string, len(w.follows))
-	for k, v := range w.follows {
-		out[k] = v
-	}
-	return out
-}
-
-// LastSync returns the most-recent SyncResult for a publisher,
-// or zero value if the worker has not yet synced that
-// publisher.
-func (w *SubscriberWorker) LastSync(pubkey [32]byte) SyncResult {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.lastSync[pubkey]
-}
-
-// AllResults returns a snapshot of every recorded SyncResult.
-// Useful for /status output.
-func (w *SubscriberWorker) AllResults() []SyncResult {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make([]SyncResult, 0, len(w.lastSync))
-	for _, r := range w.lastSync {
-		out = append(out, r)
-	}
-	return out
-}
-
-// TotalRuns returns the number of full sync passes the worker
-// has performed since Start.
-func (w *SubscriberWorker) TotalRuns() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.totalRuns
-}
-
-// Start launches the worker goroutine. Idempotent — subsequent
-// calls are no-ops (guarded by a sync.Once).
-func (w *SubscriberWorker) Start() {
-	w.startOnce.Do(func() {
-		w.wg.Add(1)
-		go w.run()
-	})
-}
-
-// Stop signals the worker to finish its current sync pass and
-// exit, then waits for it. Idempotent.
-func (w *SubscriberWorker) Stop() {
-	w.stopOnce.Do(func() { close(w.stopCh) })
-	w.wg.Wait()
-}
-
-// run is the worker goroutine. Runs an initial sync pass on
-// startup, then re-syncs every interval until Stop is called.
-func (w *SubscriberWorker) run() {
-	defer w.wg.Done()
-	// A context tied to stopCh means an in-flight Sync gets
-	// cancelled the moment Stop is called. Without this, Stop
-	// could block for up to FetchTimeout (default 5 min) if the
-	// current Sync was mid-download.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		<-w.stopCh
-		cancel()
-	}()
-
-	w.runOnce(ctx)
-
-	tick := time.NewTicker(w.interval)
-	defer tick.Stop()
-	for {
-		select {
-		case <-w.stopCh:
-			return
-		case <-tick.C:
-			w.runOnce(ctx)
-		case <-w.trigger:
-			w.runOnce(ctx)
-		}
-	}
-}
-
-// runOnce syncs every followed publisher. Errors on individual
-// publishers are recorded on the worker state; they do not
-// abort the loop. The caller-supplied ctx is threaded into every
-// Subscriber.Sync call so Stop can short-circuit the downloader.
-func (w *SubscriberWorker) runOnce(ctx context.Context) {
-	w.mu.Lock()
-	pubs := make([][32]byte, 0, len(w.follows))
-	for k := range w.follows {
-		pubs = append(pubs, k)
-	}
-	w.mu.Unlock()
-
-	for _, pub := range pubs {
-		// Stop early if Stop was called between iterations.
-		select {
-		case <-w.stopCh:
-			return
-		default:
-		}
-		res := w.sub.Sync(ctx, pub)
-		w.mu.Lock()
-		// If the publisher's snapshot timestamp matches the
-		// last imported one, we still record the run but don't
-		// double-count it as new content.
-		w.lastSync[pub] = res
-		w.mu.Unlock()
-	}
-	w.mu.Lock()
-	w.totalRuns++
-	w.mu.Unlock()
 }

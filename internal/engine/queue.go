@@ -1,257 +1,193 @@
 package engine
 
-import "github.com/anacrolix/torrent"
+import (
+	"sort"
 
-// Queue management.
-//
-// anacrolix/torrent has no built-in concept of "max N active
-// downloads at once"; every torrent added starts downloading
-// immediately. SwartzNet layers a simple FIFO queue on top so
-// users can cap concurrency (matching qBittorrent's "queue
-// system" knob).
-//
-// Ordering:
-//
-//   Every handle gets a monotonic queueOrder at registration
-//   time. Promotion iterates queued handles sorted ascending by
-//   queueOrder — oldest goes first — so the behaviour is FIFO by
-//   add time. Users can call QueueMoveToFront / QueueMoveToBack
-//   to override the natural order: move-to-front sets
-//   queueOrder to the minimum of all existing orders minus 1,
-//   move-to-back sets it to the maximum plus 1.
-//
-// Rules:
-//
-//   - A torrent is "active" when it has any non-None file priority
-//     AND is not paused AND is not fully complete.
-//   - When maxActiveDownloads > 0 and the active count would
-//     exceed the limit, newly-added torrents stay in "queued"
-//     state: autoDownload does NOT flip their files to Normal
-//     priority. A paused/completed/removed torrent releases its
-//     slot and the oldest queued torrent is promoted.
-//   - maxActiveDownloads == 0 disables the cap (unlimited, the
-//     default and previous behaviour).
-//   - Seeding-only torrents (complete) never occupy a download
-//     slot.
+	"github.com/anacrolix/torrent"
+)
 
-// MaxActiveDownloads returns the current concurrent-download cap.
-// Zero means unlimited.
+// MaxActiveDownloads reports the queue cap (0 = unlimited).
 func (e *Engine) MaxActiveDownloads() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.promoteMu.Lock()
+	defer e.promoteMu.Unlock()
 	return e.maxActiveDownloads
 }
 
-// SetMaxActiveDownloads sets the concurrent-download cap. Zero
-// disables the cap. Reducing the cap does NOT pause already-
-// active torrents; it only takes effect for newly-added torrents.
-// Raising the cap immediately promotes queued torrents if any are
-// waiting.
+// SetMaxActiveDownloads sets the cap (negatives clamp to 0 = unlimited) and
+// runs a promotion pass. Reducing the cap never demotes active torrents.
 func (e *Engine) SetMaxActiveDownloads(n int) {
 	if n < 0 {
 		n = 0
 	}
-	e.mu.Lock()
+	e.promoteMu.Lock()
 	e.maxActiveDownloads = n
-	e.mu.Unlock()
+	e.promoteMu.Unlock()
 	e.log.Info("engine.max_active_downloads_set", "limit", n)
-	e.promoteQueuedLocked()
+	e.promoteQueued()
 }
 
-// countActiveDownloadsLocked returns the number of currently-
-// downloading (non-paused, non-complete, non-queued) handles.
-// Caller must NOT hold e.mu.
-func (e *Engine) countActiveDownloads() int {
-	e.mu.Lock()
-	handles := make([]*Handle, 0, len(e.handles))
-	for _, h := range e.handles {
-		handles = append(handles, h)
+// isActive implements the documented slot rule FOR REAL (the legacy never
+// inspected file priorities — §6): a torrent is active iff it has any
+// non-None file priority AND is not paused AND is not queued AND is not
+// complete. Metadata-only torrents count as active (they consume download
+// attention); seeding torrents never occupy a slot.
+func (h *Handle) isActive() bool {
+	if h.isPaused() || h.isQueued() {
+		return false
 	}
-	e.mu.Unlock()
+	info := h.T.Info()
+	if info == nil {
+		return true
+	}
+	if h.T.BytesMissing() <= 0 {
+		return false
+	}
+	for _, f := range h.T.Files() {
+		if f.Priority() != torrent.PiecePriorityNone {
+			return true
+		}
+	}
+	return false
+}
 
+// countActive counts slot-occupying torrents. Caller holds promoteMu.
+func (e *Engine) countActive() int {
 	n := 0
-	for _, h := range handles {
-		if h.IsPaused() || h.IsQueued() {
-			continue
+	for _, h := range e.Torrents() {
+		if h.isActive() {
+			n++
 		}
-		if t := h.T; t != nil {
-			if info := t.Info(); info != nil {
-				if t.BytesMissing() <= 0 {
-					// seeding, doesn't count against the download limit
-					continue
-				}
-			}
-			// treat metadata-only torrents as active (they are
-			// consuming download attention)
-		}
-		n++
 	}
 	return n
 }
 
-// queueOrActivateLocked decides whether a newly-added handle
-// should start downloading immediately or sit in the queue.
-// Callers who just finished creating a Handle can invoke this
-// instead of calling autoDownload's SetPriority path directly.
+// queueOrActivate activates h under the cap or queues it. Paused handles are
+// untouched (Resume re-runs activation). Serialized on promoteMu so
+// concurrent autoDownload goroutines from a batch restore cannot
+// over-subscribe the cap. (Honest name: this acquires its own locks —
+// callers must NOT hold e.mu.)
 func (e *Engine) queueOrActivate(h *Handle) {
-	e.mu.Lock()
-	cap := e.maxActiveDownloads
-	e.mu.Unlock()
-
-	if cap == 0 {
-		// unlimited — activate immediately
-		activateDownload(h)
+	if h.isPaused() {
 		return
 	}
-
-	active := e.countActiveDownloads()
-	if active < cap {
-		activateDownload(h)
+	e.promoteMu.Lock()
+	defer e.promoteMu.Unlock()
+	if e.maxActiveDownloads == 0 || e.countActive() < e.maxActiveDownloads {
+		e.activateDownload(h)
 		return
 	}
-
-	// Over cap — keep in queued state. The handle's indexing
-	// goroutine still runs (metadata arrives normally); only
-	// the file-priority flip is deferred.
 	h.setQueued(true)
-	e.log.Info("engine.torrent_queued", "info_hash", h.T.InfoHash().HexString())
+	// Gate the queued torrent at the anacrolix level, not ONLY via None
+	// priorities: a later SetFilePriority could raise a file above None and
+	// resume downloading outside the cap (None priorities are the only other
+	// gate). DisallowDataDownload suppresses piece requests regardless of file
+	// priority; activateDownload re-allows it on promotion. Belt-and-suspenders
+	// with the None reset below.
+	h.T.DisallowDataDownload()
+	// A previously-activated handle (e.g. resumed over a full cap) must not
+	// keep downloading from the queue: reset its priorities — promotion
+	// re-flips them. Without this, a resume-over-cap torrent transfers
+	// outside the cap while countActive no longer counts it.
+	if h.T.Info() != nil {
+		for _, f := range h.T.Files() {
+			f.SetPriority(torrent.PiecePriorityNone)
+		}
+	}
+	e.log.Info("engine.torrent_queued", "info_hash", h.InfoHashHex())
 }
 
-// activateDownload flips every file in a handle's torrent to
-// Normal priority, matching autoDownload's default. Called from
-// queueOrActivate and from promoteQueued.
-func activateDownload(h *Handle) {
+// activateDownload flips every file to Normal priority — NEVER DownloadAll:
+// anacrolix keeps two priority surfaces and DownloadAll leaves File.Priority
+// stuck at "none" in snapshots. Paused handles are refused with queued state
+// untouched so a later Resume can promote.
+func (e *Engine) activateDownload(h *Handle) {
+	if h.isPaused() {
+		return
+	}
+	// Re-allow data download: a queued torrent had it disallowed as a cap gate
+	// (queueOrActivate); a directly-activated one is already allowed (no-op).
+	h.T.AllowDataDownload()
 	h.setQueued(false)
 	if h.T.Info() == nil {
-		// Metadata not here yet; autoDownload goroutine will
-		// flip priorities once GotInfo fires.
-		return
+		return // autoDownload flips after metadata arrives
 	}
 	for _, f := range h.T.Files() {
 		f.SetPriority(torrent.PiecePriorityNormal)
 	}
 }
 
-// promoteQueuedLocked examines the handles map and promotes
-// queued torrents while under the active-downloads cap. Called
-// whenever a slot might have opened up (pause, complete, remove,
-// cap raised).
-func (e *Engine) promoteQueuedLocked() {
-	e.mu.Lock()
-	cap := e.maxActiveDownloads
-	handles := make([]*Handle, 0, len(e.handles))
-	for _, h := range e.handles {
-		handles = append(handles, h)
-	}
-	e.mu.Unlock()
-
-	if cap == 0 {
-		// Unlimited: promote everything queued.
+// promoteQueued promotes queued torrents FIFO by queue order while slots are
+// free. Called on cap change, pause, remove, completion (unconditionally —
+// the §6 fix), and move-to-front.
+func (e *Engine) promoteQueued() {
+	e.promoteMu.Lock()
+	defer e.promoteMu.Unlock()
+	handles := e.Torrents()
+	sort.Slice(handles, func(i, j int) bool {
+		return handles[i].getQueueOrder() < handles[j].getQueueOrder()
+	})
+	if e.maxActiveDownloads == 0 {
 		for _, h := range handles {
-			if h.IsQueued() {
-				activateDownload(h)
+			if h.isQueued() {
+				e.activateDownload(h)
 			}
 		}
 		return
 	}
-
-	active := e.countActiveDownloads()
-	// Sort queued handles by queueOrder ascending (oldest first)
-	// so promotion is FIFO by add time unless the user has
-	// called QueueMoveToFront/Back.
-	sortHandlesByQueueOrder(handles)
+	active := e.countActive()
 	for _, h := range handles {
-		if active >= cap {
-			break
+		if active >= e.maxActiveDownloads {
+			return
 		}
-		if h.IsQueued() {
-			activateDownload(h)
-			active++
-		}
-	}
-}
-
-// QueueMoveToFront reassigns the given handle's queueOrder so it
-// will promote before any other currently-tracked handle. Only
-// affects ordering: the handle still respects the download cap
-// and must be Queued for the move to have any visible effect.
-// Idempotent.
-func (e *Engine) QueueMoveToFront(infoHashHex string) error {
-	h, err := e.handleByHex(infoHashHex)
-	if err != nil {
-		return err
-	}
-
-	e.mu.Lock()
-	// Find the smallest queueOrder in the map.
-	var minOrder int64
-	first := true
-	for _, other := range e.handles {
-		other.queueMu.Lock()
-		o := other.queueOrder
-		other.queueMu.Unlock()
-		if first || o < minOrder {
-			minOrder = o
-			first = false
-		}
-	}
-	e.mu.Unlock()
-
-	h.queueMu.Lock()
-	h.queueOrder = minOrder - 1
-	h.queueMu.Unlock()
-
-	e.log.Info("engine.queue_move_to_front", "info_hash", infoHashHex)
-	// Promotion may want to start this one now.
-	go e.promoteQueuedLocked()
-	return nil
-}
-
-// QueueMoveToBack is the mirror of QueueMoveToFront: the handle
-// will promote last among all tracked handles.
-func (e *Engine) QueueMoveToBack(infoHashHex string) error {
-	h, err := e.handleByHex(infoHashHex)
-	if err != nil {
-		return err
-	}
-
-	e.mu.Lock()
-	var maxOrder int64
-	first := true
-	for _, other := range e.handles {
-		other.queueMu.Lock()
-		o := other.queueOrder
-		other.queueMu.Unlock()
-		if first || o > maxOrder {
-			maxOrder = o
-			first = false
-		}
-	}
-	e.mu.Unlock()
-
-	h.queueMu.Lock()
-	h.queueOrder = maxOrder + 1
-	h.queueMu.Unlock()
-
-	e.log.Info("engine.queue_move_to_back", "info_hash", infoHashHex)
-	return nil
-}
-
-// sortHandlesByQueueOrder sorts handles ascending by their
-// queueOrder field. Stable w.r.t. equal orders (simple bubble
-// sort; the slice rarely exceeds a handful of handles).
-func sortHandlesByQueueOrder(handles []*Handle) {
-	for i := 0; i < len(handles); i++ {
-		for j := i + 1; j < len(handles); j++ {
-			handles[i].queueMu.Lock()
-			a := handles[i].queueOrder
-			handles[i].queueMu.Unlock()
-			handles[j].queueMu.Lock()
-			b := handles[j].queueOrder
-			handles[j].queueMu.Unlock()
-			if a > b {
-				handles[i], handles[j] = handles[j], handles[i]
+		if h.isQueued() && !h.isPaused() {
+			e.activateDownload(h)
+			// Only count it against the cap if it actually occupies a slot. A
+			// COMPLETE seed can be queued (queued while the cap was full, then
+			// completed by the background verify); activating it clears the
+			// queued flag but leaves it isActive()==false, so an unconditional
+			// active++ would waste the freed slot and starve a genuinely-queued
+			// download ordered after it. countActive()/isActive() both exclude
+			// seeds; this counter must too.
+			if h.isActive() {
+				active++
 			}
 		}
 	}
+}
+
+// QueueMoveToFront makes h next in line and runs a promotion pass. Queue
+// moves are runtime-only (legacy parity): the order is not persisted.
+func (e *Engine) QueueMoveToFront(ihHex string) error {
+	h, err := e.handleByHex(ihHex)
+	if err != nil {
+		return err
+	}
+	min := h.getQueueOrder()
+	for _, other := range e.Torrents() {
+		if qo := other.getQueueOrder(); qo < min {
+			min = qo
+		}
+	}
+	h.setQueueOrder(min - 1)
+	e.log.Info("engine.queue_move_to_front", "info_hash", h.InfoHashHex())
+	go e.promoteQueued()
+	return nil
+}
+
+// QueueMoveToBack demotes h to the end. Deliberately fires no promotion pass
+// — moving back cannot free a slot.
+func (e *Engine) QueueMoveToBack(ihHex string) error {
+	h, err := e.handleByHex(ihHex)
+	if err != nil {
+		return err
+	}
+	max := h.getQueueOrder()
+	for _, other := range e.Torrents() {
+		if qo := other.getQueueOrder(); qo > max {
+			max = qo
+		}
+	}
+	h.setQueueOrder(max + 1)
+	e.log.Info("engine.queue_move_to_back", "info_hash", h.InfoHashHex())
+	return nil
 }

@@ -2,9 +2,7 @@ package companion
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -12,125 +10,71 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-// CompanionPieceLength is the piece length used for companion
-// torrents. 256 KiB is large enough to keep the piece count
-// manageable for ~100 MB JSON.gz blobs and small enough that
-// individual peers can verify pieces quickly.
-const CompanionPieceLength int64 = 256 * 1024
+// CompanionPieceLength is the fixed piece size for companion torrents (256 KiB)
+// — small payloads, so a fixed length keeps the metainfo deterministic.
+const CompanionPieceLength = 256 * 1024
 
-// WriteCompanionFiles serialises a CompanionIndex to disk and
-// produces the matching v1 .torrent metainfo. The two files are
-// written to dir as:
-//
-//	<dir>/<companion file basename>  # the gzipped JSON payload
-//	<dir>/companion.torrent           # the metainfo wrapping it
-//
-// The companion-file basename derives from idx.Publisher so the
-// torrent's display name carries the publisher's identity rather
-// than the generic "swartznet-content-index-v1.json.gz" — that
-// generic name was indistinguishable across publishers in a
-// downloads list, defeating the user's ability to recognise
-// which node's index they're seeing. Subscribers locate the
-// payload by its on-disk path (returned by the engine fetcher)
-// so the renamed file remains decodable end-to-end.
-//
-// The returned MetaInfo is also constructed in memory so the
-// caller can hand it directly to torrent.Client.AddTorrent
-// without re-reading from disk.
-//
-// The publisher MUST treat dir as exclusive — re-running the
-// publisher overwrites both files in place. The infohash
-// usually changes between runs because the JSON includes a
-// fresh GeneratedAt timestamp on every Encode call.
+// WriteCompanionFiles encodes idx to gzip(JSON), writes it atomically under dir
+// as CompanionFileName(idx.Publisher), builds a single-file trackerless v1
+// metainfo over the payload, writes that atomically as companion.torrent, and
+// returns (jsonPath, metainfo). Companion torrents carry NO announce list —
+// they are discovered via the BEP-46 pointer, not trackers.
 func WriteCompanionFiles(dir string, idx CompanionIndex) (string, *metainfo.MetaInfo, error) {
-	if dir == "" {
-		return "", nil, errors.New("companion: empty dir")
-	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("companion: mkdir %q: %w", dir, err)
 	}
-
 	payload, err := Encode(idx)
 	if err != nil {
 		return "", nil, err
 	}
-
 	jsonPath := filepath.Join(dir, CompanionFileName(idx.Publisher))
 	if err := atomicWrite(jsonPath, payload); err != nil {
-		return "", nil, fmt.Errorf("companion: write payload: %w", err)
+		return "", nil, err
 	}
-
-	mi, err := buildMetaInfoForFile(jsonPath, payload)
+	mi, err := buildMetaInfoForFile(filepath.Base(jsonPath), payload)
 	if err != nil {
 		return "", nil, err
 	}
-
-	miBytes, err := bencode.Marshal(mi)
+	miBytes, err := bencode.Marshal(*mi)
 	if err != nil {
 		return "", nil, fmt.Errorf("companion: marshal metainfo: %w", err)
 	}
-	torrentPath := filepath.Join(dir, "companion.torrent")
-	if err := atomicWrite(torrentPath, miBytes); err != nil {
-		return "", nil, fmt.Errorf("companion: write torrent: %w", err)
+	if err := atomicWrite(filepath.Join(dir, "companion.torrent"), miBytes); err != nil {
+		return "", nil, err
 	}
-
 	return jsonPath, mi, nil
 }
 
-// buildMetaInfoForFile constructs a v1 .torrent MetaInfo for a
-// single file whose name and contents are known. We avoid
-// metainfo.Info.BuildFromFilePath because that path opens the
-// file again — we already have the bytes in memory and can
-// generate pieces directly without a second disk read.
-func buildMetaInfoForFile(filePath string, payload []byte) (*metainfo.MetaInfo, error) {
-	info := metainfo.Info{
-		Name:        filepath.Base(filePath),
-		Length:      int64(len(payload)),
-		PieceLength: CompanionPieceLength,
-	}
-	pieces, err := metainfo.GeneratePieces(bytes.NewReader(payload), info.PieceLength, nil)
+// buildMetaInfoForFile builds a single-file v1 metainfo over payload with the
+// given name. Pieces are generated from the in-memory bytes (no second disk
+// read), matching the on-disk file exactly.
+func buildMetaInfoForFile(name string, payload []byte) (*metainfo.MetaInfo, error) {
+	pieces, err := metainfo.GeneratePieces(bytes.NewReader(payload), CompanionPieceLength, nil)
 	if err != nil {
 		return nil, fmt.Errorf("companion: generate pieces: %w", err)
 	}
-	info.Pieces = pieces
-
+	info := metainfo.Info{
+		Name:        name,
+		Length:      int64(len(payload)),
+		PieceLength: CompanionPieceLength,
+		Pieces:      pieces,
+	}
 	infoBytes, err := bencode.Marshal(info)
 	if err != nil {
 		return nil, fmt.Errorf("companion: marshal info: %w", err)
 	}
-
-	mi := &metainfo.MetaInfo{
-		InfoBytes: infoBytes,
-		// Empty AnnounceList: companion torrents are
-		// discovered via the M11c BEP-46 pointer, not via
-		// trackers. The pointer is enough.
-	}
-	return mi, nil
+	return &metainfo.MetaInfo{InfoBytes: infoBytes}, nil
 }
 
-// atomicWrite writes data to path atomically via tempfile +
-// rename. Used by WriteCompanionFiles so a partial write never
-// corrupts the publisher's state. On any error — including a
-// failed Rename — the tempfile is removed rather than left
-// behind to accumulate on disk over repeated failed publishes.
+// atomicWrite writes data to path via a tempfile + rename, mode 0600.
 func atomicWrite(path string, data []byte) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, bytes.NewReader(data)); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("companion: write tmp %q: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
+		_ = os.Remove(tmp)
+		return fmt.Errorf("companion: rename %q: %w", path, err)
 	}
 	return nil
 }

@@ -8,42 +8,61 @@ import (
 	"sync"
 )
 
-// Chunk is a single text block produced by an Extractor. Most extractors
-// will emit exactly one chunk per file for M2.2a; later milestones split
-// large files into ~10 KB chunks so the Bleve index can highlight
-// paragraph-level matches without storing entire books in a single doc.
+// Chunk is a single text block produced by an Extractor.
 type Chunk struct {
 	// Text is the extracted text content of this chunk.
 	Text string
 	// Offset is the byte offset into the source file where this chunk
-	// begins, for future "jump to match" UI features. Zero for
-	// whole-file chunks.
+	// begins, for "jump to match" UI features. Zero for whole-file or
+	// synthesized chunks.
 	Offset int64
 }
 
 // Extractor is the interface every text-extractor backend implements.
 //
 // Extract reads from r (expected to return io.EOF at end of file) and
-// returns the extracted text as a slice of Chunks. Implementations SHOULD:
+// returns the extracted text as a slice of Chunks. Implementations MUST:
 //
-//   - Stop early and return a partial result if the file is obviously not
-//     text (binary signature, NUL bytes in the first 1 KiB, etc.).
-//   - Respect a reasonable byte cap to avoid pulling entire terabytes of
-//     text into RAM.
-//   - Return an empty slice (not an error) for genuinely empty files.
+//   - Bound how many bytes they read; maxBytes <= 0 selects the
+//     per-extractor default budget.
+//   - Return (nil, nil) — not an error — for genuinely empty files.
+//   - Refuse input that is obviously not what they parse (binary
+//     signature, bad magic) with an error rather than garbage chunks.
 //
-// Name() is used as the `extractor` field on the resulting ContentDoc so
-// we can track which backend produced what in the index.
+// Name() lands verbatim on the resulting ContentDoc's Extractor field so
+// downstream analytics can tell which backend produced a document.
 type Extractor interface {
 	Name() string
 	Extract(r io.Reader, maxBytes int64) ([]Chunk, error)
 }
 
+// maxDocTextBytes caps the extracted-text *output* of the
+// container-based document extractors (DOCX/ODT/EPUB and the shared
+// HTML walker). The per-extractor input caps bound the *compressed*
+// bytes we buffer, but DEFLATE amplifies up to ~1032:1 once
+// decompressed — so every zip-entry reader must be wrapped in
+// io.LimitReader(rc, maxDocTextBytes) before it reaches an XML/HTML
+// parser. Without that, a single oversized text node buffers the
+// whole decompressed body inside one Token()/Next() call, an OOM
+// that recover() cannot catch. 64 MiB of plain text is far beyond
+// any real document.
+const maxDocTextBytes = 64 * 1024 * 1024
+
+// maxEpubTotalDecompress bounds the TOTAL decompressed bytes an EPUB extraction
+// may read across ALL chapters, charged by bytes consumed (not output text). The
+// per-chapter output budget cannot bound decompression work when a chapter emits
+// no visible text (e.g. a giant <script> body), so a crafted multi-chapter EPUB
+// could drive ~1000x total decompression without it. 256 MiB (4x the output cap)
+// leaves ample headroom for legitimate markup while bounding a bomb.
+const maxEpubTotalDecompress = 4 * maxDocTextBytes
+
 // Candidate describes a file the dispatcher is considering.
 type Candidate struct {
 	// Path is the user-visible file path (for extension sniffing).
 	Path string
-	// MIME is the best-known MIME type; may be empty.
+	// MIME is the best-known MIME type; may be empty. The live pipeline
+	// always leaves it empty, so dispatch is extension-driven in
+	// practice; the field remains for tests and future sniffing.
 	MIME string
 	// Size is the file size in bytes. Extractors may refuse files above
 	// their own size caps.
@@ -72,9 +91,9 @@ func Dispatch(c Candidate) (Extractor, string) {
 	return nil, mime
 }
 
-// Register adds an extractor to the dispatch table. Called by each
-// extractor implementation's init() so the table is built at program
-// start.
+// Register adds an extractor to the dispatch table. All registrations
+// happen from the single ordered list in register.go so the dispatch
+// order is explicit and deterministic.
 //
 // claims is called in registration order; the first extractor that
 // returns true handles the file. Put more specific extractors first.
@@ -110,21 +129,20 @@ func registry() *extractorRegistry {
 	return regInstance
 }
 
-// mimeFromPath guesses the MIME type from the file extension. It consults
-// the stdlib mime.TypeByExtension table first (which covers html/json/xml/
-// etc.), then falls back to the SwartzNet-specific extTypes map for types
-// the stdlib table does not know about (.srt, .vtt, source code).
-// Returns an empty string for unknown extensions; callers should treat
-// that as "unknown, let specific extractors decide based on other
-// signals".
+// mimeFromPath guesses the MIME type from the file extension. The
+// project-local extTypes override map is consulted FIRST — the stdlib
+// table gets `.ts` wrong (MPEG-TS video, not TypeScript), knows no
+// subtitle formats, and lacks even text/plain on systems without
+// /etc/mime.types. Only extensions absent from the override map fall
+// back to mime.TypeByExtension, with any "; charset=..." suffix
+// stripped. Returns an empty string for unknown extensions; callers
+// should treat that as "unknown, let specific extractors decide based
+// on other signals".
 func mimeFromPath(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == "" {
 		return ""
 	}
-	// Check our override map first — the stdlib table gets `.ts` wrong
-	// (it thinks it's MPEG-TS video, not TypeScript) and doesn't know
-	// about subtitle formats at all.
 	if m, ok := extTypes[ext]; ok {
 		return m
 	}

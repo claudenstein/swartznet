@@ -101,6 +101,44 @@ func TestLoadOrCreateBloomBadVersion(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateBloomZeroParams covers the m==0 / k==0 guard in
+// readBloom. A corrupt header with m=0 would otherwise produce a
+// filter whose first Test/Add divides by zero and panics; the loader
+// must instead fail closed with a recoverable error.
+func TestLoadOrCreateBloomZeroParams(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		k    uint16
+		m    uint64
+	}{
+		{"zeroM", 7, 0},
+		{"zeroK", 0, 64},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "bloom.bin")
+
+			var hdr [4 + 2 + 2 + 8 + 8]byte
+			copy(hdr[0:4], "SBLM")
+			binary.LittleEndian.PutUint16(hdr[4:6], 1)
+			binary.LittleEndian.PutUint16(hdr[6:8], tc.k)
+			binary.LittleEndian.PutUint64(hdr[8:16], tc.m)
+			binary.LittleEndian.PutUint64(hdr[16:24], 0) // bitsLen 0 passes the loose check
+			if err := os.WriteFile(path, hdr[:], 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := reputation.LoadOrCreateBloom(path); err == nil {
+				t.Errorf("LoadOrCreateBloom with k=%d m=%d should error, not panic", tc.k, tc.m)
+			}
+		})
+	}
+}
+
 // TestLoadOrCreateBloomTruncatedHeader covers the io.ReadFull
 // error branch — a file shorter than the fixed header is not a
 // valid bloom filter.

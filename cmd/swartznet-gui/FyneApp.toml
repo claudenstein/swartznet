@@ -2,5 +2,5 @@
   Icon = "Icon.png"
   Name = "SwartzNet"
   ID = "net.swartznet.gui"
-  Version = "0.3.0"
+  Version = "0.11.0"
   Build = 1

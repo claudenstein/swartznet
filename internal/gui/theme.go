@@ -1,3 +1,8 @@
+// Package gui is the native Fyne frontend. It is PURE PRESENTATION over the
+// same internal/daemon.Daemon the CLI and web UI use: every action flows
+// through the Daemon and its subsystems (engine, the shared searchmux.Mux via
+// Daemon.Search, the shared Confirm/Flag path, companion). The GUI holds no
+// independent lifecycle, reconciliation, or spam-signal logic.
 package gui
 
 import (
@@ -7,62 +12,60 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// swartzTheme is a dark theme matching the web UI's CSS variables.
+// swartzTheme is a fixed dark theme mirroring the web UI's CSS variables (it
+// ignores the requested variant). Only Color is overridden; Font/Icon/Size
+// delegate to the default theme.
 type swartzTheme struct{}
 
-var _ fyne.Theme = (*swartzTheme)(nil)
+var _ fyne.Theme = swartzTheme{}
 
-func (s *swartzTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
+func rgb(hex uint32) color.Color {
+	return color.NRGBA{R: uint8(hex >> 16), G: uint8(hex >> 8), B: uint8(hex), A: 0xff}
+}
+
+func (swartzTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNameBackground:
-		return color.NRGBA{R: 0x0e, G: 0x11, B: 0x16, A: 0xff} // --bg
+		return rgb(0x0e1116)
 	case theme.ColorNameButton:
-		return color.NRGBA{R: 0x21, G: 0x26, B: 0x2d, A: 0xff} // --surface-2
+		return rgb(0x21262d)
 	case theme.ColorNameDisabledButton:
-		return color.NRGBA{R: 0x16, G: 0x1b, B: 0x22, A: 0xff} // --surface
+		return rgb(0x161b22)
 	case theme.ColorNameDisabled:
-		return color.NRGBA{R: 0x8b, G: 0x94, B: 0x9e, A: 0xff} // --text-dim
+		return rgb(0x8b949e)
 	case theme.ColorNameForeground:
-		return color.NRGBA{R: 0xc9, G: 0xd1, B: 0xd9, A: 0xff} // --text
+		return rgb(0xc9d1d9)
 	case theme.ColorNameHover:
-		return color.NRGBA{R: 0x30, G: 0x36, B: 0x3d, A: 0xff} // --border
+		return rgb(0x30363d)
 	case theme.ColorNameInputBackground:
-		return color.NRGBA{R: 0x16, G: 0x1b, B: 0x22, A: 0xff} // --surface
+		return rgb(0x161b22)
 	case theme.ColorNameInputBorder:
-		return color.NRGBA{R: 0x30, G: 0x36, B: 0x3d, A: 0xff} // --border
+		return rgb(0x30363d)
 	case theme.ColorNameMenuBackground:
-		return color.NRGBA{R: 0x1b, G: 0x20, B: 0x28, A: 0xff} // --bg-elev
+		return rgb(0x1b2028)
 	case theme.ColorNameOverlayBackground:
-		return color.NRGBA{R: 0x1b, G: 0x20, B: 0x28, A: 0xff} // --bg-elev
+		return rgb(0x1b2028)
 	case theme.ColorNamePlaceHolder:
-		return color.NRGBA{R: 0x8b, G: 0x94, B: 0x9e, A: 0xff} // --text-dim
+		return rgb(0x8b949e)
 	case theme.ColorNamePressed:
-		return color.NRGBA{R: 0x1f, G: 0x6f, B: 0xeb, A: 0xff} // --accent-2
+		return rgb(0x1f6feb)
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 0x58, G: 0xa6, B: 0xff, A: 0xff} // --accent
+		return rgb(0x58a6ff)
 	case theme.ColorNameScrollBar:
-		return color.NRGBA{R: 0x30, G: 0x36, B: 0x3d, A: 0xff} // --border
+		return rgb(0x30363d)
 	case theme.ColorNameSeparator:
-		return color.NRGBA{R: 0x30, G: 0x36, B: 0x3d, A: 0xff} // --border
+		return rgb(0x30363d)
 	case theme.ColorNameSuccess:
-		return color.NRGBA{R: 0x3f, G: 0xb9, B: 0x50, A: 0xff} // --good
+		return rgb(0x3fb950)
 	case theme.ColorNameError:
-		return color.NRGBA{R: 0xf8, G: 0x51, B: 0x49, A: 0xff} // --bad
+		return rgb(0xf85149)
 	case theme.ColorNameWarning:
-		return color.NRGBA{R: 0xd2, G: 0x99, B: 0x22, A: 0xff} // --warn
+		return rgb(0xd29922)
 	default:
 		return theme.DefaultTheme().Color(name, theme.VariantDark)
 	}
 }
 
-func (s *swartzTheme) Font(style fyne.TextStyle) fyne.Resource {
-	return theme.DefaultTheme().Font(style)
-}
-
-func (s *swartzTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
-	return theme.DefaultTheme().Icon(name)
-}
-
-func (s *swartzTheme) Size(name fyne.ThemeSizeName) float32 {
-	return theme.DefaultTheme().Size(name)
-}
+func (swartzTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
+func (swartzTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
+func (swartzTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }

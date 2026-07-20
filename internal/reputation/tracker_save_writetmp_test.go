@@ -9,19 +9,27 @@ import (
 	"github.com/swartznet/swartznet/internal/reputation"
 )
 
-// TestTrackerSaveWriteTempFails covers the os.WriteFile-error
-// branch of Tracker.Save — plant a non-empty directory at
-// `<path>.tmp` so the truncate-open in os.WriteFile fails. The
-// existing TestTrackerSaveRenameFailure covers the rename branch.
+// TestTrackerSaveWriteTempFails covers the tempfile-create error branch of
+// Tracker.Save. Save now writes to a UNIQUE os.CreateTemp file (so
+// concurrent saves never share a tmp inode), so the failure is forced by
+// making the parent directory unwritable. The existing
+// TestTrackerSaveRenameFailure covers the rename branch.
 //
-// Skipped on Windows because of differing semantics around
-// opening a directory for writing.
+// Skipped on Windows (directory permission semantics differ) and when
+// running as root (mode bits are not enforced).
 func TestTrackerSaveWriteTempFails(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("opening a directory for writing has different semantics on Windows")
+		t.Skip("directory permission semantics differ on Windows")
 	}
-	dir := t.TempDir()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "d")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "tracker.json")
 
 	tr, err := reputation.LoadOrCreateTracker(path)
@@ -30,17 +38,13 @@ func TestTrackerSaveWriteTempFails(t *testing.T) {
 	}
 	tr.RecordReturned(reputation.PubKeyHex("aa"), 1)
 
-	// Plant a NON-empty directory at the tempfile path.
-	tmp := path + ".tmp"
-	if err := os.MkdirAll(filepath.Join(tmp, "child"), 0o755); err != nil {
+	// Read+execute only, so os.CreateTemp cannot create the tempfile.
+	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	if err := tr.Save(); err == nil {
-		t.Error("Save should fail when tempfile path is a non-empty directory")
-	}
-	// Planted dir must still exist.
-	if st, err := os.Stat(tmp); err != nil || !st.IsDir() {
-		t.Errorf("planted tmp dir disappeared: stat=%v err=%v", st, err)
+		t.Error("Save should fail when the tempfile cannot be created")
 	}
 }

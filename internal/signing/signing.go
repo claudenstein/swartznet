@@ -1,210 +1,92 @@
-// Package signing adds optional ed25519 publisher signatures to
-// .torrent files. The signature binds the publisher's public key
-// to the torrent's infohash, letting downloaders verify that a
-// `.torrent` file carrying that infohash was authored by the
-// holder of the corresponding private key.
-//
-// # Wire format
-//
-// Two new optional top-level fields are added to the .torrent
-// metainfo dictionary alongside the standard `info`, `announce`,
-// etc.:
-//
-//	snet.pubkey  32-byte ed25519 public key
-//	snet.sig     64-byte ed25519 signature
-//
-// The signature payload is:
-//
-//	"SN-TORRENT-V1|" || <20-byte infohash (SHA-1 of the info dict)>
-//
-// The "SN-TORRENT-V1" prefix is a domain separator: without it, a
-// signature over an infohash could be replayed as a signature over
-// arbitrary 20-byte strings, which is not a problem today but is
-// cheap insurance for future uses of the same key.
-//
-// Compatibility: vanilla BitTorrent clients already ignore unknown
-// top-level metainfo fields. A signed .torrent file loads and
-// downloads normally in qBittorrent, Transmission, libtorrent, and
-// anacrolix/torrent. Only SwartzNet reads the signing fields.
+// Package signing implements infohash-preserving .torrent signing: the
+// signature rides in two OPTIONAL top-level keys (snet.pubkey / snet.sig),
+// never inside the info dict — moving them inside would fork the swarm. All
+// work happens on raw bytes via the contracts codecs, so the info dict never
+// round-trips a typed struct (a typed round-trip would change the infohash
+// and break everything).
 package signing
 
 import (
-	"crypto/ed25519"
 	"crypto/sha1"
-	"errors"
 	"fmt"
-	"io"
-	"os"
 
-	"github.com/anacrolix/torrent/bencode"
+	abencode "github.com/anacrolix/torrent/bencode"
+
+	"github.com/swartznet/swartznet/contracts/bencode"
+	"github.com/swartznet/swartznet/contracts/sign"
+	"github.com/swartznet/swartznet/internal/identity"
 )
 
-// Domain is the prefix prepended to the infohash before signing.
-// Kept as a package-level variable so tests can verify both ends
-// use the same value, but callers MUST NOT change it at runtime.
-const Domain = "SN-TORRENT-V1|"
+// Re-exported sentinels: consumers use errors.Is against these.
+var (
+	ErrNotSigned    = sign.ErrNotSigned
+	ErrBadSignature = sign.ErrBadSignature
+)
 
-// Signature is the result of verifying a signed .torrent file.
-type Signature struct {
-	// PubKey is the 32-byte ed25519 public key the signature was
-	// produced with.
-	PubKey [32]byte
-	// Sig is the 64-byte ed25519 signature.
-	Sig [64]byte
-	// InfoHash is the 20-byte SHA-1 of the info dict that was
-	// signed.
-	InfoHash [20]byte
-}
-
-// PubKeyHex returns the 64-char lowercase hex form of the public
-// key — the same representation SwartzNet uses everywhere else.
-func (s Signature) PubKeyHex() string {
-	const hextab = "0123456789abcdef"
-	out := make([]byte, 64)
-	for i, b := range s.PubKey {
-		out[i*2] = hextab[b>>4]
-		out[i*2+1] = hextab[b&0x0f]
-	}
-	return string(out)
-}
-
-// ErrNotSigned is returned when a .torrent file has no signing
-// fields. It's a normal outcome, not a hard error — most
-// third-party torrents are unsigned.
-var ErrNotSigned = errors.New("signing: torrent is not signed")
-
-// ErrBadSignature is returned when signing fields are present but
-// fail verification (tampered file, wrong key, truncated).
-var ErrBadSignature = errors.New("signing: signature does not verify")
-
-// SignBytes takes the raw bencoded bytes of a .torrent file,
-// computes the info-hash, signs "Domain || infohash" with priv,
-// and returns new bytes with `snet.pubkey` + `snet.sig` added to
-// the top-level dict. Any existing snet.pubkey/snet.sig are
-// replaced.
-func SignBytes(raw []byte, priv ed25519.PrivateKey) ([]byte, error) {
-	if len(priv) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("signing: bad private key length %d", len(priv))
-	}
-
-	var mi map[string]bencode.Bytes
-	if err := bencode.Unmarshal(raw, &mi); err != nil {
+// Sign signs raw .torrent bytes with the node identity, returning the signed
+// bytes. Existing snet.* keys are REPLACED — re-signing overwrites; there is
+// no refusal. Only the top-level key set changes; the info value bytes pass
+// through verbatim, so signed and unsigned twins share one infohash.
+func Sign(raw []byte, signer identity.Signer) ([]byte, error) {
+	top, err := bencode.DecodeDict(raw)
+	if err != nil {
 		return nil, fmt.Errorf("signing: decode metainfo: %w", err)
 	}
-	infoBytes, ok := mi["info"]
-	if !ok || len(infoBytes) == 0 {
-		return nil, errors.New("signing: metainfo missing info dict")
+	infoRaw, ok := top["info"]
+	if !ok || len(infoRaw) == 0 {
+		return nil, fmt.Errorf("signing: metainfo missing info dict")
 	}
+	infoHash := sha1.Sum(infoRaw)
+	sigBytes := signer.Sign(sign.Payload(infoHash))
+	pub := signer.Public()
 
-	infoHash := sha1.Sum(infoBytes)
-	sig := ed25519.Sign(priv, signingPayload(infoHash))
-	pub := priv.Public().(ed25519.PublicKey)
-
-	pubBytes, err := bencode.Marshal(string(pub))
+	pubEnc, err := abencode.Marshal(string(pub))
 	if err != nil {
 		return nil, fmt.Errorf("signing: marshal pubkey: %w", err)
 	}
-	sigBytes, err := bencode.Marshal(string(sig))
+	sigEnc, err := abencode.Marshal(string(sigBytes))
 	if err != nil {
 		return nil, fmt.Errorf("signing: marshal sig: %w", err)
 	}
-	mi["snet.pubkey"] = pubBytes
-	mi["snet.sig"] = sigBytes
+	top["snet.pubkey"] = bencode.Bytes(pubEnc)
+	top["snet.sig"] = bencode.Bytes(sigEnc)
 
-	out, err := bencode.Marshal(mi)
+	out, err := bencode.EncodeDict(top)
 	if err != nil {
 		return nil, fmt.Errorf("signing: re-encode: %w", err)
 	}
 	return out, nil
 }
 
-// SignFile is SignBytes applied to a .torrent file on disk.
-// Writes atomically via tempfile + rename.
-func SignFile(path string, priv ed25519.PrivateKey) error {
-	raw, err := os.ReadFile(path)
+// Verify checks raw .torrent bytes. The taxonomy (SPEC §5.6) is three-way:
+//   - no/partial snet fields → ErrNotSigned (benign; zero Signature)
+//   - undecodable fields or wrong lengths → plain errors, NEITHER sentinel
+//   - crypto failure → ErrBadSignature with the Signature still populated
+//   - success → the Signature and nil
+func Verify(raw []byte) (sign.Signature, error) {
+	top, err := bencode.DecodeDict(raw)
 	if err != nil {
-		return fmt.Errorf("signing: read %s: %w", path, err)
+		return sign.Signature{}, fmt.Errorf("signing: decode metainfo: %w", err)
 	}
-	signed, err := SignBytes(raw, priv)
-	if err != nil {
-		return err
+	infoRaw, ok := top["info"]
+	if !ok || len(infoRaw) == 0 {
+		// Deliberately BEFORE the not-signed check: a dict with snet fields
+		// but no info is malformed, not merely unsigned.
+		return sign.Signature{}, fmt.Errorf("signing: metainfo missing info dict")
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, signed, 0o644); err != nil {
-		return fmt.Errorf("signing: write tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("signing: rename: %w", err)
-	}
-	return nil
-}
-
-// VerifyBytes extracts signing fields from raw metainfo bytes and
-// verifies them against the info-hash. Returns ErrNotSigned if no
-// signing fields are present, ErrBadSignature if present but fail
-// verification.
-func VerifyBytes(raw []byte) (Signature, error) {
-	var mi map[string]bencode.Bytes
-	if err := bencode.Unmarshal(raw, &mi); err != nil {
-		return Signature{}, fmt.Errorf("signing: decode metainfo: %w", err)
-	}
-	infoBytes, ok := mi["info"]
-	if !ok || len(infoBytes) == 0 {
-		return Signature{}, errors.New("signing: metainfo missing info dict")
-	}
-	pubRaw, pubOK := mi["snet.pubkey"]
-	sigRaw, sigOK := mi["snet.sig"]
+	pubRaw, pubOK := top["snet.pubkey"]
+	sigRaw, sigOK := top["snet.sig"]
 	if !pubOK || !sigOK {
-		return Signature{}, ErrNotSigned
+		// One key without the other is treated as unsigned too.
+		return sign.Signature{}, ErrNotSigned
 	}
-
 	var pub string
-	if err := bencode.Unmarshal(pubRaw, &pub); err != nil {
-		return Signature{}, fmt.Errorf("signing: decode pubkey: %w", err)
+	if err := abencode.Unmarshal(pubRaw, &pub); err != nil {
+		return sign.Signature{}, fmt.Errorf("signing: decode pubkey: %w", err)
 	}
-	var sig string
-	if err := bencode.Unmarshal(sigRaw, &sig); err != nil {
-		return Signature{}, fmt.Errorf("signing: decode sig: %w", err)
+	var sigStr string
+	if err := abencode.Unmarshal(sigRaw, &sigStr); err != nil {
+		return sign.Signature{}, fmt.Errorf("signing: decode sig: %w", err)
 	}
-	if len(pub) != ed25519.PublicKeySize {
-		return Signature{}, fmt.Errorf("signing: bad pubkey length %d", len(pub))
-	}
-	if len(sig) != ed25519.SignatureSize {
-		return Signature{}, fmt.Errorf("signing: bad sig length %d", len(sig))
-	}
-
-	out := Signature{InfoHash: sha1.Sum(infoBytes)}
-	copy(out.PubKey[:], pub)
-	copy(out.Sig[:], sig)
-
-	if !ed25519.Verify(ed25519.PublicKey(pub), signingPayload(out.InfoHash), []byte(sig)) {
-		return out, ErrBadSignature
-	}
-	return out, nil
-}
-
-// VerifyFile is VerifyBytes applied to a file on disk.
-func VerifyFile(path string) (Signature, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return Signature{}, fmt.Errorf("signing: open %s: %w", path, err)
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(f)
-	if err != nil {
-		return Signature{}, fmt.Errorf("signing: read %s: %w", path, err)
-	}
-	return VerifyBytes(raw)
-}
-
-// signingPayload is the byte slice that ed25519 signs / verifies.
-// Kept as a small helper so Sign and Verify use byte-identical
-// constructions; accidental divergence would silently break
-// verification for every signed torrent.
-func signingPayload(infoHash [20]byte) []byte {
-	payload := make([]byte, 0, len(Domain)+20)
-	payload = append(payload, Domain...)
-	payload = append(payload, infoHash[:]...)
-	return payload
+	return sign.Verify([]byte(pub), []byte(sigStr), sha1.Sum(infoRaw))
 }

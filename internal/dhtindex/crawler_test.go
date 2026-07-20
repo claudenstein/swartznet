@@ -1,300 +1,235 @@
-package dhtindex_test
+package dhtindex
 
 import (
 	"context"
-	"encoding/binary"
+	"errors"
 	"net"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/krpc"
-	"github.com/anacrolix/torrent/bencode"
-	"github.com/swartznet/swartznet/internal/dhtindex"
 )
 
-// TestSampleInfohashesNilGuards covers the two nil-parameter
-// guards — they return errors rather than panic so callers
-// that accidentally pass a half-constructed server or addr get
-// a clear failure.
-func TestSampleInfohashesNilGuards(t *testing.T) {
-	t.Parallel()
-	var target krpc.ID
-
-	if _, err := dhtindex.SampleInfohashes(context.Background(), nil, dht.NewAddr(&net.UDPAddr{}), target); err == nil {
-		t.Error("expected error for nil server")
-	}
-
-	srv := newIsolatedDHTServer(t)
-	if _, err := dhtindex.SampleInfohashes(context.Background(), srv, nil, target); err == nil {
-		t.Error("expected error for nil addr")
-	}
+// fakeDHT is a deterministic in-memory DHT graph for exercising the crawler
+// worker-pool without a live network: it maps a node address to the samples +
+// neighbours that node returns, and records how many times each node is queried.
+type fakeDHT struct {
+	mu      sync.Mutex
+	nodes   map[string]fakeReply
+	errAddr map[string]bool // addresses whose sample query fails
+	queried map[string]int
 }
 
-// TestSampleInfohashesParsesResponse spins up a hand-rolled UDP
-// responder that returns a real BEP-51 response (samples +
-// interval + num + nodes), then verifies SampleInfohashes
-// unmarshals every field correctly. Tests the happy path without
-// requiring anacrolix to natively handle sample_infohashes.
-func TestSampleInfohashesParsesResponse(t *testing.T) {
-	t.Parallel()
-
-	// Responder listens on loopback, reads one packet, sends back
-	// a crafted reply. No real DHT — just enough wire to satisfy
-	// anacrolix's Server.Query transport.
-	respConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	defer respConn.Close()
-
-	sampleA := krpc.ID{0x01, 0x02, 0x03}
-	sampleB := krpc.ID{0xAA, 0xBB, 0xCC}
-	interval := int64(60)
-	num := int64(123456)
-	nodeA := krpc.NodeInfo{
-		ID:   krpc.ID{0x11},
-		Addr: krpc.NodeAddr{IP: net.IPv4(10, 0, 0, 1).To4(), Port: 4242},
-	}
-
-	// Custom reply shape — anacrolix's CompactInfohashes
-	// MarshalBinary panics for non-empty slices, so we carry the
-	// concatenated 20-byte samples as a raw string field and
-	// encode it ourselves.
-	type rPart struct {
-		ID       krpc.ID                  `bencode:"id"`
-		Nodes    krpc.CompactIPv4NodeInfo `bencode:"nodes,omitempty"`
-		Samples  string                   `bencode:"samples"`
-		Interval int64                    `bencode:"interval"`
-		Num      int64                    `bencode:"num"`
-	}
-	type customReply struct {
-		T string `bencode:"t"`
-		Y string `bencode:"y"`
-		R rPart  `bencode:"r"`
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 2048)
-		_ = respConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		n, from, err := respConn.ReadFrom(buf)
-		if err != nil {
-			t.Errorf("responder ReadFrom: %v", err)
-			return
-		}
-		var q krpc.Msg
-		if err := bencode.Unmarshal(buf[:n], &q); err != nil {
-			t.Errorf("responder decode: %v", err)
-			return
-		}
-		if q.Q != "sample_infohashes" {
-			t.Errorf("responder q = %q, want sample_infohashes", q.Q)
-		}
-		samples := make([]byte, 0, 40)
-		samples = append(samples, sampleA[:]...)
-		samples = append(samples, sampleB[:]...)
-		reply := customReply{
-			T: q.T,
-			Y: "r",
-			R: rPart{
-				ID:       krpc.ID{0x42},
-				Nodes:    krpc.CompactIPv4NodeInfo{nodeA},
-				Samples:  string(samples),
-				Interval: interval,
-				Num:      num,
-			},
-		}
-		out, err := bencode.Marshal(reply)
-		if err != nil {
-			t.Errorf("responder marshal: %v", err)
-			return
-		}
-		if _, err := respConn.WriteTo(out, from); err != nil {
-			t.Errorf("responder WriteTo: %v", err)
-		}
-	}()
-
-	srv := newIsolatedDHTServer(t)
-	addr := dht.NewAddr(respConn.LocalAddr())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	got, err := dhtindex.SampleInfohashes(ctx, srv, addr, krpc.ID{})
-	if err != nil {
-		t.Fatalf("SampleInfohashes: %v", err)
-	}
-
-	// Wait for responder goroutine to finish so we don't race on
-	// its t.Errorf calls.
-	<-done
-
-	if len(got.Samples) != 2 {
-		t.Fatalf("Samples len = %d, want 2", len(got.Samples))
-	}
-	if got.Samples[0] != sampleA {
-		t.Errorf("Samples[0] = %x, want %x", got.Samples[0], sampleA)
-	}
-	if got.Samples[1] != sampleB {
-		t.Errorf("Samples[1] = %x, want %x", got.Samples[1], sampleB)
-	}
-	if got.Interval != interval {
-		t.Errorf("Interval = %d, want %d", got.Interval, interval)
-	}
-	if got.Num != num {
-		t.Errorf("Num = %d, want %d", got.Num, num)
-	}
-	if len(got.Nodes) != 1 {
-		t.Errorf("Nodes len = %d, want 1", len(got.Nodes))
-	} else if got.Nodes[0].ID != nodeA.ID {
-		t.Errorf("Nodes[0].ID = %x, want %x", got.Nodes[0].ID, nodeA.ID)
-	}
+type fakeReply struct {
+	samples []krpc.ID
+	peers   []int // neighbour ports (127.0.0.1:port)
 }
 
-// TestSampleInfohashesErrorResponse covers the
-// `if err := res.ToError(); err != nil` arm. Responder sends a
-// KRPC error message (`y: "e"`) instead of a normal reply;
-// SampleInfohashes must surface that error.
-func TestSampleInfohashesErrorResponse(t *testing.T) {
-	t.Parallel()
+func newFakeDHT() *fakeDHT {
+	return &fakeDHT{nodes: map[string]fakeReply{}, errAddr: map[string]bool{}, queried: map[string]int{}}
+}
 
-	respConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
+func addrFor(port int) dht.Addr {
+	return dht.NewAddr(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+}
+
+func nodeFor(port int) CrawlNode {
+	var id krpc.ID
+	id[0] = byte(port)
+	return CrawlNode{Addr: addrFor(port), ID: id}
+}
+
+func ihN(n byte) krpc.ID {
+	var id krpc.ID
+	id[0] = n
+	return id
+}
+
+func (f *fakeDHT) sample(_ context.Context, addr dht.Addr, _ krpc.ID) (SampleInfohashesResult, error) {
+	key := addr.String()
+	f.mu.Lock()
+	f.queried[key]++
+	reply, ok := f.nodes[key]
+	fail := f.errAddr[key]
+	f.mu.Unlock()
+	if fail {
+		return SampleInfohashesResult{}, errors.New("sample failed")
 	}
-	defer respConn.Close()
-
-	type errReply struct {
-		T string        `bencode:"t"`
-		Y string        `bencode:"y"`
-		E []interface{} `bencode:"e"`
+	if !ok {
+		return SampleInfohashesResult{}, nil
 	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 2048)
-		_ = respConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		n, from, err := respConn.ReadFrom(buf)
-		if err != nil {
-			t.Errorf("responder ReadFrom: %v", err)
-			return
-		}
-		var q krpc.Msg
-		if err := bencode.Unmarshal(buf[:n], &q); err != nil {
-			t.Errorf("responder decode: %v", err)
-			return
-		}
-		out, err := bencode.Marshal(errReply{
-			T: q.T,
-			Y: "e",
-			E: []interface{}{int64(201), "generic test error"},
+	out := SampleInfohashesResult{Samples: reply.samples}
+	for _, p := range reply.peers {
+		out.Nodes = append(out.Nodes, krpc.NodeInfo{
+			ID:   nodeFor(p).ID,
+			Addr: krpc.NodeAddr{IP: net.IPv4(127, 0, 0, 1), Port: p},
 		})
-		if err != nil {
-			t.Errorf("responder marshal: %v", err)
-			return
-		}
-		if _, err := respConn.WriteTo(out, from); err != nil {
-			t.Errorf("responder WriteTo: %v", err)
-		}
-	}()
+	}
+	return out, nil
+}
 
-	srv := newIsolatedDHTServer(t)
-	addr := dht.NewAddr(respConn.LocalAddr())
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+func (f *fakeDHT) queryCount(port int) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.queried[addrFor(port).String()]
+}
 
-	_, err = dhtindex.SampleInfohashes(ctx, srv, addr, krpc.ID{})
-	<-done
-	if err == nil {
-		t.Error("expected error from KRPC error response, got nil")
+// collectSink returns a sink and a func to read the deduped infohashes it saw.
+func collectSink() (func([20]byte), func() map[[20]byte]int) {
+	var mu sync.Mutex
+	seen := map[[20]byte]int{}
+	return func(ih [20]byte) {
+			mu.Lock()
+			seen[ih]++
+			mu.Unlock()
+		}, func() map[[20]byte]int {
+			mu.Lock()
+			defer mu.Unlock()
+			out := map[[20]byte]int{}
+			for k, v := range seen {
+				out[k] = v
+			}
+			return out
+		}
+}
+
+// TestCrawlOnceDiscoversAndExpands: seed A yields ih1,ih2 + neighbours B,C; B
+// yields ih3; C yields ih2(dup),ih4. The crawl must discover all four unique
+// infohashes exactly once and sample all three nodes.
+func TestCrawlOnceDiscoversAndExpands(t *testing.T) {
+	t.Parallel()
+	f := newFakeDHT()
+	f.nodes[addrFor(1).String()] = fakeReply{samples: []krpc.ID{ihN(1), ihN(2)}, peers: []int{2, 3}}
+	f.nodes[addrFor(2).String()] = fakeReply{samples: []krpc.ID{ihN(3)}}
+	f.nodes[addrFor(3).String()] = fakeReply{samples: []krpc.ID{ihN(2), ihN(4)}}
+
+	sink, read := collectSink()
+	c := newCrawler(f.sample, sink, CrawlOptions{Workers: 3}, nil)
+	stats := c.CrawlOnce(context.Background(), []CrawlNode{nodeFor(1)})
+
+	if stats.NodesSampled != 3 {
+		t.Errorf("NodesSampled = %d, want 3", stats.NodesSampled)
+	}
+	if stats.InfohashesSeen != 4 {
+		t.Errorf("InfohashesSeen = %d, want 4", stats.InfohashesSeen)
+	}
+	seen := read()
+	if len(seen) != 4 {
+		t.Fatalf("sink saw %d unique infohashes, want 4", len(seen))
+	}
+	for ih, n := range seen {
+		if n != 1 {
+			t.Errorf("infohash %x emitted %d times, want exactly 1 (dedup)", ih[:2], n)
+		}
 	}
 }
 
-// TestSampleInfohashesNodes6 covers the
-// `for _, n := range r.Nodes6` loop. Responder includes a
-// non-empty nodes6 string (38-byte compact IPv6 entries).
-// SampleInfohashes must merge the IPv6 nodes into Nodes.
-func TestSampleInfohashesNodes6(t *testing.T) {
+// TestCrawlOnceDedupsNodesInACycle: A↔B cycle must terminate, each node sampled
+// exactly once.
+func TestCrawlOnceDedupsNodesInACycle(t *testing.T) {
 	t.Parallel()
+	f := newFakeDHT()
+	f.nodes[addrFor(1).String()] = fakeReply{samples: []krpc.ID{ihN(1)}, peers: []int{2}}
+	f.nodes[addrFor(2).String()] = fakeReply{samples: []krpc.ID{ihN(2)}, peers: []int{1}} // back to A
 
-	respConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	defer respConn.Close()
+	c := newCrawler(f.sample, nil, CrawlOptions{Workers: 2}, nil)
+	stats := c.CrawlOnce(context.Background(), []CrawlNode{nodeFor(1)})
 
-	// Build one compact-IPv6 entry: 20-byte ID + 16-byte IPv6 + 2-byte port.
-	v6 := net.ParseIP("::1").To16()
-	if len(v6) != 16 {
-		t.Fatalf("expected 16-byte IPv6, got %d", len(v6))
+	if stats.NodesSampled != 2 {
+		t.Errorf("NodesSampled = %d, want 2 (cycle must not re-sample)", stats.NodesSampled)
 	}
-	id := krpc.ID{0xCC}
-	entry := make([]byte, 0, 38)
-	entry = append(entry, id[:]...)
-	entry = append(entry, v6...)
-	portBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBytes, 6881)
-	entry = append(entry, portBytes...)
+	if q := f.queryCount(1); q != 1 {
+		t.Errorf("node A queried %d times, want 1", q)
+	}
+}
 
-	type rPart struct {
-		ID     krpc.ID `bencode:"id"`
-		Nodes6 string  `bencode:"nodes6"`
+// TestCrawlOnceMaxFrontierCap bounds total nodes visited.
+func TestCrawlOnceMaxFrontierCap(t *testing.T) {
+	t.Parallel()
+	f := newFakeDHT()
+	f.nodes[addrFor(1).String()] = fakeReply{samples: []krpc.ID{ihN(1)}, peers: []int{2, 3, 4, 5}}
+	for _, p := range []int{2, 3, 4, 5} {
+		f.nodes[addrFor(p).String()] = fakeReply{samples: []krpc.ID{ihN(byte(p))}}
 	}
-	type customReply struct {
-		T string `bencode:"t"`
-		Y string `bencode:"y"`
-		R rPart  `bencode:"r"`
+	c := newCrawler(f.sample, nil, CrawlOptions{Workers: 1, MaxFrontier: 2}, nil)
+	stats := c.CrawlOnce(context.Background(), []CrawlNode{nodeFor(1)})
+	if stats.NodesSampled > 2 {
+		t.Errorf("NodesSampled = %d, want <= 2 (MaxFrontier)", stats.NodesSampled)
 	}
+}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 2048)
-		_ = respConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		n, from, err := respConn.ReadFrom(buf)
-		if err != nil {
-			t.Errorf("responder ReadFrom: %v", err)
-			return
-		}
-		var q krpc.Msg
-		if err := bencode.Unmarshal(buf[:n], &q); err != nil {
-			t.Errorf("responder decode: %v", err)
-			return
-		}
-		out, err := bencode.Marshal(customReply{
-			T: q.T,
-			Y: "r",
-			R: rPart{
-				ID:     krpc.ID{0x42},
-				Nodes6: string(entry),
-			},
-		})
-		if err != nil {
-			t.Errorf("responder marshal: %v", err)
-			return
-		}
-		if _, err := respConn.WriteTo(out, from); err != nil {
-			t.Errorf("responder WriteTo: %v", err)
-		}
-	}()
+// TestCrawlOnceRespectsMaxInfohashes stops expanding once the target is met.
+// Workers=1 makes the ceiling exact (no concurrent overshoot).
+func TestCrawlOnceRespectsMaxInfohashes(t *testing.T) {
+	t.Parallel()
+	f := newFakeDHT()
+	f.nodes[addrFor(1).String()] = fakeReply{samples: []krpc.ID{ihN(1), ihN(2)}, peers: []int{2}}
+	f.nodes[addrFor(2).String()] = fakeReply{samples: []krpc.ID{ihN(3), ihN(4)}, peers: []int{3}}
+	f.nodes[addrFor(3).String()] = fakeReply{samples: []krpc.ID{ihN(5), ihN(6)}}
 
-	srv := newIsolatedDHTServer(t)
-	addr := dht.NewAddr(respConn.LocalAddr())
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	sink, read := collectSink()
+	c := newCrawler(f.sample, sink, CrawlOptions{Workers: 1, MaxInfohashes: 2}, nil)
+	stats := c.CrawlOnce(context.Background(), []CrawlNode{nodeFor(1)})
+	if stats.InfohashesSeen != 2 {
+		t.Errorf("InfohashesSeen = %d, want exactly 2 (MaxInfohashes, Workers=1)", stats.InfohashesSeen)
+	}
+	if len(read()) != 2 {
+		t.Errorf("sink saw %d, want 2", len(read()))
+	}
+}
 
-	got, err := dhtindex.SampleInfohashes(ctx, srv, addr, krpc.ID{})
-	<-done
-	if err != nil {
-		t.Fatalf("SampleInfohashes: %v", err)
+// TestCrawlOnceCountsErrors: a failing node is counted, the crawl continues.
+func TestCrawlOnceCountsErrors(t *testing.T) {
+	t.Parallel()
+	f := newFakeDHT()
+	f.nodes[addrFor(1).String()] = fakeReply{samples: []krpc.ID{ihN(1)}, peers: []int{2}}
+	f.errAddr[addrFor(2).String()] = true // B fails
+	c := newCrawler(f.sample, nil, CrawlOptions{Workers: 2}, nil)
+	stats := c.CrawlOnce(context.Background(), []CrawlNode{nodeFor(1)})
+	if stats.NodesSampled != 1 {
+		t.Errorf("NodesSampled = %d, want 1", stats.NodesSampled)
 	}
-	if len(got.Nodes) != 1 {
-		t.Fatalf("Nodes len = %d, want 1 (the IPv6 entry)", len(got.Nodes))
+	if stats.NodesErrored != 1 {
+		t.Errorf("NodesErrored = %d, want 1", stats.NodesErrored)
 	}
-	if got.Nodes[0].ID[0] != 0xCC {
-		t.Errorf("Nodes[0].ID[0] = %x, want 0xCC", got.Nodes[0].ID[0])
+	if stats.InfohashesSeen != 1 {
+		t.Errorf("InfohashesSeen = %d, want 1", stats.InfohashesSeen)
+	}
+}
+
+// TestCrawlOnceContextCancel returns promptly on a cancelled context.
+func TestCrawlOnceContextCancel(t *testing.T) {
+	t.Parallel()
+	f := newFakeDHT()
+	f.nodes[addrFor(1).String()] = fakeReply{samples: []krpc.ID{ihN(1)}, peers: []int{2, 3}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+	c := newCrawler(f.sample, nil, CrawlOptions{Workers: 2}, nil)
+	stats := c.CrawlOnce(ctx, []CrawlNode{nodeFor(1)})
+	// Nothing should have been sampled (workers short-circuit on ctx.Err).
+	if stats.NodesSampled != 0 {
+		t.Errorf("NodesSampled = %d on a cancelled ctx, want 0", stats.NodesSampled)
+	}
+}
+
+// TestCrawlOnceSkipsBadNeighbours: a neighbour with no usable address is skipped.
+func TestCrawlOnceSkipsBadNeighbours(t *testing.T) {
+	t.Parallel()
+	f := newFakeDHT()
+	// A returns one good neighbour port and the sampler will also be asked about
+	// a zero-port neighbour, which toCrawlNode must reject.
+	key := addrFor(1).String()
+	f.mu.Lock()
+	f.queried[key] = 0
+	f.mu.Unlock()
+	// Build a reply by hand so we can inject a bad NodeInfo (port 0).
+	f.nodes[key] = fakeReply{samples: []krpc.ID{ihN(1)}, peers: []int{0, 2}}
+	f.nodes[addrFor(2).String()] = fakeReply{samples: []krpc.ID{ihN(2)}}
+	c := newCrawler(f.sample, nil, CrawlOptions{Workers: 2}, nil)
+	stats := c.CrawlOnce(context.Background(), []CrawlNode{nodeFor(1)})
+	// Only A and the good neighbour (port 2) sampled; the port-0 neighbour skipped.
+	if stats.NodesSampled != 2 {
+		t.Errorf("NodesSampled = %d, want 2 (bad neighbour skipped)", stats.NodesSampled)
 	}
 }

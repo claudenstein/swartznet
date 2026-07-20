@@ -15,10 +15,12 @@ import (
 
 // PubKeyHex is the 64-character lowercase hex form of an ed25519
 // public key. Used as the persistent map key for the reputation
-// table because [32]byte is not JSON-friendly.
+// table because [32]byte is not JSON-friendly. Every lookup path
+// must query the lowercase form.
 type PubKeyHex string
 
-// PubKey converts a 32-byte ed25519 public key into PubKeyHex.
+// PubKey converts a 32-byte ed25519 public key into the canonical
+// lowercase-hex PubKeyHex.
 func PubKey(pk [32]byte) PubKeyHex {
 	return PubKeyHex(hex.EncodeToString(pk[:]))
 }
@@ -31,46 +33,44 @@ type Counters struct {
 	// HitsReturned is the total number of hits this indexer has
 	// ever returned in our queries.
 	HitsReturned int `json:"hits_returned"`
-	// HitsConfirmed is the number of those hits that we (the user)
-	// have either downloaded successfully or explicitly confirmed
-	// as good via `swartznet confirm`.
+	// HitsConfirmed is the number of those hits that the user has
+	// explicitly confirmed as good via the confirm path.
 	HitsConfirmed int `json:"hits_confirmed"`
 	// HitsFlagged is the number of hits explicitly flagged as
-	// spam by the user via `swartznet flag`.
+	// spam by the user via the flag path.
 	HitsFlagged int `json:"hits_flagged"`
 	// FirstSeen is when we first added a record for this indexer.
 	FirstSeen time.Time `json:"first_seen"`
-	// LastUpdated is the most recent counter mutation. Used by
-	// the M5d auto-decay logic (M5+).
+	// LastUpdated is the most recent counter mutation.
 	LastUpdated time.Time `json:"last_updated"`
 	// SeededAt is the time at which this pubkey was imported from
 	// a curated seed list (see MarkSeeded). Zero value means "not
 	// a seed". The seed bonus added to the derived score decays
 	// exponentially from this point with SeedHalfLife, so an
 	// organically-earned score dominates after a few half-lives.
-	// M13c addition for the v1.0.0 reputation cold-start story.
 	SeededAt time.Time `json:"seeded_at,omitempty"`
 	// SeedLabel is a human-readable tag for a seed entry, usually
 	// "maintainer-alice" or similar. Populated by MarkSeeded and
-	// shown in `swartznet status`.
+	// shown in status output.
 	SeedLabel string `json:"seed_label,omitempty"`
 }
 
-// Score is the derived 0-1 reputation value used for ranking. The
-// formula is intentionally simple and easy to reason about:
+// The scoring constants below are a ranking-compatibility contract:
+// changing them changes the relative ordering of results across the
+// whole network, so they are frozen pending real-world data.
 //
-//   - A brand-new indexer (no hits seen) gets the neutral score
-//     defaultUnknownScore. We are neither boosting nor demoting
-//     them.
-//   - An indexer with hits but zero confirmations and zero flags
-//     gets a slight discount: it has had a chance and we have no
-//     positive signal. (defaultUnknownScore * 0.8)
-//   - The "real" score is hits_confirmed / hits_returned, with
-//     hits_flagged subtracted from the numerator. Negative scores
-//     are clamped to 0.
-//   - Volume bonus: a score derived from a tiny sample is less
-//     trustworthy, so we shrink it toward defaultUnknownScore for
-//     small samples (Bayesian smoothing).
+// The derived score in [0,1] is:
+//
+//   - A brand-new indexer (all counters zero) gets the neutral prior
+//     defaultUnknownScore — neither boosted nor demoted.
+//   - Otherwise the organic score is the Bayesian-smoothed ratio
+//     (max(0, confirmed-flagged) + defaultUnknownScore*smoothingPriorWeight)
+//     / (max(1, returned) + smoothingPriorWeight). An indexer with
+//     hits but zero confirmations is NOT a fixed discount: it decays
+//     from the prior toward 0 as returned volume grows (≈0.417 at
+//     returned=1, ≈0.024 at returned=100).
+//   - A seeded pubkey adds SeedBonus * 2^(-age/SeedHalfLife) on top.
+//   - The result is clamped to [0,1].
 const (
 	defaultUnknownScore  = 0.5
 	smoothingPriorWeight = 5.0 // pretend every indexer has 5 prior neutral hits
@@ -85,8 +85,7 @@ const (
 	// SeedHalfLife is how fast the seed bonus decays. The v1 value
 	// is 90 days — after one half-life a seed's bonus is 0.225, and
 	// after ~6 months it has effectively converged to its organic
-	// score. This matches the research recommendation in v1 blocker
-	// 4: bootstrap aggressively, then let organic signals dominate.
+	// score. Bootstrap aggressively, then let organic signals win.
 	SeedHalfLife = 90 * 24 * time.Hour
 )
 
@@ -96,8 +95,8 @@ type Tracker struct {
 	mu sync.RWMutex
 
 	path string
-	// Records is exposed (lowercase JSON keys) so tests and the
-	// HTTP /status handler can iterate without poking at internal
+	// Records is exported (lowercase JSON key "records") so tests
+	// and the status handler can iterate without poking at internal
 	// fields.
 	Records map[PubKeyHex]*Counters `json:"records"`
 }
@@ -109,7 +108,8 @@ func NewTracker() *Tracker {
 
 // LoadOrCreateTracker reads a Tracker from disk if it exists,
 // otherwise returns an empty one bound to the same path so the
-// next Save persists to that location.
+// next Save persists to that location. Empty path is rejected; a
+// missing file is not an error.
 func LoadOrCreateTracker(path string) (*Tracker, error) {
 	if path == "" {
 		return nil, errors.New("reputation: empty tracker path")
@@ -136,7 +136,7 @@ func LoadOrCreateTracker(path string) (*Tracker, error) {
 }
 
 // Save persists the tracker. Atomic via tempfile + rename. No-op
-// for in-memory trackers (empty path).
+// for in-memory trackers (empty path). Mode 0600.
 func (t *Tracker) Save() error {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -147,8 +147,22 @@ func (t *Tracker) Save() error {
 	if err != nil {
 		return fmt.Errorf("reputation: marshal tracker: %w", err)
 	}
-	tmp := t.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// A UNIQUE tempfile (not a fixed "<path>.tmp") so concurrent Save calls —
+	// the periodic checkpoint racing a user confirm/flag — never share a tmp
+	// inode. Two writers on the same fixed tmp interleave their different-
+	// length JSON into an invalid document that rename then publishes.
+	f, err := os.CreateTemp(filepath.Dir(t.path), filepath.Base(t.path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("reputation: write tracker: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("reputation: write tracker: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("reputation: write tracker: %w", err)
 	}
 	if err := os.Rename(tmp, t.path); err != nil {
@@ -161,8 +175,7 @@ func (t *Tracker) Save() error {
 }
 
 // RecordReturned increments the HitsReturned counter for the given
-// indexer by n. Called by the lookup path every time we receive
-// hits from an indexer.
+// indexer by n. Non-positive n is a no-op and creates no record.
 func (t *Tracker) RecordReturned(pk PubKeyHex, n int) {
 	if n <= 0 {
 		return
@@ -174,10 +187,9 @@ func (t *Tracker) RecordReturned(pk PubKeyHex, n int) {
 	r.LastUpdated = time.Now()
 }
 
-// RecordConfirmed increments HitsConfirmed for every indexer that
-// returned the given infohash recently. M5d wires this to a
-// "torrent download succeeded" event so the boost happens
-// automatically.
+// RecordConfirmed increments HitsConfirmed once per pubkey passed.
+// Empty varargs is a no-op; passing a pubkey k times bumps it k
+// times (multi-source lookups pass each pubkey once per hit).
 func (t *Tracker) RecordConfirmed(pks ...PubKeyHex) {
 	if len(pks) == 0 {
 		return
@@ -191,9 +203,8 @@ func (t *Tracker) RecordConfirmed(pks ...PubKeyHex) {
 	}
 }
 
-// RecordFlagged increments HitsFlagged for every indexer that
-// returned the given infohash. M5d wires this to a `swartznet
-// flag` CLI command.
+// RecordFlagged increments HitsFlagged once per pubkey passed.
+// Symmetric to RecordConfirmed; empty varargs is a no-op.
 func (t *Tracker) RecordFlagged(pks ...PubKeyHex) {
 	if len(pks) == 0 {
 		return
@@ -232,10 +243,11 @@ func (t *Tracker) Score(pk PubKeyHex) float64 {
 }
 
 // scoreOf computes the smoothed score for a Counters record. Pure
-// function; called by Score and the lookup path. Seeded pubkeys
-// (SeededAt non-zero) get an exponentially decaying bonus on top
-// of the organic Bayesian score, so a fresh seed starts near 1.0
-// and converges to its organic score over ~6 months.
+// function. An all-zero record is the neutral prior; otherwise the
+// organic score is Bayesian-smoothed toward the prior, with fewer
+// returned hits giving the prior more weight. Seeded pubkeys add an
+// exponentially decaying bonus, so a fresh seed starts near 1.0 and
+// converges to its organic score over ~6 months.
 func scoreOf(r *Counters) float64 {
 	var organic float64
 	if r.HitsReturned == 0 && r.HitsConfirmed == 0 && r.HitsFlagged == 0 {
@@ -259,7 +271,8 @@ func scoreOf(r *Counters) float64 {
 
 	// Seed bonus: add SeedBonus * 2^(-age / SeedHalfLife) when the
 	// pubkey was imported from a seed list. The bonus starts at
-	// SeedBonus and halves every SeedHalfLife.
+	// SeedBonus and halves every SeedHalfLife. A future SeededAt
+	// clamps age to 0 (full bonus).
 	if !r.SeededAt.IsZero() {
 		age := time.Since(r.SeededAt)
 		if age < 0 {
@@ -278,8 +291,8 @@ func scoreOf(r *Counters) float64 {
 	return organic
 }
 
-// Snapshot returns a copy of every record, suitable for status
-// output. Records are returned in score-descending order.
+// Snapshot returns a copy of every record, sorted score-descending
+// with a lexical PubKey tiebreak. Suitable for status output.
 func (t *Tracker) Snapshot() []SnapshotEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -300,16 +313,17 @@ func (t *Tracker) Snapshot() []SnapshotEntry {
 	return out
 }
 
-// SnapshotEntry is one row in Snapshot output.
+// SnapshotEntry is one row in Snapshot output. Counters is a value
+// copy so callers cannot mutate the tracker through it.
 type SnapshotEntry struct {
 	PubKey   PubKeyHex `json:"pubkey"`
 	Counters Counters  `json:"counters"`
 	Score    float64   `json:"score"`
 }
 
-// Threshold reports whether the given pubkey's score is at least
-// the given cutoff. Used by the lookup path to skip indexers below
-// a configurable demotion threshold.
+// Threshold reports whether pk's score is at least cutoff. A cutoff
+// that is non-positive or NaN always passes (gating disabled), so a
+// zero MinIndexerScore admits everyone.
 func (t *Tracker) Threshold(pk PubKeyHex, cutoff float64) bool {
 	if cutoff <= 0 || math.IsNaN(cutoff) {
 		return true
@@ -317,11 +331,10 @@ func (t *Tracker) Threshold(pk PubKeyHex, cutoff float64) bool {
 	return t.Score(pk) >= cutoff
 }
 
-// MarkSeeded imports a pubkey from a curated seed list. The
-// record is created if missing and its SeededAt / SeedLabel
-// fields are set. Seed membership persists across restarts via
-// Save; re-importing an already-seeded pubkey refreshes SeededAt
-// to "now" (useful if the maintainers re-bless the list).
+// MarkSeeded imports a pubkey from a curated seed list. The record
+// is created if missing and its SeededAt / SeedLabel fields are set.
+// Re-importing an already-seeded pubkey refreshes SeededAt to now,
+// restarting the decay (maintainers re-blessing the list).
 func (t *Tracker) MarkSeeded(pk PubKeyHex, label string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -330,10 +343,7 @@ func (t *Tracker) MarkSeeded(pk PubKeyHex, label string) {
 	r.SeedLabel = label
 }
 
-// IsSeeded reports whether the given pubkey is in the seed list
-// (i.e. was imported via MarkSeeded at some point). The heavy-
-// tail rule in dhtindex.Lookup floats a result as soon as any of
-// its sources is seeded, regardless of the aggregate score.
+// IsSeeded reports whether pk has a record with a non-zero SeededAt.
 func (t *Tracker) IsSeeded(pk PubKeyHex) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -344,9 +354,7 @@ func (t *Tracker) IsSeeded(pk PubKeyHex) bool {
 	return !r.SeededAt.IsZero()
 }
 
-// AnySeeded reports whether any pubkey in the given slice is
-// seeded. Convenience wrapper around IsSeeded for the lookup
-// path's heavy-tail rule.
+// AnySeeded reports whether any pubkey in the slice is seeded.
 func (t *Tracker) AnySeeded(pks []PubKeyHex) bool {
 	for _, pk := range pks {
 		if t.IsSeeded(pk) {
@@ -357,31 +365,26 @@ func (t *Tracker) AnySeeded(pks []PubKeyHex) bool {
 }
 
 // SeedListEntry is one row of the JSON seed-list file format.
-// The version field gates format evolution; v1 is the initial
-// schema shipped with M13c.
 type SeedListEntry struct {
 	PubKey string `json:"pubkey"`
 	Label  string `json:"label,omitempty"`
 }
 
-// SeedList is the top-level JSON structure loaded by
-// LoadSeedList. Lives in its own type so future versions can add
-// fields (signature, issuer, expiry, ...) without breaking the
-// current loader.
+// SeedList is the top-level JSON structure loaded by LoadSeedList.
+// The version field gates format evolution; only v1 is accepted.
 type SeedList struct {
 	Version int             `json:"version"`
 	Seeds   []SeedListEntry `json:"seeds"`
 }
 
 // LoadSeedList reads a seed-list JSON file from path and imports
-// every entry via MarkSeeded. Missing file is not an error — a
-// fresh install is allowed to run without a seed list, at the
-// cost of a cold-start reputation network. Malformed entries are
-// skipped with a warning on the returned error list.
+// every entry via MarkSeeded. Empty path and missing file are not
+// errors (fresh install allowed). A non-v1 version rejects the whole
+// file. Malformed entries are skipped, each contributing one error;
+// valid pubkeys are re-normalized to the canonical lowercase key.
 //
-// Returns (imported, errors) — imported is the count that were
-// successfully added; errors is a per-entry list of failures so
-// the caller can log them without aborting.
+// Returns (imported, errors): imported is the count successfully
+// added; errors is a per-entry (or whole-file) list of failures.
 func (t *Tracker) LoadSeedList(path string) (int, []error) {
 	if path == "" {
 		return 0, nil
@@ -410,7 +413,13 @@ func (t *Tracker) LoadSeedList(path string) (int, []error) {
 			errs = append(errs, fmt.Errorf("reputation: seed entry %d: bad pubkey %q", i, e.PubKey))
 			continue
 		}
-		t.MarkSeeded(PubKeyHex(e.PubKey), e.Label)
+		// Store under the canonical lowercase-hex key derived from the
+		// decoded bytes; seed-list JSON may carry upper/mixed-case hex,
+		// but every lookup path queries the lowercase form, so we must
+		// normalize here or the seed bonus silently never fires.
+		var pk [32]byte
+		copy(pk[:], raw)
+		t.MarkSeeded(PubKey(pk), e.Label)
 		imported++
 	}
 	return imported, errs

@@ -14,14 +14,10 @@ import (
 // main payload lives at word/document.xml; the body text is
 // inside <w:t> elements grouped by <w:p> paragraphs.
 //
-// We do not parse styles, comments, footnotes, or revision
-// history. Just the plain reading-order text from the body
-// document. Tables, headers, and footers are out of scope for M6b
-// (they live in separate XML parts and are easy to add later if
-// real corpora demand them).
-//
-// Like the EPUB extractor, this is pure stdlib + a recover()
-// guard around the XML parser.
+// Styles, comments, footnotes, and revision history are not parsed —
+// just the plain reading-order text from the body document. Tables,
+// headers, and footers live in separate XML parts and are out of
+// scope.
 type DOCXExtractor struct{}
 
 // NewDOCXExtractor returns a ready-to-use DOCXExtractor.
@@ -75,7 +71,10 @@ func (e *DOCXExtractor) Extract(r io.Reader, maxBytes int64) (chunks []Chunk, er
 	}
 	defer rc.Close()
 
-	text, err := extractDocumentText(rc)
+	// Bound the DECOMPRESSED entry stream before it reaches the XML
+	// decoder: the input cap above only limits the compressed bytes,
+	// and a deflate bomb amplifies ~1032:1. See maxDocTextBytes.
+	text, err := extractDocumentText(io.LimitReader(rc, maxDocTextBytes), maxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -99,12 +98,16 @@ func findDocumentXML(zr *zip.Reader) *zip.File {
 // extractDocumentText walks the WordprocessingML XML stream and
 // returns the visible body text. Paragraphs (<w:p>) become blank-
 // line-separated paragraphs in the output; tab and break runs
-// (<w:tab>, <w:br>) are turned into single spaces.
+// (<w:tab>, <w:br>, <w:cr>) are turned into single spaces.
 //
-// Implementation note: we use a token-based decoder rather than
-// xml.Unmarshal so a malformed run inside a giant document does
-// not cause us to allocate a full DOM tree.
-func extractDocumentText(r io.Reader) (string, error) {
+// A token-based decoder is used rather than xml.Unmarshal so a
+// malformed run inside a giant document does not cause a full DOM
+// tree allocation. maxOut bounds the accumulated output text;
+// <= 0 falls back to defaultTextOutputCap.
+func extractDocumentText(r io.Reader, maxOut int64) (string, error) {
+	if maxOut <= 0 {
+		maxOut = defaultTextOutputCap
+	}
 	dec := xml.NewDecoder(r)
 	dec.Strict = false
 	// Permit unknown character entities; some Word docs include
@@ -118,6 +121,12 @@ func extractDocumentText(r io.Reader) (string, error) {
 	)
 
 	for {
+		// Output guard: a zip-bomb DOCX can amplify a tiny compressed
+		// input into gigabytes of <w:t> text. Stop accumulating once
+		// we cross the budget and return the partial result.
+		if int64(out.Len()) > maxOut {
+			break
+		}
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break
@@ -138,13 +147,10 @@ func extractDocumentText(r io.Reader) (string, error) {
 				}
 				inParagraph = true
 			case "t":
-				// <w:t> element wraps a text run. We accept text
-				// from any namespace just in case some
-				// alternative-namespace documents end up here.
+				// <w:t> wraps a text run. Text is accepted from any
+				// namespace (matching is on Name.Local only).
 				inTextRun = true
 			case "tab", "br":
-				// Whitespace runs from <w:tab>, <w:br> become
-				// single spaces. <w:cr> handled too.
 				out.WriteByte(' ')
 			case "cr":
 				out.WriteByte(' ')
@@ -165,15 +171,13 @@ func extractDocumentText(r io.Reader) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-// init registers the DOCX extractor for the canonical Office Open
-// XML MIME type.
-func init() {
-	Register(NewDOCXExtractor(), func(mime string, c Candidate) bool {
-		switch mime {
-		case "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-			"application/msword":
-			return true
-		}
-		return false
-	})
+// claimsDOCX claims the canonical Office Open XML MIME type plus the
+// legacy application/msword alias.
+func claimsDOCX(mime string, c Candidate) bool {
+	switch mime {
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/msword":
+		return true
+	}
+	return false
 }

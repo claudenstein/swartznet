@@ -37,8 +37,8 @@ func TestDOCXEmptyDocumentReturnsNoChunks(t *testing.T) {
 // XML decoder still rejects.
 func TestDOCXMalformedDocumentXMLPropagatesError(t *testing.T) {
 	t.Parallel()
-	// A broken <w:t> tag — opening bracket without closing produces
-	// a token-level decode error even with Strict=false.
+	// A broken tag — opening bracket without closing produces a
+	// token-level decode error even with Strict=false.
 	docXML := `<?xml version="1.0"?><<<w:body</w:document>`
 	data := buildMinimalDOCXRaw(t, docXML)
 

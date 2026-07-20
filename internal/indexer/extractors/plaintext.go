@@ -9,19 +9,14 @@ import (
 	"unicode/utf8"
 )
 
-// PlaintextExtractor reads UTF-8 (or ASCII-safe) text and returns it as a
-// single whole-file Chunk. It refuses files that look binary by checking
-// for NUL bytes in the first few KiB — a heuristic that works reliably for
-// source code, subtitles, logs, and common text formats.
+// PlaintextExtractor reads UTF-8 (or ASCII-safe) text and returns it
+// chunked at paragraph boundaries. It refuses files that look binary by
+// checking for NUL bytes in the first few KiB — a heuristic that works
+// reliably for source code, logs, and common text formats.
 //
-// Later milestones will extend this with:
-//   - Per-paragraph chunking for large documents.
-//   - Charset detection (chardet) for non-UTF-8 files.
-//   - Newline normalisation and whitespace collapse.
-//
-// Name returns "plaintext" — this is the string that will land on the
-// ContentDoc's Extractor field so downstream analytics can tell how a
-// given document was produced.
+// Raw .html/.htm files are handled here WITH TAGS LEFT IN (text/html is
+// in the accept list); the tag-stripping HTML walker runs only inside
+// the EPUB and ZIM extractors. There is no standalone HTML extractor.
 type PlaintextExtractor struct {
 	// sniffBytes is the prefix length we look at to decide whether a file
 	// is actually text. 4 KiB is plenty in practice and catches almost
@@ -40,11 +35,11 @@ func (*PlaintextExtractor) Name() string { return "plaintext" }
 // Extract implements Extractor.
 //
 // It reads up to maxBytes of r, refuses files that contain NUL bytes in
-// the sniff prefix, and returns the whole content as a single Chunk at
-// offset 0. UTF-8 validation is performed; files that fail UTF-8
-// validation are returned anyway with their invalid bytes replaced by
-// the Unicode replacement character, on the assumption that being able
-// to search the readable parts is better than failing entirely.
+// the sniff prefix, and returns the content chunked via chunkText.
+// UTF-8 validation is performed; files that fail UTF-8 validation are
+// returned anyway with their invalid bytes replaced by the Unicode
+// replacement character, on the assumption that being able to search
+// the readable parts is better than failing entirely.
 func (e *PlaintextExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, error) {
 	if maxBytes <= 0 {
 		maxBytes = 32 * 1024 * 1024 // safety ceiling: 32 MiB
@@ -53,7 +48,7 @@ func (e *PlaintextExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, erro
 	br := bufio.NewReaderSize(r, 32*1024)
 
 	// Sniff: peek at the first e.sniffBytes bytes (or however many exist)
-	// and bail out if any NUL shows up. A trailing UTF-8 BOM is also
+	// and bail out if any NUL shows up. A leading UTF-8 BOM is also
 	// consumed here if present.
 	sniff, _ := br.Peek(e.sniffBytes)
 	if bytes.IndexByte(sniff, 0) != -1 {
@@ -83,8 +78,6 @@ func (e *PlaintextExtractor) Extract(r io.Reader, maxBytes int64) ([]Chunk, erro
 	if trimmed == "" {
 		return nil, nil
 	}
-	// Split into ~10 KiB chunks at paragraph boundaries. Small files
-	// come back as a single chunk (see chunker.go smallFileFactor).
 	return chunkText(out, DefaultChunkTargetBytes), nil
 }
 
@@ -108,36 +101,27 @@ func sanitizeUTF8(b []byte) string {
 	return sb.String()
 }
 
-// Register the plaintext extractor in the dispatch table. This init
-// fires at package load time, so callers of extractors.Dispatch() just
-// work without any explicit setup.
-//
-// Subtitle formats (.srt/.vtt) are deliberately excluded here so that
-// the more specific SubtitleExtractor can claim them — that one strips
-// timestamps and only indexes the dialog text, which is far more useful
-// than the raw file with timecodes mixed in.
-func init() {
-	Register(NewPlaintextExtractor(), func(mime string, c Candidate) bool {
-		// Claim anything that looks like text and is not obviously too
-		// large. The 32 MiB upper bound matches the Extract default; the
-		// indexer pipeline may impose a tighter cap for M2.2a.
-		if c.Size > 100*1024*1024 {
-			return false
-		}
-		switch mime {
-		case "application/x-subrip", "text/vtt", "text/x-ssa":
-			// Subtitle formats are handled by SubtitleExtractor.
-			return false
-		case "text/plain",
-			"text/markdown",
-			"text/html",
-			"text/xml",
-			"text/csv",
-			"text/javascript",
-			"application/json",
-			"application/xml":
-			return true
-		}
-		return strings.HasPrefix(mime, "text/")
-	})
+// claimsPlaintext claims anything that looks like text and is not
+// obviously too large. Subtitle formats (.srt/.vtt/.ass) are deliberately
+// declined so the more specific SubtitleExtractor claims them — that one
+// strips timestamps and only indexes the dialog text.
+func claimsPlaintext(mime string, c Candidate) bool {
+	if c.Size > 100*1024*1024 {
+		return false
+	}
+	switch mime {
+	case "application/x-subrip", "text/vtt", "text/x-ssa":
+		// Subtitle formats are handled by SubtitleExtractor.
+		return false
+	case "text/plain",
+		"text/markdown",
+		"text/html",
+		"text/xml",
+		"text/csv",
+		"text/javascript",
+		"application/json",
+		"application/xml":
+		return true
+	}
+	return strings.HasPrefix(mime, "text/")
 }

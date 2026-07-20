@@ -9,6 +9,5 @@ import (
 //go:embed assets/Icon.png
 var iconBytes []byte
 
-// AppIcon is the SwartzNet application icon used for the window
-// title bar and system tray.
+// AppIcon is the embedded window/tray icon.
 var AppIcon = fyne.NewStaticResource("Icon.png", iconBytes)

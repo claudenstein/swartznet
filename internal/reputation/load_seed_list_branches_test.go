@@ -62,6 +62,37 @@ func TestLoadSeedListBadJSON(t *testing.T) {
 	}
 }
 
+// TestLoadSeedListNormalizesUppercaseHex covers the canonical-key
+// normalization in LoadSeedList. A valid but upper-case hex pubkey
+// in the seed file must be stored under the lowercase key so that
+// IsSeeded(lowercase) — the form every lookup path uses — returns
+// true. Before normalization the record was keyed by the raw
+// upper-case string and the seed bonus silently never fired.
+func TestLoadSeedListNormalizesUppercaseHex(t *testing.T) {
+	t.Parallel()
+	tr := reputation.NewTracker()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seeds.json")
+
+	// 32-byte key (64 hex chars) written entirely upper-case.
+	const lower = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	upper := strings.ToUpper(lower)
+	if err := os.WriteFile(path, []byte(`{"version":1,"seeds":[{"pubkey":"`+upper+`","label":"curated"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	imported, errs := tr.LoadSeedList(path)
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	if imported != 1 {
+		t.Fatalf("imported = %d, want 1", imported)
+	}
+	if !tr.IsSeeded(reputation.PubKeyHex(lower)) {
+		t.Errorf("IsSeeded(lowercase) = false, want true (seed stored under non-canonical key)")
+	}
+}
+
 // TestLoadSeedListUnsupportedVersion covers the
 // `list.Version != 1 → unsupported version` branch.
 func TestLoadSeedListUnsupportedVersion(t *testing.T) {

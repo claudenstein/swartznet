@@ -1,59 +1,39 @@
 package engine
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/anacrolix/torrent"
 )
 
-// FileSnapshot is the per-file view returned by Engine.TorrentFiles.
-// Populated at call time from the underlying anacrolix/torrent File.
+// FileSnapshot is one file's state for the files UI.
 type FileSnapshot struct {
-	// Index is the file's position in t.Files().
-	Index int
-	// Path is the path relative to the torrent's info.name
-	// directory. For single-file torrents this equals Name.
-	Path string
-	// DisplayPath is the user-visible rendering including the
-	// torrent name prefix.
-	DisplayPath string
-	// Length is the total bytes of this file.
-	Length int64
-	// BytesCompleted is the bytes verified on disk.
+	Index          int
+	Path           string
+	DisplayPath    string
+	Length         int64
 	BytesCompleted int64
-	// Progress is BytesCompleted / Length in [0, 1].
-	Progress float64
-	// Priority is the current piece priority applied to this
-	// file. "none" means the file will not be downloaded.
-	Priority string
+	Progress       float64
+	Priority       string // none | normal | high
 }
 
-// FilePriority is the stringified form of torrent.PiecePriority the
-// GUI exposes. We keep it as a small enum (none / normal / high) to
-// match common torrent-client conventions; internally this maps to
-// anacrolix's PiecePriorityNone / PiecePriorityNormal /
-// PiecePriorityHigh.
-type FilePriority string
-
-const (
-	FilePriorityNone   FilePriority = "none"
-	FilePriorityNormal FilePriority = "normal"
-	FilePriorityHigh   FilePriority = "high"
-)
-
-func (p FilePriority) toAnacrolix() (torrent.PiecePriority, error) {
-	switch p {
-	case FilePriorityNone:
+// parsePriority maps the user-facing priority names. Empty means normal.
+func parsePriority(s string) (torrent.PiecePriority, error) {
+	switch s {
+	case "none":
 		return torrent.PiecePriorityNone, nil
-	case FilePriorityNormal, "":
+	case "normal", "":
 		return torrent.PiecePriorityNormal, nil
-	case FilePriorityHigh:
+	case "high":
 		return torrent.PiecePriorityHigh, nil
+	default:
+		return 0, fmt.Errorf("engine: unknown file priority %q (want none/normal/high)", s)
 	}
-	return 0, fmt.Errorf("engine: unknown file priority %q (want none/normal/high)", p)
 }
 
+// priorityLabel collapses anacrolix's internal priorities for display: None
+// and High keep their names; Normal and the internal Readahead/Next/Now all
+// render "normal".
 func priorityLabel(p torrent.PiecePriority) string {
 	switch p {
 	case torrent.PiecePriorityNone:
@@ -61,33 +41,25 @@ func priorityLabel(p torrent.PiecePriority) string {
 	case torrent.PiecePriorityHigh:
 		return "high"
 	default:
-		// PiecePriorityNormal + the internal PiecePriorityReadahead /
-		// PiecePriorityNext / PiecePriorityNow all surface as "normal"
-		// for UI purposes; the distinctions matter only inside the
-		// request strategy.
 		return "normal"
 	}
 }
 
-// TorrentFiles returns a per-file snapshot for the torrent. Returns
-// an error if the infohash is unknown. If the torrent has not yet
-// received its info dictionary, returns an empty slice.
-func (e *Engine) TorrentFiles(infoHashHex string) ([]FileSnapshot, error) {
-	h, err := e.handleByHex(infoHashHex)
+// TorrentFiles lists a torrent's files. Pre-metadata torrents yield an empty
+// slice — not nil, not an error.
+func (e *Engine) TorrentFiles(ihHex string) ([]FileSnapshot, error) {
+	h, err := e.handleByHex(ihHex)
 	if err != nil {
 		return nil, err
 	}
+	out := make([]FileSnapshot, 0)
 	if h.T.Info() == nil {
-		return []FileSnapshot{}, nil
+		return out, nil
 	}
-	files := h.T.Files()
-	out := make([]FileSnapshot, 0, len(files))
-	for i, f := range files {
-		length := f.Length()
-		completed := f.BytesCompleted()
+	for i, f := range h.T.Files() {
 		var progress float64
-		if length > 0 {
-			progress = float64(completed) / float64(length)
+		if f.Length() > 0 {
+			progress = float64(f.BytesCompleted()) / float64(f.Length())
 			if progress > 1 {
 				progress = 1
 			}
@@ -96,8 +68,8 @@ func (e *Engine) TorrentFiles(infoHashHex string) ([]FileSnapshot, error) {
 			Index:          i,
 			Path:           f.Path(),
 			DisplayPath:    f.DisplayPath(),
-			Length:         length,
-			BytesCompleted: completed,
+			Length:         f.Length(),
+			BytesCompleted: f.BytesCompleted(),
 			Progress:       progress,
 			Priority:       priorityLabel(f.Priority()),
 		})
@@ -105,32 +77,27 @@ func (e *Engine) TorrentFiles(infoHashHex string) ([]FileSnapshot, error) {
 	return out, nil
 }
 
-// SetFilePriority flips the download priority for a single file in
-// a multi-file torrent. Priority "none" removes the file from the
-// download set (anacrolix will skip its pieces and not verify them
-// against peers); "normal" and "high" both include the file but
-// "high" asks anacrolix to request those pieces first. Idempotent.
-func (e *Engine) SetFilePriority(infoHashHex string, fileIndex int, priority FilePriority) error {
-	h, err := e.handleByHex(infoHashHex)
+// SetFilePriority sets one file's priority. "none" removes the file from the
+// download set; an all-none torrent stops occupying a queue slot, so a
+// promotion pass runs after every change.
+func (e *Engine) SetFilePriority(ihHex string, index int, priority string) error {
+	h, err := e.handleByHex(ihHex)
 	if err != nil {
 		return err
 	}
 	if h.T.Info() == nil {
-		return errors.New("engine: torrent metadata not yet available")
+		return fmt.Errorf("engine: torrent metadata not yet available")
 	}
 	files := h.T.Files()
-	if fileIndex < 0 || fileIndex >= len(files) {
-		return fmt.Errorf("engine: file index %d out of range [0, %d)", fileIndex, len(files))
+	if index < 0 || index >= len(files) {
+		return fmt.Errorf("engine: file index %d out of range [0, %d)", index, len(files))
 	}
-	prio, err := priority.toAnacrolix()
+	p, err := parsePriority(priority)
 	if err != nil {
 		return err
 	}
-	files[fileIndex].SetPriority(prio)
-	e.log.Info("engine.file_priority_set",
-		"info_hash", infoHashHex,
-		"file_index", fileIndex,
-		"priority", string(priority),
-	)
+	files[index].SetPriority(p)
+	e.log.Info("engine.file_priority_set", "info_hash", h.InfoHashHex(), "file_index", index, "priority", priority)
+	go e.promoteQueued()
 	return nil
 }

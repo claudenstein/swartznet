@@ -78,7 +78,7 @@ func TestEstimatedItemsSaturated(t *testing.T) {
 }
 
 // TestReadBloomBitsLenInconsistent covers readBloom's
-// `if bitsLen > (m+63)/64+1` guard. Hand-craft a header whose
+// `if bitsLen != (m+63)/64` guard. Hand-craft a header whose
 // declared bitsLen exceeds what m would allow, and verify
 // readBloom rejects rather than allocating a huge slice.
 func TestReadBloomBitsLenInconsistent(t *testing.T) {
@@ -86,8 +86,8 @@ func TestReadBloomBitsLenInconsistent(t *testing.T) {
 	hdr := make([]byte, 24)
 	copy(hdr[0:4], bloomFileMagic)
 	binary.LittleEndian.PutUint16(hdr[4:6], bloomFileVersion)
-	binary.LittleEndian.PutUint16(hdr[6:8], 4)              // k=4
-	binary.LittleEndian.PutUint64(hdr[8:16], 64)            // m=64 → expected bitsLen ~1
+	binary.LittleEndian.PutUint16(hdr[6:8], 4)               // k=4
+	binary.LittleEndian.PutUint64(hdr[8:16], 64)             // m=64 → expected bitsLen ~1
 	binary.LittleEndian.PutUint64(hdr[16:24], 1_000_000_000) // huge claimed bitsLen
 	if _, err := readBloom(bytes.NewReader(hdr)); err == nil {
 		t.Error("readBloom should reject bitsLen inconsistent with m")
@@ -101,13 +101,14 @@ func TestReadBloomBitsLenInconsistent(t *testing.T) {
 // The 2nd ReadFull returns io.EOF / unexpected EOF.
 func TestReadBloomBitsReadError(t *testing.T) {
 	t.Parallel()
-	// m=64 → expected bitsLen = (64+63)/64 + 1 = 2.
+	// m=128 → expected bitsLen = (128+63)/64 = 2, so the header
+	// passes the exact-match guard and the loop does the failing.
 	hdr := make([]byte, 24)
 	copy(hdr[0:4], bloomFileMagic)
 	binary.LittleEndian.PutUint16(hdr[4:6], bloomFileVersion)
-	binary.LittleEndian.PutUint16(hdr[6:8], 4)   // k=4
-	binary.LittleEndian.PutUint64(hdr[8:16], 64) // m=64
-	binary.LittleEndian.PutUint64(hdr[16:24], 2) // bitsLen=2
+	binary.LittleEndian.PutUint16(hdr[6:8], 4)    // k=4
+	binary.LittleEndian.PutUint64(hdr[8:16], 128) // m=128
+	binary.LittleEndian.PutUint64(hdr[16:24], 2)  // bitsLen=2
 	// Provide only 8 bytes of bits (= 1 entry); the second
 	// ReadFull fails.
 	body := append(hdr, make([]byte, 8)...)

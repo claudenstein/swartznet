@@ -1,12 +1,6 @@
-// Package web embeds SwartzNet's static web UI assets into the
-// httpapi binary so the daemon can serve them without depending
-// on a working directory or external file paths.
-//
-// The package only exists to host the //go:embed directive and
-// expose the resulting fs.FS so internal/httpapi can register it
-// against the http.ServeMux. The actual files (index.html,
-// static/style.css, static/app.js) live alongside this Go file
-// and are bundled at build time.
+// Package web embeds the SwartzNet web UI assets served by httpapi. The file
+// layout — index.html at the root plus a static/ tree — is the frozen
+// contract; the page content grows slice by slice.
 package web
 
 import (
@@ -17,9 +11,5 @@ import (
 //go:embed index.html static/*
 var rawAssets embed.FS
 
-// Assets returns the embedded asset file system, ready to hand
-// to http.FileServer. Errors only on a programmer bug — the
-// embed.FS root is determined at compile time.
-func Assets() fs.FS {
-	return rawAssets
-}
+// Assets returns the embedded web UI file tree.
+func Assets() fs.FS { return rawAssets }

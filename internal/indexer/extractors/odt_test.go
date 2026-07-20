@@ -74,11 +74,10 @@ func buildODTContentXML(paragraphs []string) string {
 }
 
 // TestODTExtractsTextSpaceTabAndLineBreak covers extractODTText's
-// `case "s", "tab", "line-break": out.WriteByte(' ')` arm at
-// odt.go:130-131. The element-name switch fires on each of these
-// short text decorators, emitting a single space; the existing
-// happy-path test only uses <text:p> bodies and never reaches
-// the decorator arm.
+// `case "s", "tab", "line-break": out.WriteByte(' ')` arm. The
+// element-name switch fires on each of these short text decorators,
+// emitting a single space; the happy-path test only uses <text:p>
+// bodies and never reaches the decorator arm.
 func TestODTExtractsTextSpaceTabAndLineBreak(t *testing.T) {
 	t.Parallel()
 	xmlBody := `<?xml version="1.0"?>` +

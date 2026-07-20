@@ -1,240 +1,145 @@
-package httpapi_test
+package httpapi
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
-	"sync"
+	"strings"
 	"testing"
-	"time"
-
-	"github.com/swartznet/swartznet/internal/httpapi"
 )
 
-// fakeCompanion satisfies httpapi.CompanionController so the
-// companion endpoints can be exercised without spinning up a
-// real publisher / subscriber worker.
 type fakeCompanion struct {
-	mu          sync.Mutex
-	pubStatus   httpapi.CompanionPublisherStatus
-	subStatus   []httpapi.CompanionFollowStatus
-	refreshErr  error
-	follows     []followCall
-	unfollows   []followCall
-	followErr   error
-	unfollowErr error
+	pubStatus  CompanionPublisherStatus
+	subStatus  []CompanionFollowStatus
+	refreshErr error
+	followErr  error
+	lastFollow [32]byte
+	lastLabel  string
 }
 
-type followCall struct {
-	pubkey [32]byte
-	label  string
+func (f *fakeCompanion) PublisherStatus() CompanionPublisherStatus { return f.pubStatus }
+func (f *fakeCompanion) RefreshNow() error                         { return f.refreshErr }
+func (f *fakeCompanion) SubscriberStatus() []CompanionFollowStatus { return f.subStatus }
+func (f *fakeCompanion) Follow(pk [32]byte, label string) error {
+	f.lastFollow, f.lastLabel = pk, label
+	return f.followErr
 }
+func (f *fakeCompanion) Unfollow(pk [32]byte) error { f.lastFollow = pk; return f.followErr }
 
-func (f *fakeCompanion) PublisherStatus() httpapi.CompanionPublisherStatus {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.pubStatus
-}
-
-func (f *fakeCompanion) RefreshNow() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.refreshErr
-}
-
-func (f *fakeCompanion) SubscriberStatus() []httpapi.CompanionFollowStatus {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.subStatus
-}
-
-func (f *fakeCompanion) Follow(pubkey [32]byte, label string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.followErr != nil {
-		return f.followErr
+// TestCompanionFollowStatusCodes proves the follow/refresh error mapping: a
+// "feature not wired" error (wrapping ErrCompanionUnavailable) is 503 so a
+// client disables the control, while a genuine failure stays 500 — the fix for
+// follow returning 500 when the subscriber is simply not configured (e.g.
+// --no-dht), which a web/CLI client cannot distinguish from a real error.
+func TestCompanionFollowStatusCodes(t *testing.T) {
+	t.Parallel()
+	body := func() *bytes.Reader {
+		b, _ := json.Marshal(followRequestBody{PubKey: strings.Repeat("ab", 32)})
+		return bytes.NewReader(b)
 	}
-	f.follows = append(f.follows, followCall{pubkey: pubkey, label: label})
-	return nil
-}
-
-func (f *fakeCompanion) Unfollow(pubkey [32]byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.unfollowErr != nil {
-		return f.unfollowErr
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"unavailable → 503", fmt.Errorf("subscriber not configured: %w", ErrCompanionUnavailable), http.StatusServiceUnavailable},
+		{"generic failure → 500", errors.New("disk on fire"), http.StatusInternalServerError},
+		{"success → 200", nil, http.StatusOK},
 	}
-	f.unfollows = append(f.unfollows, followCall{pubkey: pubkey})
-	return nil
-}
-
-func newCompanionTestServer(t *testing.T, fc *fakeCompanion) (*httpapi.Server, string) {
-	t.Helper()
-	s := httpapi.NewWithOptions("localhost:0", silentLogger(), httpapi.Options{
-		Companion: fc,
-	})
-	if err := s.Start(); err != nil {
-		t.Fatal(err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := startSearchServer(t, Options{Companion: &fakeCompanion{followErr: tc.err}})
+			resp, err := http.Post("http://"+addr+"/companion/follow", "application/json", body())
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("follow status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = s.Stop(ctx)
-	})
-	return s, "http://" + s.Addr()
 }
 
-func TestHTTPCompanionStatus(t *testing.T) {
+func TestCompanionStatusRoute(t *testing.T) {
 	t.Parallel()
 	fc := &fakeCompanion{
-		pubStatus: httpapi.CompanionPublisherStatus{
-			PubKeyHex:      "abcd",
-			LastInfoHash:   "1234",
-			PublishedCount: 7,
-		},
-		subStatus: []httpapi.CompanionFollowStatus{
-			{PubKeyHex: "ee", Label: "test", TorrentsImported: 3},
-		},
+		pubStatus: CompanionPublisherStatus{PubKeyHex: strings.Repeat("ab", 32), PublishedCount: 3},
+		subStatus: []CompanionFollowStatus{{PubKeyHex: strings.Repeat("cd", 32), TorrentsImported: 2}},
 	}
-	_, base := newCompanionTestServer(t, fc)
-
-	resp, err := http.Get(base + "/companion")
+	addr := startSearchServer(t, Options{Companion: fc})
+	resp, err := http.Get("http://" + addr + "/companion")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	var out httpapi.CompanionStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	if out.Publisher.PubKeyHex != "abcd" {
-		t.Errorf("publisher pubkey = %q, want abcd", out.Publisher.PubKeyHex)
-	}
-	if len(out.Subscriber) != 1 || out.Subscriber[0].PubKeyHex != "ee" {
-		t.Errorf("subscriber rows = %+v", out.Subscriber)
+	var doc CompanionStatusResponse
+	json.NewDecoder(resp.Body).Decode(&doc)
+	if doc.Publisher.PublishedCount != 3 || len(doc.Subscriber) != 1 {
+		t.Fatalf("doc = %+v", doc)
 	}
 }
 
-func TestHTTPCompanionStatusUnconfigured(t *testing.T) {
+func TestCompanionStatusUnconfigured503(t *testing.T) {
 	t.Parallel()
-	s := httpapi.NewWithOptions("localhost:0", silentLogger(), httpapi.Options{})
-	if err := s.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = s.Stop(context.Background()) }()
-
-	resp, err := http.Get("http://" + s.Addr() + "/companion")
+	addr := startSearchServer(t, Options{}) // no Companion
+	resp, err := http.Get("http://" + addr + "/companion")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", resp.StatusCode)
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
 	}
 }
 
-func TestHTTPCompanionRefresh(t *testing.T) {
+func TestCompanionRefreshThrottle429(t *testing.T) {
 	t.Parallel()
-	fc := &fakeCompanion{}
-	_, base := newCompanionTestServer(t, fc)
-
-	resp, err := http.Post(base+"/companion/refresh", "application/json", bytes.NewReader([]byte(`{}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("refresh status = %d, want 200", resp.StatusCode)
-	}
-}
-
-func TestHTTPCompanionRefreshThrottled(t *testing.T) {
-	t.Parallel()
-	fc := &fakeCompanion{refreshErr: errors.New("too soon")}
-	_, base := newCompanionTestServer(t, fc)
-
-	resp, err := http.Post(base+"/companion/refresh", "application/json", bytes.NewReader([]byte(`{}`)))
+	fc := &fakeCompanion{refreshErr: errors.New("companion: refresh throttled")}
+	addr := startSearchServer(t, Options{Companion: fc})
+	req, _ := http.NewRequest("POST", "http://"+addr+"/companion/refresh", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Origin", "http://localhost:7654")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("refresh status = %d, want 429", resp.StatusCode)
+		t.Fatalf("throttled refresh = %d, want 429", resp.StatusCode)
 	}
 }
 
-func TestHTTPCompanionFollow(t *testing.T) {
+func TestCompanionFollowValidatesPubKey(t *testing.T) {
 	t.Parallel()
 	fc := &fakeCompanion{}
-	_, base := newCompanionTestServer(t, fc)
-
-	body := `{"pubkey":"` + bytesHex64() + `","label":"test"}`
-	resp, err := http.Post(base+"/companion/follow", "application/json", bytes.NewReader([]byte(body)))
-	if err != nil {
-		t.Fatal(err)
+	addr := startSearchServer(t, Options{Companion: fc})
+	post := func(body string) int {
+		req, _ := http.NewRequest("POST", "http://"+addr+"/companion/follow", bytes.NewReader([]byte(body)))
+		req.Header.Set("Origin", "http://localhost:7654")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		buf, _ := io.ReadAll(resp.Body)
-		t.Fatalf("follow status = %d body=%s", resp.StatusCode, buf)
+	if code := post(`{"pubkey":"tooshort"}`); code != http.StatusBadRequest {
+		t.Errorf("short pubkey = %d, want 400", code)
 	}
-	if len(fc.follows) != 1 {
-		t.Errorf("follow count = %d, want 1", len(fc.follows))
+	if code := post(`{"pubkey":"` + strings.Repeat("zz", 32) + `"}`); code != http.StatusBadRequest {
+		t.Errorf("non-hex pubkey = %d, want 400", code)
 	}
-	if fc.follows[0].label != "test" {
-		t.Errorf("follow label = %q, want test", fc.follows[0].label)
+	good := strings.Repeat("ab", 32)
+	if code := post(`{"pubkey":"` + good + `","label":"seed"}`); code != http.StatusOK {
+		t.Errorf("valid follow = %d, want 200", code)
 	}
-}
-
-func TestHTTPCompanionFollowBadPubKey(t *testing.T) {
-	t.Parallel()
-	fc := &fakeCompanion{}
-	_, base := newCompanionTestServer(t, fc)
-
-	body := `{"pubkey":"too-short","label":"x"}`
-	resp, err := http.Post(base+"/companion/follow", "application/json", bytes.NewReader([]byte(body)))
-	if err != nil {
-		t.Fatal(err)
+	if fc.lastLabel != "seed" {
+		t.Errorf("label not threaded: %q", fc.lastLabel)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("follow status = %d, want 400", resp.StatusCode)
-	}
-	if len(fc.follows) != 0 {
-		t.Errorf("follow recorded despite bad pubkey: %+v", fc.follows)
-	}
-}
-
-func TestHTTPCompanionUnfollow(t *testing.T) {
-	t.Parallel()
-	fc := &fakeCompanion{}
-	_, base := newCompanionTestServer(t, fc)
-
-	body := `{"pubkey":"` + bytesHex64() + `"}`
-	resp, err := http.Post(base+"/companion/unfollow", "application/json", bytes.NewReader([]byte(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		buf, _ := io.ReadAll(resp.Body)
-		t.Fatalf("unfollow status = %d body=%s", resp.StatusCode, buf)
-	}
-	if len(fc.unfollows) != 1 {
-		t.Errorf("unfollow count = %d, want 1", len(fc.unfollows))
-	}
-}
-
-// bytesHex64 returns 64 zero hex chars — a syntactically valid
-// pubkey for the validation pass. The fake companion does not
-// care what the bytes are.
-func bytesHex64() string {
-	return "0000000000000000000000000000000000000000000000000000000000000000"
 }

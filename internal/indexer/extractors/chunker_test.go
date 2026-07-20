@@ -9,7 +9,7 @@ func TestChunkTextSmallStaysWhole(t *testing.T) {
 	t.Parallel()
 	// A small-enough input should come back as a single chunk —
 	// the smallFileFactor optimisation avoids splitting. Sized to
-	// fit the M13e post-shrink target (2 KiB) with room to spare.
+	// fit the 2 KiB target with room to spare.
 	text := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20)
 	if len(text) >= DefaultChunkTargetBytes {
 		t.Fatalf("fixture too big: %d bytes", len(text))
@@ -118,6 +118,31 @@ func TestChunkTextOffsetsPointToParagraphs(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no chunk begins at or after p2 start offset %d", p2Start)
+	}
+}
+
+// TestChunkTextOffsetsPointAtParagraphFirstByte pins the rebuild fix
+// for the legacy off-by-blank-run quirk: a chunk that begins after a
+// blank-line run carries the offset of the paragraph's FIRST byte,
+// not of the preceding blank run. Verified by slicing the input at
+// each chunk's offset and requiring a non-blank first byte.
+func TestChunkTextOffsetsPointAtParagraphFirstByte(t *testing.T) {
+	t.Parallel()
+	p1 := strings.Repeat("alpha ", 600) // ~3.6 KB, forces its own chunk(s)
+	p2 := strings.Repeat("beta ", 600)
+	text := p1 + "\n\n\n\n" + p2 // extra blank lines between paragraphs
+
+	chunks := chunkText(text, DefaultChunkTargetBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if c.Offset >= int64(len(text)) {
+			t.Fatalf("chunk %d offset %d out of range", i, c.Offset)
+		}
+		if b := text[c.Offset]; b == '\n' || b == '\r' {
+			t.Errorf("chunk %d offset %d points at a blank-run byte %q", i, c.Offset, b)
+		}
 	}
 }
 

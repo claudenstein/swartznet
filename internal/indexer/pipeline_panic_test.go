@@ -39,7 +39,7 @@ func (e *panicExtractor) Extract(r io.Reader, maxBytes int64) ([]extractors.Chun
 func TestSafeExtractConvertsStringPanicToError(t *testing.T) {
 	t.Parallel()
 	ex := &panicExtractor{mode: "string"}
-	chunks, err := safeExtract(ex, strings.NewReader("payload bytes"), 1024)
+	chunks, err := safeExtract(nil, ex, strings.NewReader("payload bytes"), 1024)
 	if err == nil {
 		t.Fatal("expected error from panicking extractor, got nil")
 	}
@@ -57,7 +57,7 @@ func TestSafeExtractConvertsStringPanicToError(t *testing.T) {
 func TestSafeExtractConvertsErrorPanicToError(t *testing.T) {
 	t.Parallel()
 	ex := &panicExtractor{mode: "error"}
-	_, err := safeExtract(ex, strings.NewReader("payload"), 1024)
+	_, err := safeExtract(nil, ex, strings.NewReader("payload"), 1024)
 	if err == nil {
 		t.Fatal("expected error from panic(error)")
 	}
@@ -69,7 +69,7 @@ func TestSafeExtractConvertsErrorPanicToError(t *testing.T) {
 func TestSafeExtractConvertsNilDerefPanicToError(t *testing.T) {
 	t.Parallel()
 	ex := &panicExtractor{mode: "nil"}
-	_, err := safeExtract(ex, strings.NewReader("payload"), 1024)
+	_, err := safeExtract(nil, ex, strings.NewReader("payload"), 1024)
 	if err == nil {
 		t.Fatal("expected error from nil deref")
 	}
@@ -89,7 +89,7 @@ func (*happyExtractor) Extract(r io.Reader, maxBytes int64) ([]extractors.Chunk,
 func TestSafeExtractHappyPathIsUnchanged(t *testing.T) {
 	t.Parallel()
 	ex := &happyExtractor{}
-	chunks, err := safeExtract(ex, strings.NewReader("hello"), 1024)
+	chunks, err := safeExtract(nil, ex, strings.NewReader("hello"), 1024)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

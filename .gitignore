@@ -44,3 +44,15 @@ Thumbs.db
 /tests/torrent-test/peer*-index/
 /tests/torrent-test/results/
 .claude/
+
+# Editor artifacts
+.obsidian/
+
+# LaTeX build artifacts (whitepaper). *.out and *.log already covered above.
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.bbl
+*.blg

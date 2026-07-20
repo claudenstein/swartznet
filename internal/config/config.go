@@ -1,250 +1,187 @@
-// Package config holds the runtime configuration for a SwartzNet instance.
+// Package config holds the SwartzNet configuration struct, XDG path
+// resolution, and validation. It imports no subsystem: no Bleve, no DHT, no
+// wire, no HTTP.
 //
-// Configuration is intentionally minimal for M1: the fields here are the ones
-// the Engine needs to bring up an anacrolix/torrent Client. Later milestones
-// will add index paths, publisher keys, search caps, etc. — each new field
-// should have a sensible default so that an out-of-the-box run still works.
+// Path semantics: an empty path consistently means "feature off" (SPEC §5.8).
+// Validate creates exactly two directories — DataDir and IndexDir's parent —
+// and nothing else.
 package config
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
+	"time"
 )
 
-// Config is the top-level runtime configuration for a SwartzNet instance.
-//
-// The zero value is not usable; call Default() and then override fields.
+// Config is the SwartzNet node configuration shared by every frontend.
+// Fields arrive slice by slice as their subsystems land; only the walking
+// skeleton's fields exist so far.
 type Config struct {
-	// DataDir is the filesystem directory where downloaded torrent content
-	// is stored. It is created if missing.
+	// DataDir receives downloaded content. Must be non-empty.
 	DataDir string
-
-	// ListenPort is the TCP/uTP listen port for the BitTorrent peer wire. A
-	// value of 0 lets the OS pick a free port (convenient for tests and
-	// multi-instance local runs).
+	// IndexDir holds the Bleve search index. Empty disables indexing.
+	// Validate creates only its parent: Bleve insists on creating the leaf.
+	IndexDir string
+	// IdentityPath locates the persistent ed25519 node identity (a raw
+	// 64-byte key file, mode exactly 0600). Empty disables identity
+	// entirely. Validate never touches it — the identity loader owns its
+	// own parent-dir creation.
+	IdentityPath string
+	// TrustPath locates the publisher allowlist (trust.json). Empty =
+	// trust nobody.
+	TrustPath string
+	// BloomPath locates the known-good Bloom filter. Empty disables it.
+	BloomPath string
+	// ReputationPath locates the per-indexer reputation tracker. Empty
+	// disables it.
+	ReputationPath string
+	// PublisherPath locates the Layer-D publisher manifest (publisher.json),
+	// the full hit list this node re-announces on every refresh. Empty keeps
+	// the manifest in memory only (a fresh process re-publishes from scratch).
+	PublisherPath string
+	// CompanionDir holds the companion content-index payload (*.json.gz) and
+	// its wrapping .torrent (Slice 10). Empty disables BOTH the companion
+	// publisher and subscriber.
+	CompanionDir string
+	// CompanionFollowFile is the JSON array of followed publisher pubkeys the
+	// subscriber loads at startup and persists on follow/unfollow. Empty keeps
+	// follows in memory only (added at runtime, lost on restart).
+	CompanionFollowFile string
+	// SeedListPath locates the reputation seed list (seeds.json). Empty
+	// skips it.
+	SeedListPath string
+	// ListenPort is the BitTorrent listen port (0 = OS-assigned).
 	ListenPort int
-
-	// ListenHost, when non-empty, binds the BitTorrent peer-wire
-	// and DHT listeners to the given interface (e.g. "127.0.0.1"
-	// to stay on loopback). Empty (the default) delegates to
-	// anacrolix/torrent's default, which is "" → 0.0.0.0.
-	//
-	// Operators rarely need to touch this; the in-process testlab
-	// harness sets it to "127.0.0.1" so the DHT's BEP-44 tokens
-	// (which are keyed on the query's source IP) stay consistent
-	// across a multi-node cluster. Without it the OS may pick
-	// different source IPs for sibling queries and token
-	// validation silently rejects the put — which is how the
-	// Layer-B s12 scenario's end-to-end put/get timed out.
+	// ListenHost, when non-empty, pins the BitTorrent/DHT bind host. An
+	// isolated regtest DHT cluster needs 127.0.0.1 here — a 0.0.0.0 bind
+	// lets the kernel flap the source IP per send, silently breaking the
+	// BEP-44 write-token check.
 	ListenHost string
 
-	// Seed, when true, means the Engine will continue seeding torrents after
-	// download completes (the default behaviour of any well-behaved client).
+	// Seed keeps completed torrents uploading (default true).
 	Seed bool
-
-	// NoUpload disables all uploading (leech-only mode). Mutually exclusive
-	// with Seed in spirit; if both are set, NoUpload wins.
+	// NoUpload disables uploading entirely (leech-only debugging).
 	NoUpload bool
-
-	// DisableDHT, when true, prevents the Engine from joining the mainline
-	// DHT. Useful for isolated tests, harmful in normal use.
+	// DisableDHT turns the mainline DHT off.
 	DisableDHT bool
-
-	// DisableDHTPublish, when true, keeps the node joined to the
-	// DHT (so it can do lookups and fetch BEP-46 companion-index
-	// pointers) but skips every outbound BEP-44 mutable-item put.
-	// This is the "leech-only DHT" mode recommended in
-	// docs/08-operations.md for privacy-conscious operators: it
-	// removes the hourly IP-exposure and timing-fingerprint
-	// surface that comes with publishing, at the cost of losing
-	// Layer-D contribution to the network. Default: false.
+	// DisableDHTPublish stays on the DHT but suppresses BEP-44 publication
+	// (privacy knob; consumed by the Layer-D slice).
 	DisableDHTPublish bool
-
-	// DHTBootstrapAddrs, when non-empty, pre-seeds the anacrolix
-	// DHT server's StartingNodes list with these host:port
-	// addresses instead of the mainline defaults
-	// (router.bittorrent.com etc.). Used by the Layer-B testbed
-	// to form a private DHT on a docker bridge where the default
-	// bootstrap hosts are unreachable. Empty slice means "use
-	// anacrolix's default public bootstrap nodes", which is
-	// correct for any real deployment. Each entry is a single
-	// host:port string; the engine resolves them at DHT-server
-	// configuration time. Default: nil.
+	// NoIndex prevents the Bleve index from opening at all (consumed by the
+	// indexer slice; the daemon mirrors its Options.NoIndex here before
+	// engine construction).
+	NoIndex bool
+	// DHTBootstrapAddrs overrides the DHT bootstrap nodes (host:port).
+	// Empty falls through to anacrolix's public routers — an isolated
+	// cluster must seed a placeholder instead.
 	DHTBootstrapAddrs []string
-
-	// DisableIPv6, when true, prevents the embedded torrent client
-	// from opening udp6 / tcp6 listeners. The client otherwise
-	// spins up both v4 and v6 sockets; for the embedded DHT
-	// that becomes two DHT servers per node, and the Engine's
-	// Publisher only drives one of them. Cross-node traversals
-	// end up with IPv4-mapped-IPv6 addresses like
-	// [::ffff:127.0.0.1]:X in their routing tables, which puts
-	// cannot round-trip. Flipping this keeps the harness on a
-	// single address family end-to-end. Also useful on networks
-	// that have no functional IPv6 path (many corporate LANs,
-	// most docker bridges). Default: false.
+	// DisableIPv6 restricts networking to IPv4. Dual-stack spawns two DHT
+	// servers but the publisher drives only one.
 	DisableIPv6 bool
-
-	// DHTInsecure, when true, disables BEP-42 node-ID security
-	// enforcement on the anacrolix DHT server (maps to
-	// dht.ServerConfig.NoSecurity). BEP-42 ties a node's 20-byte
-	// ID to its public IP so a single host can't cheaply forge
-	// many identities (Sybil resistance on mainline). In a
-	// private testbed DHT that lives entirely on a docker bridge
-	// or k8s cluster, container IPs (172.16.0.0/12 style) never
-	// produce a "secure" ID under BEP-42's rules, so anacrolix
-	// silently drops every peer as "not secure" and traversals
-	// return empty — BEP-44 put/get then times out. This flag
-	// opts out so private networks can form a DHT at all. Must
-	// be left at false on mainline: flipping it in production
-	// is a Sybil-resistance regression. Default: false.
-	DHTInsecure bool
-
-	// Regtest, when true, activates "regtest mode" — a
-	// deterministic fast-forward mode modeled on Bitcoin Core's
-	// `-regtest`. Every production time constant is accelerated
-	// so scenario tests that depend on "what happens after the
-	// publisher refreshes" run in seconds instead of hours:
-	//
-	//   - dhtindex.Publisher.RefreshInterval:  1h → 5s
-	//   - dhtindex.Publisher.MinPutInterval:  55m → 100ms
-	//   - companion.Publisher.Interval:        1h → 10s
-	//   - companion.Publisher.MinInterval:     1m → 100ms
-	//
-	// Regtest mode runs the exact same code paths as production
-	// with one config flag flipped — no mocks, no stubs. It is
-	// intended for:
-	//   - the internal/testlab harness (which enables it on every
-	//     spawned engine)
-	//   - docker-compose / k8s testbed containers (Layer B/C)
-	//   - CI jobs that run end-to-end scenarios
-	//   - developers reproducing production bugs locally
-	//
-	// It must NEVER be used in production — a real node running
-	// regtest mode would hammer the mainline DHT with a put every
-	// 5 seconds and get ratelimited into the ground. The engine
-	// logs engine.regtest_mode_active at Warn level on startup so
-	// it's unmissable.
-	//
-	// Default: false.
-	Regtest bool
-
-	// HTTPUserAgent overrides the HTTP user-agent string sent to trackers.
-	// Leave empty to use anacrolix/torrent's default.
+	// DisablePortForwarding turns off UPnP/NAT-PMP gateway calls. Hermetic
+	// tests need it; operators behind hostile gateways may want it.
+	DisablePortForwarding bool
+	// HTTPUserAgent overrides the tracker/webseed user agent when non-empty.
 	HTTPUserAgent string
 
-	// IndexDir is the filesystem directory where the local Bleve full-text
-	// index is stored. It is created if missing. Default:
-	// ~/.local/share/swartznet/index.
-	IndexDir string
+	// IndexRescanInterval overrides the Layer-L rescan cadence (0 = the
+	// default hour). Tests shrink it; operators need not set it.
+	IndexRescanInterval time.Duration
+	// CheckpointInterval overrides the Bloom+reputation checkpoint cadence
+	// (0 = the default 5 minutes). Tests shrink it so the crash-safety
+	// window is observable in seconds.
+	CheckpointInterval time.Duration
 
-	// IdentityPath is where the persistent ed25519 keypair lives.
-	// Default: ~/.local/share/swartznet/identity.key. The key is
-	// generated on first run and reused thereafter; it identifies
-	// this node as a publisher of BEP-44 keyword-index entries
-	// (Layer D, M4).
-	IdentityPath string
+	// Sharing prefs — the operator-controlled half of the sn_search
+	// capability mask (Slice 6). Runtime-mutable via PATCH /capabilities;
+	// these are the STARTUP defaults. ShareLocal is a tri-state (0 = don't
+	// answer, 1 = in-swarm only, 2 = full local index).
+	ShareLocal       int  // 0..2, default 2
+	ShareFileHits    bool // default true
+	ShareContentHits bool // default true
 
-	// PublisherManifest is the on-disk path to the per-keyword
-	// manifest the dhtindex publisher writes. Default:
-	// ~/.local/share/swartznet/publisher.json.
-	PublisherManifest string
-
-	// ReputationPath is the on-disk path to the per-pubkey
-	// reputation tracker. Default:
-	// ~/.local/share/swartznet/reputation.json.
-	ReputationPath string
-
-	// SeedListPath is the on-disk path to the curated indexer
-	// seed list (M13c). The file is a JSON document of the form
-	// {"version":1,"seeds":[{"pubkey":"<hex>","label":"<name>"}]}.
-	// Every entry is imported via reputation.Tracker.MarkSeeded on
-	// startup, which applies a decaying +0.45 score bonus with a
-	// 90-day half-life. Missing file is not an error (the node
-	// runs with a cold-start reputation network in that case).
-	// Default: ~/.local/share/swartznet/seeds.json.
-	SeedListPath string
-
-	// BloomPath is the on-disk path to the known-good infohash
-	// Bloom filter. Default:
-	// ~/.local/share/swartznet/known-good.bloom.
-	BloomPath string
-
-	// MinIndexerScore is the reputation cutoff for Layer-D
-	// lookup. Indexers below this score are skipped. 0 disables
-	// the cutoff. Default: 0.
+	// LayerDMode selects the Layer-D RecordBackend: "legacy" (the shipping
+	// per-keyword BEP-44 index, the default), "aggregatePPMI" (the signed SNAGG
+	// B-tree), or "composite" (dual-write legacy+aggregate, legacy-then-aggregate
+	// dual-read — the zero-data-loss migration mode). Empty is "legacy".
+	LayerDMode string
+	// MinIndexerScore is the minimum reputation an indexer must have before
+	// Layer-D lookups query it (SPEC §5.7). Zero (default) disables the gate;
+	// it has no effect without a reputation tracker.
 	MinIndexerScore float64
 
-	// CompanionDir is the on-disk directory where the F3 companion
-	// publisher (M11c) stores the gzipped JSON content index and
-	// the wrapping .torrent file. Default:
-	// ~/.local/share/swartznet/companion. Empty disables the
-	// companion publisher entirely (the node still works for local
-	// search and Layer-D queries; it just does not advertise its
-	// content via a companion-index torrent).
-	CompanionDir string
-
-	// CompanionFollowFile is the on-disk JSON file that lists
-	// publishers the M11d subscriber should follow. The file
-	// holds a single JSON array of objects of the form
-	// {"pubkey":"<64-char hex>","label":"<name>"}. Default:
-	// ~/.local/share/swartznet/companion-follows.json. The file
-	// is created on demand by the GUI; if it does not exist on
-	// startup the subscriber starts with an empty follow list.
-	CompanionFollowFile string
-
-	// TrustPath is the on-disk JSON path for the publisher
-	// trust list — ed25519 pubkeys whose signed .torrent files
-	// get implicit trust (auto-confirmed to the known-good
-	// Bloom filter, surfaced in search with a "trusted" flag).
-	// Default: ~/.local/share/swartznet/trust.json. Empty
-	// disables the trust list entirely (equivalent to trusting
-	// nobody automatically).
-	TrustPath string
+	// Regtest and DHTInsecure are test-only knobs, refused outside test
+	// binaries unless SWARTZNET_UNSAFE=1 (the single unsafe gate).
+	Regtest     bool
+	DHTInsecure bool
 }
 
-// Default returns a Config populated with sensible defaults for a normal
-// desktop run. DataDir defaults to ~/.local/share/swartznet/data, following
-// the XDG Base Directory spec where possible.
+// Default returns the XDG-derived default configuration.
 func Default() Config {
+	root := ResolveShareRoot()
 	return Config{
-		DataDir:             defaultDataDir(),
-		ListenPort:          42069, // same as anacrolix/torrent's default; reduces port surprise
+		DataDir:        filepath.Join(root, "data"),
+		IndexDir:       filepath.Join(root, "index"),
+		IdentityPath:   filepath.Join(root, "identity.key"),
+		TrustPath:      filepath.Join(root, "trust.json"),
+		BloomPath:      filepath.Join(root, "known-good.bloom"),
+		ReputationPath: filepath.Join(root, "reputation.json"),
+		PublisherPath:  filepath.Join(root, "publisher.json"),
+		SeedListPath:   filepath.Join(root, "seeds.json"),
+
+		CompanionDir:        filepath.Join(root, "companion"),
+		CompanionFollowFile: filepath.Join(root, "companion-follows.json"),
+		ListenPort:          42069,
 		Seed:                true,
-		NoUpload:            false,
-		DisableDHT:          false,
-		HTTPUserAgent:       "", // use anacrolix default
-		IndexDir:            defaultIndexDir(),
-		IdentityPath:        defaultIdentityPath(),
-		PublisherManifest:   defaultPublisherManifest(),
-		ReputationPath:      defaultReputationPath(),
-		SeedListPath:        defaultSeedListPath(),
-		BloomPath:           defaultBloomPath(),
-		MinIndexerScore:     0,
-		CompanionDir:        defaultCompanionDir(),
-		CompanionFollowFile: defaultCompanionFollowFile(),
-		TrustPath:           defaultTrustPath(),
+		// Default sharing: full local index, file + content hits on.
+		ShareLocal:       2,
+		ShareFileHits:    true,
+		ShareContentHits: true,
+		// Layer D: the shipping per-keyword BEP-44 backend.
+		LayerDMode: "legacy",
 	}
 }
 
-// Validate checks invariants that cannot be enforced by the type system and
-// creates the DataDir and IndexDir if they don't already exist. Returns a
-// non-nil error if the Config cannot be used.
-func (c *Config) Validate() error {
+// ResolveShareRoot resolves the SwartzNet share root:
+// $XDG_DATA_HOME/swartznet, else $HOME/.local/share/swartznet, else the
+// relative ./swartznet-state as a last resort when no home is known.
+func ResolveShareRoot() string {
+	if x := os.Getenv("XDG_DATA_HOME"); x != "" {
+		return filepath.Join(x, "swartznet")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share", "swartznet")
+	}
+	return "./swartznet-state"
+}
+
+// Validate checks the configuration and performs its only permitted side
+// effects: creating DataDir (0755) and IndexDir's parent. All rejections run
+// before either mkdir, so a rejected config leaves the filesystem untouched.
+func (c Config) Validate() error {
 	if c.DataDir == "" {
 		return fmt.Errorf("config: DataDir must not be empty")
 	}
 	if c.ListenPort < 0 || c.ListenPort > 65535 {
 		return fmt.Errorf("config: ListenPort %d out of range", c.ListenPort)
 	}
+	if c.ShareLocal < 0 || c.ShareLocal > 2 {
+		return fmt.Errorf("config: ShareLocal %d out of range (0..2)", c.ShareLocal)
+	}
+	switch c.LayerDMode {
+	case "", "legacy", "composite", "aggregatePPMI":
+	default:
+		return fmt.Errorf("config: LayerDMode %q unsupported (legacy|composite|aggregatePPMI)", c.LayerDMode)
+	}
+	if err := c.checkUnsafe(testing.Testing()); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(c.DataDir, 0o755); err != nil {
 		return fmt.Errorf("config: cannot create DataDir %q: %w", c.DataDir, err)
 	}
 	if c.IndexDir != "" {
-		// IndexDir's parent must exist; Bleve itself creates the leaf.
 		if err := os.MkdirAll(filepath.Dir(c.IndexDir), 0o755); err != nil {
 			return fmt.Errorf("config: cannot create parent of IndexDir %q: %w", c.IndexDir, err)
 		}
@@ -252,152 +189,21 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// defaultDataDir returns the platform-appropriate default data directory.
-// Order of preference:
-//  1. $XDG_DATA_HOME/swartznet/data  (explicit XDG override)
-//  2. $HOME/.local/share/swartznet/data  (Linux/XDG fallback)
-//  3. ./swartznet-data  (last resort if HOME is unset)
-func defaultDataDir() string {
-	return filepath.Join(swartznetShareRoot(), "data")
-}
-
-// defaultIndexDir returns the platform-appropriate default Bleve index dir.
-// It sits next to DataDir under the shared SwartzNet share root.
-func defaultIndexDir() string {
-	return filepath.Join(swartznetShareRoot(), "index")
-}
-
-// defaultIdentityPath returns the platform-appropriate default path
-// for the persistent ed25519 publisher key.
-func defaultIdentityPath() string {
-	return filepath.Join(swartznetShareRoot(), "identity.key")
-}
-
-// defaultPublisherManifest returns the platform-appropriate default
-// path for the dhtindex publisher's per-keyword manifest.
-func defaultPublisherManifest() string {
-	return filepath.Join(swartznetShareRoot(), "publisher.json")
-}
-
-// defaultReputationPath returns the platform-appropriate default
-// path for the per-pubkey reputation tracker.
-func defaultReputationPath() string {
-	return filepath.Join(swartznetShareRoot(), "reputation.json")
-}
-
-// defaultSeedListPath returns the platform-appropriate default
-// path for the M13c curated indexer seed list.
-func defaultSeedListPath() string {
-	return filepath.Join(swartznetShareRoot(), "seeds.json")
-}
-
-// defaultBloomPath returns the platform-appropriate default path
-// for the known-good infohash Bloom filter.
-func defaultBloomPath() string {
-	return filepath.Join(swartznetShareRoot(), "known-good.bloom")
-}
-
-// defaultCompanionDir returns the platform-appropriate default
-// directory for the F3 companion publisher's on-disk artefacts.
-func defaultCompanionDir() string {
-	return filepath.Join(swartznetShareRoot(), "companion")
-}
-
-// defaultCompanionFollowFile returns the platform-appropriate
-// default path for the F3 companion subscriber's follow list.
-func defaultCompanionFollowFile() string {
-	return filepath.Join(swartznetShareRoot(), "companion-follows.json")
-}
-
-// defaultTrustPath returns the platform-appropriate default
-// path for the publisher trust list.
-func defaultTrustPath() string {
-	return filepath.Join(swartznetShareRoot(), "trust.json")
-}
-
-// DefaultUserConfigPath returns the platform-appropriate path
-// for the user's persisted Config — used by GUI launches that
-// want to honour edits made through the Settings tab. Sits next
-// to the rest of swartznet's persistent state under the share
-// root so it follows whatever XDG override the operator has set.
-func DefaultUserConfigPath() string {
-	return filepath.Join(swartznetShareRoot(), "config.json")
-}
-
-// userConfigOverrides holds the subset of Config fields the GUI
-// is allowed to persist. Keeping it narrow on purpose: changing
-// the BitTorrent listen port or DHT bootstraps via a JSON file
-// surprises operators in ways that don't pay back the support
-// burden, but DataDir/IndexDir are exactly the kind of
-// "I keep my torrents on a separate disk" preference the
-// Settings tab needs to remember across launches.
-type userConfigOverrides struct {
-	DataDir  string `json:"data_dir,omitempty"`
-	IndexDir string `json:"index_dir,omitempty"`
-}
-
-// LoadUserOverrides reads the JSON config file at path and
-// returns the field overrides it contains. A missing file is
-// not an error — callers proceed with the Default() values.
-// Malformed JSON returns an error so the operator can fix it
-// rather than silently running on stale defaults.
-func LoadUserOverrides(path string) (DataDir, IndexDir string, err error) {
-	if path == "" {
-		return "", "", nil
+// checkUnsafe rejects the test-only knobs unless authorized. inTest is
+// threaded as a parameter so tests can exercise the production branch.
+func (c Config) checkUnsafe(inTest bool) error {
+	if !c.Regtest && !c.DHTInsecure {
+		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", "", nil
-		}
-		return "", "", fmt.Errorf("config: read %q: %w", path, err)
+	if UnsafeAuthorized(inTest) {
+		return nil
 	}
-	var o userConfigOverrides
-	if err := json.Unmarshal(data, &o); err != nil {
-		return "", "", fmt.Errorf("config: parse %q: %w", path, err)
-	}
-	return o.DataDir, o.IndexDir, nil
+	return fmt.Errorf("config: Regtest/DHTInsecure are test-only knobs; set SWARTZNET_UNSAFE=1 to use them outside tests")
 }
 
-// SaveUserOverrides writes the GUI-configurable fields of c to
-// path as pretty-printed JSON. The parent directory is created
-// if missing. Empty fields are omitted so the next launch falls
-// back to Default() for them rather than locking in a blank
-// string.
-func SaveUserOverrides(path string, dataDir, indexDir string) error {
-	if path == "" {
-		return errors.New("config: empty save path")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("config: mkdir %q: %w", filepath.Dir(path), err)
-	}
-	o := userConfigOverrides{
-		DataDir:  dataDir,
-		IndexDir: indexDir,
-	}
-	data, err := json.MarshalIndent(o, "", "  ")
-	if err != nil {
-		return fmt.Errorf("config: marshal: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("config: write %q: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("config: rename %q: %w", path, err)
-	}
-	return nil
-}
-
-// swartznetShareRoot returns the per-user root directory SwartzNet uses for
-// all its persistent state (torrent data, index, later keys + reputation db).
-func swartznetShareRoot() string {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "swartznet")
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".local", "share", "swartznet")
-	}
-	return "./swartznet-state"
+// UnsafeAuthorized reports whether test-only behavior is authorized: inside
+// any test binary, or when SWARTZNET_UNSAFE is exactly "1" ("yes"/"true" do
+// not unlock). This is the single gate for every unsafe knob at every layer.
+func UnsafeAuthorized(inTest bool) bool {
+	return inTest || os.Getenv("SWARTZNET_UNSAFE") == "1"
 }

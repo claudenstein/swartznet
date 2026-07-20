@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestChunkByLineMultiLineFlush exercises the previously-uncovered
-// "current chunk would overflow if we add this line" branch
-// (chunker.go:186-189). We hand the helper a paragraph composed of
-// many short lines whose cumulative size exceeds targetBytes, so
-// the function flushes the current builder and starts a new chunk
-// at a clean line boundary instead of hard-splitting.
+// TestChunkByLineMultiLineFlush exercises the "current chunk would
+// overflow if we add this line" branch. We hand the helper a
+// paragraph composed of many short lines whose cumulative size
+// exceeds targetBytes, so the function flushes the current builder
+// and starts a new chunk at a clean line boundary instead of
+// hard-splitting.
 func TestChunkByLineMultiLineFlush(t *testing.T) {
 	t.Parallel()
 
@@ -26,9 +26,8 @@ func TestChunkByLineMultiLineFlush(t *testing.T) {
 	if len(chunks) < 2 {
 		t.Fatalf("got %d chunks, want at least 2 (flush should split)", len(chunks))
 	}
-	// No chunk may exceed targetBytes + one extra line worth of slack.
-	// We just assert nothing came back larger than maxChunk and the
-	// joined output preserves every byte.
+	// Nothing may come back larger than maxChunk and the joined
+	// output must preserve every byte.
 	var joined strings.Builder
 	var prevOff int64 = -1
 	for i, c := range chunks {
@@ -46,10 +45,9 @@ func TestChunkByLineMultiLineFlush(t *testing.T) {
 	}
 }
 
-// TestChunkByLineFinalLineNoTrailingNewline exercises the
-// previously-uncovered branch where strings.IndexByte returns -1
-// (chunker.go:156-157) — the final line of the paragraph has no
-// terminating \n.
+// TestChunkByLineFinalLineNoTrailingNewline exercises the branch
+// where strings.IndexByte returns -1 — the final line of the
+// paragraph has no terminating \n.
 func TestChunkByLineFinalLineNoTrailingNewline(t *testing.T) {
 	t.Parallel()
 

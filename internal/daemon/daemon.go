@@ -1,8 +1,7 @@
-// Package daemon wires a fully-operational SwartzNet node from the
-// individual internal packages. Both the CLI (cmd/swartznet) and the
-// GUI (cmd/swartznet-gui) call daemon.New to get a ready-to-use
-// Daemon; they differ only in how they present the results to the
-// user.
+// Package daemon is the single wiring point for a SwartzNet node. Every
+// frontend — CLI, embedded web UI, native GUI — obtains a fully-wired node
+// from New and differs only in presentation; subsystem lifecycle lives here
+// and nowhere else.
 package daemon
 
 import (
@@ -10,217 +9,277 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
+	"sync"
 	"time"
 
+	"github.com/swartznet/swartznet/internal/admission"
 	"github.com/swartznet/swartznet/internal/companion"
 	"github.com/swartznet/swartznet/internal/config"
 	"github.com/swartznet/swartznet/internal/engine"
 	"github.com/swartznet/swartznet/internal/httpapi"
+	"github.com/swartznet/swartznet/internal/identity"
 	"github.com/swartznet/swartznet/internal/indexer"
+	"github.com/swartznet/swartznet/internal/searchmux"
 )
 
-// Daemon holds a fully-wired SwartzNet node. Construct with New;
-// always call Close when done. Fields are exported so callers
-// (CLI, GUI) can reach the subsystems directly.
-type Daemon struct {
-	Eng       *engine.Engine
-	Index     *indexer.Index              // nil when NoIndex is set
-	CompPub   *companion.Publisher        // nil when conditions unmet
-	CompSub   *companion.SubscriberWorker // nil when conditions unmet
-	API       *httpapi.Server             // nil when APIAddr is empty
-	Bootstrap *Bootstrap                  // v0.5 Aggregate bootstrap; nil when Lookup unavailable
-	Cfg       config.Config
-	Log       *slog.Logger
-}
-
-// bootstrapEndorsementSink adapts *Bootstrap to the
-// swarmsearch.EndorsementSink interface. Kept as a small typed
-// value (not a func-type adapter) so future extensions — e.g.
-// rate limiting per-endorser, telemetry — slot in cleanly.
-type bootstrapEndorsementSink struct{ boot *Bootstrap }
-
-func (a bootstrapEndorsementSink) NoteEndorsement(endorser, candidate [32]byte) {
-	a.boot.IngestEndorsement(endorser, candidate)
-}
-
-// bootstrapPublisherObserver adapts *Bootstrap to the
-// swarmsearch.PublisherObserver interface. When sync-record
-// ingestion observes a new publisher pubkey, we feed it as a
-// candidate with sigValid=true (records already passed per-record
-// ed25519 verification in the swarmsearch handler). Bootstrap's
-// admission policy then decides: Bloom/reputation hit → admit;
-// else → queue as pending for future endorsement rounds.
-type bootstrapPublisherObserver struct{ boot *Bootstrap }
-
-func (a bootstrapPublisherObserver) NotePublisherSeen(pubkey [32]byte) {
-	a.boot.CandidateFromCrawl(pubkey, true)
-}
-
-// Options controls which subsystems daemon.New starts.
+// Options configures New. It grows slice by slice.
 type Options struct {
-	Cfg     config.Config
-	Log     *slog.Logger
-	NoIndex bool   // skip Bleve index
-	APIAddr string // HTTP API listen address; "" disables
-	Version string // shown in /healthz
-	// Stderr receives non-fatal warnings (e.g. companion setup
-	// failures). Defaults to io.Discard when nil.
+	Cfg config.Config
+	Log *slog.Logger // nil ⇒ slog.Default()
+
+	// NoIndex prevents the Bleve index from ever opening. Mirrored into
+	// Cfg.NoIndex BEFORE engine construction (SPEC §5.8 — the cascade also
+	// disables Layer-D publishing when those slices land).
+	NoIndex bool
+
+	// APIAddr is the HTTP API listen address; "" disables the API entirely
+	// (empty-path = feature-off).
+	APIAddr string
+	// Version is surfaced by GET /healthz.
+	Version string
+	// Stderr receives degraded-start warnings; nil ⇒ io.Discard.
 	Stderr io.Writer
 }
 
-func (o *Options) stderr() io.Writer {
-	if o.Stderr != nil {
-		return o.Stderr
+func (o Options) stderr() io.Writer {
+	if o.Stderr == nil {
+		return io.Discard
 	}
-	return io.Discard
+	return o.Stderr
 }
 
-// New constructs and starts every subsystem of a SwartzNet node.
-// The returned Daemon is ready to use; call Close to tear it down.
-// The ctx governs the lifetime of the underlying torrent client.
-func New(ctx context.Context, opts Options) (*Daemon, error) {
-	d := &Daemon{
-		Cfg: opts.Cfg,
-		Log: opts.Log,
-	}
-	stderr := opts.stderr()
+// Daemon is a fully-wired SwartzNet node. Exported subsystem handles are nil
+// when the subsystem is disabled or failed a degraded (non-fatal) start.
+type Daemon struct {
+	Cfg config.Config
+	Log *slog.Logger
+	API *httpapi.Server // nil when APIAddr was empty or the bind failed
+	// Identity is the loaded node identity; nil when IdentityPath is empty
+	// or the load failed (degraded start — the node runs publisher-less).
+	Identity *identity.Identity
+	// Eng is the BitTorrent engine. Engine construction failure aborts New.
+	Eng *engine.Engine
+	// Idx is the Layer-L index; nil when NoIndex or IndexDir is empty.
+	// Indexer open failure aborts New (the second fatal subsystem).
+	Idx *indexer.Index
+	// admission is the deny-by-default publisher-admission engine backing
+	// the /aggregate counts. Its live feeder channels arrive with the
+	// Aggregate slices; here it is correctly empty.
+	admission *admission.AdmissionEngine
+	// CompPub / CompSub are the companion index publisher / subscriber worker
+	// (Slice 10); nil when their independent gates were unmet or a degraded
+	// (non-fatal) start failed.
+	CompPub *companion.Publisher
+	CompSub *companion.SubscriberWorker
+	// compController is the PERSISTING companion follow/unfollow/refresh path
+	// (writes the atomic follow file). Every frontend — HTTP API and native GUI —
+	// mutates follows through it, so a GUI follow survives a restart just like an
+	// API follow. Constructed unconditionally (nil legs degrade gracefully).
+	compController *companionAdapter
 
-	// --- engine ---
-	eng, err := engine.New(ctx, opts.Cfg, opts.Log)
+	// mux is the shared three-layer search fan-out (Layer L/S/D). Every
+	// frontend routes search through it via Search, never its own logic.
+	mux *searchmux.Mux
+
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
+	bgMu     sync.Mutex
+	bgClosed bool
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// New constructs and starts a node.
+//
+// Startup order (fixed; later slices insert without reordering): engine →
+// indexer → companion publisher → companion subscriber → bootstrap → session
+// restore → HTTP API last. Only engine and indexer failures abort New;
+// everything else warns on Options.Stderr and starts degraded.
+func New(ctx context.Context, opts Options) (*Daemon, error) {
+	log := opts.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	// Mirror NoIndex into the config BEFORE engine construction: the engine
+	// (and later the indexer + Layer-D publisher) read the config copy.
+	if opts.NoIndex {
+		opts.Cfg.NoIndex = true
+	}
+	if err := opts.Cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	bgCtx, bgCancel := context.WithCancel(ctx)
+	d := &Daemon{
+		Cfg:      opts.Cfg,
+		Log:      log,
+		bgCtx:    bgCtx,
+		bgCancel: bgCancel,
+	}
+	log.Debug("daemon.new", "data_dir", opts.Cfg.DataDir, "index_dir", opts.Cfg.IndexDir, "api_addr", opts.APIAddr)
+
+	// Identity precedes every subsystem: the engine and publishers consume
+	// its Signer. Auto-create is allowed only when the configured path IS the
+	// default XDG path — Load's create branch enforces it. Failure degrades
+	// (SPEC §2.8: the node still downloads and searches, it cannot publish).
+	if opts.Cfg.IdentityPath != "" {
+		// Clean the configured side: Default()'s value is already Join-cleaned,
+		// and a `/./`- or `//`-spelled default path must still count as default.
+		allowCreate := filepath.Clean(opts.Cfg.IdentityPath) == config.Default().IdentityPath
+		id, err := identity.Load(opts.Cfg.IdentityPath, allowCreate)
+		if err != nil {
+			log.Warn("daemon.identity_load_err", "err", err)
+			fmt.Fprintf(opts.stderr(), "warning: identity load failed: %v\n", err)
+		} else {
+			d.Identity = id
+			log.Info("daemon.identity_loaded", "pubkey", id.PublicKeyHex())
+		}
+	}
+
+	// Engine construction is one of the two fatal startup steps (the other
+	// is the indexer, next slice).
+	eng, err := engine.New(ctx, opts.Cfg, log)
 	if err != nil {
+		bgCancel()
 		return nil, err
 	}
 	d.Eng = eng
 
-	// --- indexer ---
-	if !opts.NoIndex {
-		idx, err := indexer.Open(opts.Cfg.IndexDir)
+	// Layer L: open the index and attach it to the engine, unless disabled.
+	// Open failure aborts New (the second fatal subsystem); NoIndex or an
+	// empty IndexDir skips cleanly (nil index, degraded API).
+	if !opts.Cfg.NoIndex && opts.Cfg.IndexDir != "" {
+		idx, err := indexer.OpenWithLogger(opts.Cfg.IndexDir, log)
 		if err != nil {
+			bgCancel()
 			_ = eng.Close()
 			return nil, fmt.Errorf("open index: %w", err)
 		}
-		d.Index = idx
+		d.Idx = idx
 		eng.SetIndex(idx)
 	}
 
-	// --- companion publisher (M11c) ---
-	if d.Index != nil && eng.PointerPutter() != nil && eng.Identity() != nil && opts.Cfg.CompanionDir != "" {
-		cpOpts := companion.DefaultPublisherOptions()
-		if opts.Cfg.Regtest {
-			cpOpts = companion.RegtestPublisherOptions()
-		}
-		cpOpts.Dir = opts.Cfg.DataDir
-		cpOpts.PublisherKey = eng.Identity().PublicKeyBytes()
-		compPub, err := companion.NewPublisher(d.Index, eng.PointerPutter(), eng, cpOpts, opts.Log)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: companion publisher start failed: %v\n", err)
-		} else {
-			compPub.Start()
-			d.CompPub = compPub
-		}
+	// The deny-by-default admission engine. Its reputation view adapts the
+	// engine's tracker (nil-safe: an unknown pubkey scores the neutral
+	// prior). Empty anchors ship by design — a curated seeds.json is a
+	// release prerequisite, not code (B8/B9). Construction failure is
+	// non-fatal (the engine only backs /aggregate counts).
+	if adm, err := admission.NewEngine(admission.DefaultPolicy(), reputationView{eng: eng}, admission.DefaultAnchorPubkeys, log); err != nil {
+		log.Warn("daemon.admission_init_err", "err", err)
+	} else {
+		d.admission = adm
 	}
 
-	// --- companion subscriber (M11d) ---
-	if d.Index != nil && eng.PointerGetter() != nil && opts.Cfg.CompanionDir != "" {
-		sub, err := companion.NewSubscriber(
-			eng.PointerGetter(), eng, d.Index,
-			companion.DefaultSubscriberOptions(),
-			opts.Log,
-		)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: companion subscriber init failed: %v\n", err)
-		} else {
-			compSub, err := companion.NewSubscriberWorker(sub)
-			if err != nil {
-				fmt.Fprintf(stderr, "warning: companion subscriber worker init failed: %v\n", err)
+	// (companion, bootstrap land here, in that order.)
+
+	// The signer mints Aggregate records on GotInfo; wire it BEFORE restore so
+	// restored torrents mint too. The daemon owns identity (not engine.New).
+	if d.Identity != nil {
+		var pub [32]byte
+		copy(pub[:], d.Identity.PublicKey)
+		eng.SetSigner(d.Identity.PrivateKey, pub)
+	}
+
+	// Companion index (Slice 10): publisher and subscriber are independent
+	// legs, each with its own gate; a failure in one never blocks the other or
+	// the daemon (all companion setup failures are warnings, never fatal). Both
+	// require the index; the publisher additionally needs a pointer putter (DHT
+	// + identity) and an identity for its namespace/Publisher field.
+	if d.Idx != nil && opts.Cfg.CompanionDir != "" {
+		if putter := eng.PointerPutter(); putter != nil && d.Identity != nil {
+			cpOpts := companion.DefaultPublisherOptions()
+			if opts.Cfg.Regtest {
+				cpOpts = companion.RegtestPublisherOptions()
+			}
+			cpOpts.Dir = opts.Cfg.CompanionDir
+			copy(cpOpts.PublisherKey[:], d.Identity.PublicKey)
+			if pub, err := companion.NewPublisher(d.Idx, putter, eng, cpOpts, log); err != nil {
+				fmt.Fprintf(opts.stderr(), "warning: companion publisher start failed: %v\n", err)
+			} else {
+				pub.Start()
+				d.CompPub = pub
+			}
+		}
+		if getter := eng.PointerGetter(); getter != nil {
+			if sub, err := companion.NewSubscriber(getter, eng, d.Idx, companion.DefaultSubscriberOptions(), log); err != nil {
+				fmt.Fprintf(opts.stderr(), "warning: companion subscriber start failed: %v\n", err)
+			} else if worker, err := companion.NewSubscriberWorker(sub); err != nil {
+				fmt.Fprintf(opts.stderr(), "warning: companion subscriber worker failed: %v\n", err)
 			} else {
 				if opts.Cfg.CompanionFollowFile != "" {
-					if _, err := LoadFollowFile(compSub, opts.Cfg.CompanionFollowFile, stderr); err != nil && opts.Log != nil {
-						// Non-fatal: an unreadable or corrupt follow file
-						// leaves the subscriber with an empty list (a valid
-						// fail-closed state — follows can still be added via
-						// the HTTP API). Surface it through the structured
-						// logger so it's visible when stderr is io.Discard.
-						opts.Log.Warn("daemon.companion.load_follow_file_err",
-							"err", err, "path", opts.Cfg.CompanionFollowFile)
+					if n, err := LoadFollowFile(worker, opts.Cfg.CompanionFollowFile, log); err != nil {
+						log.Warn("daemon.companion.load_follow_file_err", "err", err, "path", opts.Cfg.CompanionFollowFile)
+					} else if n > 0 {
+						log.Info("daemon.companion.follows_loaded", "count", n)
 					}
 				}
-				compSub.Start()
-				d.CompSub = compSub
+				worker.Start()
+				d.CompSub = worker
 			}
 		}
 	}
 
-	// --- Aggregate bootstrap (P4.1) ---
-	// Construct the three-channel cold-start orchestrator when the
-	// engine has a Lookup (i.e. DHT is enabled). Runs channel A
-	// (anchor PPMI fetch) in a background goroutine so daemon.New
-	// doesn't block on the 5-anchor parallel fetch. Channel B
-	// (BEP-51 crawl) and channel C (peer_announce endorsement
-	// gossip) stay pluggable — they need future engine hooks.
-	if eng.Lookup() != nil {
-		bootOpts := DefaultBootstrapOptions()
-		boot, err := NewBootstrap(
-			eng.Lookup(),
-			eng.PointerGetter(), // AnacrolixGetter implements PPMIGetter via GetPPMI
-			eng.KnownGoodBloom(),
-			eng.ReputationTracker(),
-			bootOpts,
-			opts.Log,
-		)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: aggregate bootstrap init failed: %v\n", err)
-		} else {
-			d.Bootstrap = boot
-			// Route peer_announce.endorsed gossip (channel C)
-			// into the Bootstrap's admission policy. An adapter
-			// closure keeps swarmsearch free of a direct
-			// dependency on daemon.Bootstrap.
-			if sw := eng.SwarmSearch(); sw != nil {
-				sw.SetEndorsementSink(bootstrapEndorsementSink{boot: boot})
-				sw.SetPublisherObserver(bootstrapPublisherObserver{boot: boot})
-			}
-			if len(boot.AnchorKeys()) > 0 {
-				go func() {
-					succeeded, errs := boot.RunAnchors(ctx)
-					if opts.Log != nil {
-						opts.Log.Info("daemon.aggregate_bootstrap.anchors",
-							"succeeded", succeeded, "errors", len(errs))
-					}
-				}()
-			}
-		}
-	}
+	// The persisting companion controller is built unconditionally so BOTH the
+	// HTTP API and the GUI mutate follows through the same file-persisting path.
+	d.compController = newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile)
 
-	// --- Session restore ---
-	// Re-add every torrent recorded in the on-disk session manifest so
-	// the user sees their previous list when reopening the GUI/web UI.
-	// Failures per-entry are logged at warn level inside the engine and
-	// must not block daemon startup, so we ignore the returned error.
+	// Session restore runs before the HTTP API so restored torrents are
+	// visible to the first request (and their autoIndex finds the index).
+	// Per-entry failures only warn.
 	_ = eng.RestoreSession()
 
-	// --- HTTP API ---
+	// The search mux is built unconditionally (not gated on the HTTP API) so
+	// every frontend — CLI, web UI, and the native GUI — fans out through the
+	// SAME three-layer mux, never its own reconciliation. Always wire Layer S;
+	// Layer L when an index is open; Layer D when the DHT is enabled.
+	d.mux = &searchmux.Mux{Swarm: &swarmSearchAdapter{eng: eng}}
+	if idx := eng.Index(); idx != nil {
+		d.mux.Local = idx
+	}
+	if !opts.Cfg.DisableDHT {
+		d.mux.DHT = &dhtSearchAdapter{eng: eng}
+	}
+
 	if opts.APIAddr != "" {
-		httpapi.SetHealthzVersion(opts.Version)
-		apiOpts := httpapi.Options{
-			Index:     d.Index,
-			Swarm:     eng.SwarmSearch(),
-			Publisher: eng.Publisher(),
-			Lookup:    eng.Lookup(),
-			Bloom:     eng.KnownGoodBloom(),
-			Tracker:   eng.ReputationTracker(),
-			Sources:   eng.SourceTracker(),
-			Adder:     eng,
-			Control:   &controllerAdapter{eng: eng},
-			Companion: newCompanionAdapter(d.CompPub, d.CompSub, opts.Cfg.CompanionFollowFile),
-			DHTStats:  eng.DHTRoutingTableSize,
+		apiOpts := httpapi.Options{Version: opts.Version}
+		if d.Identity != nil {
+			apiOpts.PublisherPubKey = d.Identity.PublicKeyHex
 		}
-		if d.Bootstrap != nil {
-			apiOpts.Bootstrap = d.Bootstrap
+		adapter := &controllerAdapter{eng: eng, adm: d.admission}
+		apiOpts.Search = adapter.search(d.mux)
+		apiOpts.PublisherStatus = adapter.publisherStatus
+		// Reuse the same persisting controller the GUI uses, so the /companion
+		// routes always exist and both frontends share one follow-file writer.
+		apiOpts.Companion = d.compController
+		if d.Idx != nil {
+			apiOpts.IndexStats = adapter.indexStats
+			apiOpts.LocalDocCount = adapter.localDocCount
 		}
-		api := httpapi.NewWithOptions(opts.APIAddr, opts.Log, apiOpts)
+		apiOpts.Adder = adapter
+		apiOpts.Control = adapter
+		apiOpts.CreateTorrent = func(p httpapi.CreateTorrentParams) (httpapi.CreateTorrentResult, error) {
+			return createTorrent(eng, d.Identity, opts.Version, p)
+		}
+		apiOpts.Confirm = d.Confirm
+		apiOpts.Flag = d.Flag
+		apiOpts.BloomStat = adapter.bloomStat
+		apiOpts.ReputationStat = adapter.reputationStat
+		apiOpts.Aggregate = adapter.aggregate
+		apiOpts.ServicesReporter = eng.ServicesMask
+		apiOpts.Capabilities = adapter
+		apiOpts.SwarmStatus = func() (int, int) {
+			sw := eng.SwarmSearch()
+			return sw.KnownPeers(), sw.CapablePeerCount()
+		}
+		if !opts.Cfg.DisableDHT {
+			apiOpts.DHTStats = eng.DHTRoutingTableSize
+		}
+		api := httpapi.NewWithOptions(opts.APIAddr, log, apiOpts)
 		if err := api.Start(); err != nil {
-			fmt.Fprintf(stderr, "warning: httpapi start failed: %v\n", err)
+			fmt.Fprintf(opts.stderr(), "warning: httpapi start failed: %v\n", err)
 		} else {
 			d.API = api
 		}
@@ -229,21 +288,80 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	return d, nil
 }
 
-// Close tears down every subsystem in reverse startup order.
+// Search fans a query across Layer L/S/D through the shared mux and returns the
+// three native response types side by side (never merged). The native GUI and
+// the HTTP API both call into this same fan-out. The caller passes a ctx whose
+// deadline bounds the swarm/DHT layers.
+func (d *Daemon) Search(ctx context.Context, q searchmux.Query) searchmux.Result {
+	if d.mux == nil {
+		return searchmux.Result{}
+	}
+	return d.mux.Search(ctx, q)
+}
+
+// goBG runs fn on the daemon-owned background context. Close cancels that
+// context and joins every such goroutine before any subsystem teardown, so a
+// background job can never touch a subsystem mid-teardown. Registration and
+// teardown share a lock: once Close has begun, goBG is a no-op — otherwise an
+// Add racing Wait would spawn a goroutine the join can never see.
+func (d *Daemon) goBG(fn func(context.Context)) {
+	d.bgMu.Lock()
+	if d.bgClosed {
+		d.bgMu.Unlock()
+		return
+	}
+	d.bgWG.Add(1)
+	d.bgMu.Unlock()
+	go func() {
+		defer d.bgWG.Done()
+		fn(d.bgCtx)
+	}()
+}
+
+// Close tears the node down in strict reverse startup order. It is
+// idempotent: repeated calls return the first call's error.
 func (d *Daemon) Close() error {
-	if d.API != nil {
-		shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = d.API.Stop(shutdown)
-	}
-	if d.CompSub != nil {
-		d.CompSub.Stop()
-	}
-	if d.CompPub != nil {
-		d.CompPub.Stop()
-	}
-	if d.Index != nil {
-		d.Index.Close()
-	}
-	return d.Eng.Close()
+	d.closeOnce.Do(func() {
+		d.Log.Info("daemon.close_begin")
+		// Background context first: nothing may touch a subsystem mid-teardown.
+		d.bgMu.Lock()
+		d.bgClosed = true
+		d.bgMu.Unlock()
+		d.bgCancel()
+		d.bgWG.Wait()
+		d.Log.Info("daemon.bg_joined")
+		if d.API != nil {
+			shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = d.API.Stop(shutdown)
+			d.Log.Info("httpapi.stopped")
+		}
+		// Companion workers stop BEFORE the index they write into and the
+		// engine they seed/fetch through: subscriber first (its Sync writes to
+		// the index), then publisher.
+		if d.CompSub != nil {
+			d.CompSub.Stop()
+			d.Log.Info("companion.subscriber.stopped")
+		}
+		if d.CompPub != nil {
+			d.CompPub.Stop()
+			d.Log.Info("companion.publisher.stopped")
+		}
+		if d.Eng != nil {
+			if err := d.Eng.Close(); err != nil {
+				d.closeErr = err
+			}
+			d.Log.Info("engine.stopped")
+		}
+		// Engine.Close stopped the pipeline; now close the index the daemon
+		// opened.
+		if d.Idx != nil {
+			if err := d.Idx.Close(); err != nil {
+				d.closeErr = err
+			}
+			d.Log.Info("indexer.stopped")
+		}
+		d.Log.Info("daemon.close_done")
+	})
+	return d.closeErr
 }

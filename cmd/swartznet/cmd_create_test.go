@@ -5,292 +5,181 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
+
+	"github.com/swartznet/swartznet/internal/identity"
+	"github.com/swartznet/swartznet/internal/signing"
 )
 
-// TestCmdCreateEngineNewErr covers cmdCreate's
-// `eng, err := engine.New(...); if err != nil` arm at
-// cmd_create.go:107-110. Passing a --data-dir under a regular
-// file (so MkdirAll cannot make the directory) makes
-// config.Validate fail, which engine.New surfaces.
-func TestCmdCreateEngineNewErr(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	// Write a regular file at a path we'll then nest underneath.
-	blocker := filepath.Join(root, "blocker")
-	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	bad := filepath.Join(blocker, "data")
-
-	src := filepath.Join(root, "src.bin")
-	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out := filepath.Join(root, "out.torrent")
-
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{
-		"--data-dir", bad,
-		"-o", out,
-		src,
-	}, &stdout, &stderr)
-	if code == exitOK {
-		t.Errorf("engine.New-err exit = %d, want non-zero", code)
-	}
-}
-
-// TestCmdCreateBadFlag covers cmdCreate's `fs.Parse` err arm.
-func TestCmdCreateBadFlag(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{"--no-such-flag"}, &stdout, &stderr)
-	if code != exitUsage {
-		t.Errorf("bad-flag exit = %d, want exitUsage", code)
-	}
-}
-
-// TestCmdCreateMissingPositional covers the `if fs.NArg() != 1`
-// arm.
-func TestCmdCreateMissingPositional(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{"-o", "/tmp/x.torrent"}, &stdout, &stderr)
-	if code != exitUsage {
-		t.Errorf("missing-arg exit = %d, want exitUsage", code)
-	}
-}
-
-// TestCmdCreateMissingOutput covers the `if out == "" → exitUsage`
-// arm: positional supplied but no -o.
-func TestCmdCreateMissingOutput(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{"/tmp/whatever"}, &stdout, &stderr)
-	if code != exitUsage {
-		t.Errorf("missing-out exit = %d, want exitUsage", code)
-	}
-	if !strings.Contains(stderr.String(), "-o <output.torrent>") {
-		t.Errorf("expected -o hint in stderr, got %q", stderr.String())
-	}
-}
-
-// TestCmdCreateHappyPath covers the success path: write a tiny
-// file, hash it via the in-process engine, verify the output
-// .torrent file is produced and stdout shows the InfoHash line.
-func TestCmdCreateHappyPath(t *testing.T) {
-	t.Parallel()
+func createContent(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
-	src := filepath.Join(dir, "src.bin")
-	if err := os.WriteFile(src, []byte("hello swartznet"), 0o644); err != nil {
+	path := filepath.Join(dir, "payload.bin")
+	if err := os.WriteFile(path, []byte(strings.Repeat("z", 2048)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	outPath := filepath.Join(dir, "out.torrent")
+	return path
+}
 
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{"-o", outPath, src}, &stdout, &stderr)
-	if code != exitOK {
-		t.Fatalf("happy exit = %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "InfoHash:") {
-		t.Errorf("expected 'InfoHash:' in stdout: %s", stdout.String())
-	}
-	if _, err := os.Stat(outPath); err != nil {
-		t.Errorf("expected %s to exist: %v", outPath, err)
+func TestCreateUsageErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no args", nil, "usage: swartznet create <file-or-folder> -o <output.torrent>"},
+		{"missing -o", []string{"some-root"}, "swartznet: -o <output.torrent> is required"},
+		{"identity without sign", []string{"-o", "x.torrent", "--identity", "/k", "some-root"}, "swartznet: --identity is only used with --sign (pass --sign to sign, or drop --identity)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := cmdCreate(tc.args, &stdout, &stderr); code != exitUsage {
+				t.Fatalf("exit = %d, want 2", code)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+		})
 	}
 }
 
-// TestCmdCreateSignDefaultIdentityPath covers cmdCreate's
-// `if path == "" { path = cfg.IdentityPath }` arm at lines 83-85
-// (--sign without --identity). Setting HOME to a tmpdir keeps
-// the test from touching the user's real identity file.
-func TestCmdCreateSignDefaultIdentityPath(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", "")
-
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.bin")
-	if err := os.WriteFile(src, []byte("default-id-path test"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	outPath := filepath.Join(dir, "out.torrent")
-
+func TestCreatePlainOutput(t *testing.T) {
+	root := createContent(t)
+	out := filepath.Join(t.TempDir(), "out.torrent")
 	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{"-o", outPath, "--sign", src}, &stdout, &stderr)
-	if code != exitOK {
-		t.Fatalf("default-id-path exit = %d, stderr: %s", code, stderr.String())
+	if code := cmdCreate([]string{"-o", out, root}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Signing with identity") {
-		t.Errorf("expected 'Signing with identity' line, got %q", stdout.String())
-	}
-}
-
-// TestCmdCreateBadIdentityPath covers the
-// `if sign { … if err != nil { return reportRunErr ... } }` arm.
-// Plant a directory at the identity path so LoadOrCreate fails.
-func TestCmdCreateBadIdentityPath(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.bin")
-	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	outPath := filepath.Join(dir, "out.torrent")
-
-	// Plant a directory at the identity path.
-	idPath := filepath.Join(dir, "id.key")
-	if err := os.Mkdir(idPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{
-		"-o", outPath,
-		"--sign",
-		"--identity", idPath,
-		src,
-	}, &stdout, &stderr)
-	if code == exitOK {
-		t.Errorf("bad-identity exit = %d, want non-zero", code)
-	}
-}
-
-// TestCmdCreateSignHappyPath covers cmdCreate's --sign happy
-// arm: a valid identity file at the explicit --identity path is
-// loaded, then CreateTorrentFile signs the .torrent.
-func TestCmdCreateSignHappyPath(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	src := filepath.Join(dir, "src.bin")
-	if err := os.WriteFile(src, []byte("signed swartznet content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Use a valid ed25519 key file (generated by identity.LoadOrCreate).
-	idPath := filepath.Join(dir, "id.key")
-	outPath := filepath.Join(dir, "out.torrent")
-
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{
-		"-o", outPath,
-		"--sign",
-		"--identity", idPath,
-		src,
-	}, &stdout, &stderr)
-	if code != exitOK {
-		t.Fatalf("sign-happy exit = %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Signing with identity") {
-		t.Errorf("expected 'Signing with identity' line, got %q", stdout.String())
-	}
-}
-
-// TestCmdCreateWithDataDir covers the `if dataDir != ""` arm —
-// passing an explicit --data-dir overrides the default.
-func TestCmdCreateWithDataDir(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.bin")
-	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	outPath := filepath.Join(dir, "out.torrent")
-	dataDir := filepath.Join(dir, "data")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{
-		"-o", outPath,
-		"--data-dir", dataDir,
-		src,
-	}, &stdout, &stderr)
-	if code != exitOK {
-		t.Fatalf("data-dir exit = %d, stderr: %s", code, stderr.String())
-	}
-}
-
-// TestCmdCreateMissingRoot covers the
-// `eng.CreateTorrentFile err → reportRunErr` arm: a non-existent
-// root file makes hashing fail.
-func TestCmdCreateMissingRoot(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	outPath := filepath.Join(dir, "out.torrent")
-
-	var stdout, stderr bytes.Buffer
-	code := cmdCreate([]string{
-		"-o", outPath,
-		filepath.Join(dir, "no-such-file.bin"),
-	}, &stdout, &stderr)
-	if code == exitOK {
-		t.Errorf("missing-root exit = %d, want non-zero", code)
-	}
-}
-
-// TestCmdCreateSeedThenSigint covers cmdCreate's `if startSeed`
-// branch at lines 121-130. Spawn cmdCreate --seed in a goroutine,
-// give it a moment to enter the seeding loop, then SIGINT the
-// process. The seeding loop should observe ctx.Done() and
-// return cleanly.
-func TestCmdCreateSeedThenSigint(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.bin")
-	if err := os.WriteFile(src, []byte("seed test"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	outPath := filepath.Join(dir, "out.torrent")
-
-	done := make(chan int, 1)
-	go func() {
-		var stdout, stderr bytes.Buffer
-		code := cmdCreate([]string{
-			"-o", outPath,
-			"--seed",
-			"--data-dir", dir,
-			src,
-		}, &stdout, &stderr)
-		done <- code
-	}()
-
-	// Give the goroutine time to enter the seeding loop.
-	time.Sleep(200 * time.Millisecond)
-	if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
-		t.Fatalf("SIGINT failed: %v", err)
-	}
-
-	select {
-	case code := <-done:
-		if code != exitOK {
-			t.Errorf("cmdCreate --seed exit = %d, want exitOK", code)
+	got := stdout.String()
+	for _, want := range []string{
+		"Hashing " + root + "...\n",
+		"✓ Created " + out + "\n",
+		"  InfoHash: ",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout %q lacks %q", got, want)
 		}
-	case <-time.After(5 * time.Second):
-		t.Error("cmdCreate --seed did not exit within 5s of SIGINT")
+	}
+	if strings.Contains(got, "Signing with identity") {
+		t.Fatal("plain create must not print a signing line")
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signing.Verify(raw); err != signing.ErrNotSigned {
+		t.Fatalf("plain output verify = %v, want ErrNotSigned", err)
 	}
 }
 
-// TestStringSliceFlag covers the stringSliceFlag.String + Set
-// methods used by --tracker / --webseed.
-func TestStringSliceFlag(t *testing.T) {
-	t.Parallel()
-	var s stringSliceFlag
-	if got := s.String(); got != "" {
-		t.Errorf("empty String() = %q, want \"\"", got)
+func TestCreateSignedOutput(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "xdg")) // hermetic default identity
+	root := createContent(t)
+	out := filepath.Join(t.TempDir(), "signed.torrent")
+	var stdout, stderr bytes.Buffer
+	if code := cmdCreate([]string{"-o", out, "--sign", root}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
 	}
-	if err := s.Set("a"); err != nil {
+	// Signing line prints BEFORE hashing.
+	got := stdout.String()
+	signIdx := strings.Index(got, "Signing with identity ")
+	hashIdx := strings.Index(got, "Hashing ")
+	if signIdx < 0 || hashIdx < 0 || signIdx > hashIdx {
+		t.Fatalf("output order wrong: %q", got)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Set("b"); err != nil {
+	sig, err := signing.Verify(raw)
+	if err != nil {
+		t.Fatalf("signed output verify = %v", err)
+	}
+	if !strings.Contains(got, "Signing with identity "+sig.PubKeyHex()) {
+		t.Fatalf("printed identity does not match verified pubkey: %q", got)
+	}
+}
+
+// TestCreateTwinInfohashViaCLI is the DoD as the user sees it: create then
+// create --sign on the same content print the same InfoHash line.
+func TestCreateTwinInfohashViaCLI(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "xdg"))
+	root := createContent(t)
+	dir := t.TempDir()
+
+	infohashOf := func(args ...string) string {
+		var stdout, stderr bytes.Buffer
+		if code := cmdCreate(args, &stdout, &stderr); code != exitOK {
+			t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+		}
+		for _, line := range strings.Split(stdout.String(), "\n") {
+			if strings.HasPrefix(line, "  InfoHash: ") {
+				return strings.TrimPrefix(line, "  InfoHash: ")
+			}
+		}
+		t.Fatal("no InfoHash line")
+		return ""
+	}
+	plain := infohashOf("-o", filepath.Join(dir, "p.torrent"), root)
+	signed := infohashOf("-o", filepath.Join(dir, "s.torrent"), "--sign", root)
+	if plain != signed || len(plain) != 40 {
+		t.Fatalf("twin infohashes: %q vs %q", plain, signed)
+	}
+}
+
+// TestCreateSignExplicitMissingIdentityFailsClosed: an explicit --identity
+// path that doesn't exist is a hard error — never mint a key that would
+// orphan the torrent under an untrusted pubkey.
+func TestCreateSignExplicitMissingIdentityFailsClosed(t *testing.T) {
+	root := createContent(t)
+	missing := filepath.Join(t.TempDir(), "nope.key")
+	var stdout, stderr bytes.Buffer
+	code := cmdCreate([]string{"-o", filepath.Join(t.TempDir(), "x.torrent"), "--sign", "--identity", missing, root}, &stdout, &stderr)
+	if code != exitRuntime {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "swartznet: load identity:") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatal("create minted a key at an explicit path")
+	}
+	// No output file either — identity fails before hashing.
+	if strings.Contains(stdout.String(), "Hashing") {
+		t.Fatal("hashing ran despite identity failure")
+	}
+}
+
+func TestCreateSignExplicitValidIdentity(t *testing.T) {
+	root := createContent(t)
+	keyFile := filepath.Join(t.TempDir(), "elsewhere.key")
+	id, err := identity.Load(keyFile, true)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := s.String(); got != "a,b" {
-		t.Errorf("String() after two Sets = %q, want %q", got, "a,b")
+	out := filepath.Join(t.TempDir(), "s.torrent")
+	var stdout, stderr bytes.Buffer
+	if code := cmdCreate([]string{"-o", out, "--sign", "--identity", keyFile, root}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
 	}
-	if len(s) != 2 || s[0] != "a" || s[1] != "b" {
-		t.Errorf("slice contents = %v, want [a b]", []string(s))
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := signing.Verify(raw)
+	if err != nil || sig.PubKeyHex() != id.PublicKeyHex() {
+		t.Fatalf("verify = %v, pubkey %s want %s", err, sig.PubKeyHex(), id.PublicKeyHex())
+	}
+}
+
+func TestCreateBadPieceLength(t *testing.T) {
+	root := createContent(t)
+	var stdout, stderr bytes.Buffer
+	code := cmdCreate([]string{"-o", filepath.Join(t.TempDir(), "x.torrent"), "--piece-kib", "7", root}, &stdout, &stderr)
+	if code != exitRuntime {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "power of two ≥ 16 KiB") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

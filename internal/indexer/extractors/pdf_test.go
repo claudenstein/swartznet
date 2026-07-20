@@ -112,7 +112,7 @@ func TestPDFDispatchRoutes(t *testing.T) {
 func TestPDFLongTextChunks(t *testing.T) {
 	t.Parallel()
 	// Many copies of the same short string → a long plaintext stream
-	// that should trigger chunker.go's split logic. This verifies the
+	// that should trigger the chunker's split logic. This verifies the
 	// integration between the PDF extractor and chunkText.
 	msg := strings.Repeat("swartznet is searchable ", 1500) // ~36 KB
 	data := buildMinimalPDF(msg)

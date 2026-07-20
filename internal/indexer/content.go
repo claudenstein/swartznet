@@ -8,17 +8,11 @@ import (
 )
 
 // ContentDoc is the in-memory representation of a content-level index
-// document: the extracted text from one file (or one chunk of one file)
-// inside a torrent.
-//
-// Content docs are linked back to their torrent via InfoHash. The file is
-// identified by its index into the torrent's upverted file list plus its
-// human-readable path (kept as a separate field so we don't have to join
-// back through the torrent doc at query time for result snippets).
-//
-// M2.2a stores one document per file; later milestones will chunk very
-// large files into multiple docs at ~10 KB each, so downstream code should
-// not assume one file == one doc.
+// document: the extracted text of one chunk of one file inside a torrent.
+// Linked back to its torrent via InfoHash; the file is identified by its
+// index into the torrent's file list plus its human-readable path.
+// Downstream code must not assume one file == one doc — large files chunk
+// into multiple docs.
 type ContentDoc struct {
 	InfoHash  string    // 40-char lowercase hex infohash
 	FileIndex int       // index in the torrent's file list
@@ -29,13 +23,19 @@ type ContentDoc struct {
 	Extractor string    // name of the extractor that produced this doc
 	IndexedAt time.Time // when this extraction was written to the index
 	// ChunkIndex is 0 for the only-chunk / entire-file case, incrementing
-	// for large-file chunks. Part of the doc ID so chunks are independent.
+	// for large-file chunks. Encoded ONLY in the doc ID — schema v3 has
+	// no stored chunk_index field, so reconstruction always yields 0.
 	ChunkIndex int
+	// PreserveExisting, when set, makes IndexContent skip the write if a doc for
+	// this (infohash, file, chunk) already exists. The companion subscriber sets
+	// it: content docs carry no provenance, so a followed publisher's snapshot
+	// must never overwrite the node's OWN locally-extracted content for an
+	// infohash it merely listed. Transient — never serialized.
+	PreserveExisting bool
 }
 
-// docID returns the Bleve document ID for a content document. The ID
-// includes the infohash, file index, and chunk index so that
-// re-indexing the same (infohash, file) overwrites rather than duplicates.
+// docID keys a content doc by (infohash, file index, chunk index) so
+// re-indexing the same triple overwrites rather than duplicates.
 func (d ContentDoc) docID() string {
 	return fmt.Sprintf("c:%s:%d:%d", strings.ToLower(d.InfoHash), d.FileIndex, d.ChunkIndex)
 }
@@ -58,9 +58,10 @@ func (d ContentDoc) toBleve() map[string]any {
 	}
 }
 
-// IndexContent adds or updates a content-level document. Safe to call on
-// the same (InfoHash, FileIndex, ChunkIndex) multiple times; later calls
-// overwrite earlier ones.
+// IndexContent adds or updates a content-level document (put-or-replace
+// on the doc ID). Empty Text is rejected: extractors signal "no text"
+// with nil chunks and nil error, and the pipeline drops zero-chunk
+// results as skipped before any index write.
 func (i *Index) IndexContent(doc ContentDoc) error {
 	if doc.InfoHash == "" {
 		return errors.New("indexer: ContentDoc.InfoHash must not be empty")
@@ -73,30 +74,12 @@ func (i *Index) IndexContent(doc ContentDoc) error {
 	if i.bleve == nil {
 		return errors.New("indexer: closed")
 	}
-	return i.bleve.Index(doc.docID(), doc.toBleve())
-}
-
-// DeleteContentForTorrent removes all content-level documents belonging to
-// a given infohash. Used when a torrent is removed from the engine so its
-// extracted-text footprint is not left behind in the index.
-//
-// Implementation note: Bleve has no native "delete by query" primitive in
-// the public API, so we query for all matching docs first and then delete
-// them by ID. For small indexes this is fine; for large indexes we will
-// switch to an internal reader-based deletion in a later milestone.
-func (i *Index) DeleteContentForTorrent(infoHash string) (int, error) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.bleve == nil {
-		return 0, errors.New("indexer: closed")
+	if doc.PreserveExisting {
+		if d, err := i.bleve.Document(doc.docID()); err == nil && d != nil {
+			// Already have content for this (infohash, file, chunk) — never let a
+			// companion import clobber the node's own extraction.
+			return nil
+		}
 	}
-
-	// Build a query that selects only content docs for this infohash.
-	// Using the QueryString form keeps this simple and mirrors how the
-	// real Search path issues queries.
-	q := fmt.Sprintf("+%s:%s +%s:%s",
-		fieldType, typeContent,
-		fieldInfoHash, strings.ToLower(infoHash),
-	)
-	return i.deleteByQueryLocked(q)
+	return i.bleve.Index(doc.docID(), doc.toBleve())
 }

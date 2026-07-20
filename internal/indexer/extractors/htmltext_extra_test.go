@@ -8,13 +8,13 @@ import (
 )
 
 // TestExtractHTMLTextReadError covers extractHTMLText's
-// `case html.ErrorToken: … return "", err` arm at line 65.
-// iotest.ErrReader returns a non-EOF error so the tokenizer
-// surfaces ErrorToken with a real error.
+// `case html.ErrorToken: … return "", err` arm. iotest.ErrReader
+// returns a non-EOF error so the tokenizer surfaces ErrorToken
+// with a real error.
 func TestExtractHTMLTextReadError(t *testing.T) {
 	t.Parallel()
 	r := iotest.ErrReader(errors.New("synthetic html read failure"))
-	if _, err := extractHTMLText(r); err == nil {
+	if _, err := extractHTMLText(r, 0); err == nil {
 		t.Error("extractHTMLText should propagate non-EOF reader err")
 	}
 }
@@ -33,7 +33,7 @@ func TestExtractHTMLTextSkipsScriptStyleSvg(t *testing.T) {
 <math><mi>m</mi></math>
 </body>
 </html>`
-	got, err := extractHTMLText(strings.NewReader(html))
+	got, err := extractHTMLText(strings.NewReader(html), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestExtractHTMLTextSkipsScriptStyleSvg(t *testing.T) {
 func TestExtractHTMLTextSelfClosingBR(t *testing.T) {
 	t.Parallel()
 	html := `<p>line one<br/>line two<br/>line three</p>`
-	got, err := extractHTMLText(strings.NewReader(html))
+	got, err := extractHTMLText(strings.NewReader(html), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestExtractHTMLTextSelfClosingBR(t *testing.T) {
 func TestExtractHTMLTextWhitespaceCollapse(t *testing.T) {
 	t.Parallel()
 	html := "<p>hello   \t\n\r  world</p>"
-	got, err := extractHTMLText(strings.NewReader(html))
+	got, err := extractHTMLText(strings.NewReader(html), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

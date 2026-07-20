@@ -3,7 +3,6 @@ package extractors
 import (
 	"archive/zip"
 	"bytes"
-	"strings"
 	"testing"
 )
 
@@ -42,7 +41,7 @@ func TestODTExtractorEmptyContentReturnsNil(t *testing.T) {
 }
 
 // TestODTExtractorMalformedContentXML covers the
-// `text, err := extractODTText(rc); if err != nil { return ... }`
+// `text, err := extractODTText(...); if err != nil { return ... }`
 // arm. Plant invalid XML in content.xml; the strict-off decoder
 // still rejects token-level garbage.
 func TestODTExtractorMalformedContentXML(t *testing.T) {
@@ -62,7 +61,3 @@ func TestODTExtractorMalformedContentXML(t *testing.T) {
 		t.Error("Extract should fail on malformed content.xml")
 	}
 }
-
-// satisfy strings import (used in buildMinimalODT helper that
-// might not be reused here).
-var _ = strings.NewReader

@@ -114,7 +114,7 @@ This tiering is the most important design decision in the entire project. It con
 
 Everything above the "BitTorrent Engine" line is ours. Everything below is vendored as a library via `go.mod`.
 
-The layer boundaries are strict: the ingestion pipeline does not know about the peer-wire protocol; the peer-wire `sn_search` handler does not know how Bleve encodes its index; the DHT publisher does not know about the local HTTP API. The only thing that crosses layers is a small `SearchResult` struct shared by the indexer and the query engine.
+The layer boundaries are strict: the ingestion pipeline does not know about the peer-wire protocol; the peer-wire `sn_search` handler does not know how Bleve encodes its index; the DHT publisher does not know about the local HTTP API. Each layer carries its own response type (`indexer.SearchResponse`, `swarmsearch.QueryResponse`, `dhtindex.LookupResponse`); the three streams are reconciled at the `httpapi` boundary rather than via a shared cross-layer type, so the wire layers and the local index can evolve their result shapes independently.
 
 The three frontends all call `internal/daemon.New()` to obtain a fully-wired node; this is the single source of truth for startup order and resource cleanup. The CLI and the native GUI link the same packages directly; the web UI is reached through the HTTP API like any external tool, even though it ships embedded in the same binary.
 
@@ -347,7 +347,14 @@ Properties:
   barely notices.
 - **No 1000-byte cap** — the companion torrent at `v.ih` holds
   the full keyword→records index as a signed B-tree (SPEC §1),
-  scaling to millions of records per publisher.
+  scaling to millions of records per publisher. Subscribers do
+  enforce a 32 MiB acceptance limit (`maxCompanionBytes`) on the
+  companion torrent's declared size before downloading any pieces
+  — publishers must keep companion indexes under it. Reader-side
+  validation additionally visits each B-tree page at most once
+  (shared visited-set) and fails closed on any re-visit: the
+  interior page structure is unsigned, so a hostile layout could
+  otherwise force an exponential number of page reads.
 - **Double-hashed salt** means DHT observers see only
   `SHA1(pk || SHA256("snet.index"))` — a fixed mask across all
   publishers. Keyword enumeration moves from "passive observation"

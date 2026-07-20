@@ -4,425 +4,304 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/swartznet/swartznet/contracts/ltepwire"
 )
 
-// QueryRequest parameterises an outbound sn_search query. Only Q is
-// required; sensible defaults kick in for the rest.
-type QueryRequest struct {
-	// Q is the user's query string.
-	Q string
-	// Scope is the subset of ["n","f","c"] the querier wants. Empty
-	// means DefaultScope.
-	Scope string
-	// PerPeerLimit is the maximum number of hits each peer should
-	// return. Zero → 50.
-	PerPeerLimit int
-	// Timeout is the overall wall-clock budget for the query. Zero →
-	// 3 seconds.
-	Timeout time.Duration
-}
+// pendingGrace keeps a completed query's pending entry (and its asked set)
+// around briefly after collection so an honest asked peer replying just after
+// the deadline is matched to the query and dropped silently — NOT charged
+// ScoreStaleTxID as if it were a spoofer.
+const pendingGrace = 10 * time.Second
 
-// QueryResponse is the merged result of a fan-out Query. It contains
-// hits from every peer that responded in time, deduplicated and
-// re-ranked.
-type QueryResponse struct {
-	// TxID is the transaction id generated for this query. Useful
-	// for correlation with log output.
-	TxID uint32
-	// Hits are merged + re-ranked across responders.
-	Hits []MergedHit
-	// Asked is the number of peers we sent the query to.
-	Asked int
-	// Responded is the number of peers that sent a non-reject reply
-	// before the timeout.
-	Responded int
-	// Rejected is the number of peers that replied with an explicit
-	// reject.
-	Rejected int
-}
-
-// MergedHit is a post-merge hit row. It deduplicates the same
-// infohash across responders by summing their individual rank scores
-// (capped) and attributing the hit to every peer that returned it.
-type MergedHit struct {
-	// InfoHash is the 40-char lowercase hex representation of the
-	// underlying 20-byte id.
-	InfoHash string
-	// Name is the human-readable torrent name; the first non-empty
-	// name across responders wins.
-	Name string
-	// Size is the torrent size in bytes; first non-zero wins.
-	Size int64
-	// Seeders is the max reported seeder count across responders.
-	Seeders int
-	// Score is the summed rank from all responders, capped at 1000.
-	Score int
-	// Matches is the union of per-file matches across responders.
-	Matches []FileMatch
-	// Sources is the list of peer addresses that returned this hit.
-	Sources []string
-}
-
-// Errors returned by Query.
+// Errors returned by Query for a request that never reaches the wire. These are
+// surfaced INLINE at the HTTP boundary (a 200 response with a swarm.error
+// string, never a 500 — §5.9).
 var (
-	ErrNoCapablePeers = errors.New("swarmsearch: no search-capable peers known")
-	ErrNoSender       = errors.New("swarmsearch: sender not configured")
 	ErrEmptyQuery     = errors.New("swarmsearch: empty query")
+	ErrNoSender       = errors.New("swarmsearch: no transport configured")
+	ErrNoCapablePeers = errors.New("swarmsearch: no sn_search-capable peers")
 )
 
-// pendingQuery holds the server-side state for a Query that has been
-// sent out and is waiting for responses. The inbound handler looks
-// it up by txid and routes each Result into results.
-type pendingQuery struct {
-	txid     uint32
-	results  chan incomingResult
-	expected int // number of peers we fired the query to
+// QueryRequest is an outbound swarm search.
+type QueryRequest struct {
+	Q     string
+	Scope string
+	Limit int
 }
 
-// incomingResult bundles a decoded Result with the address of the
-// peer that sent it, so the merger can attribute sources correctly.
+// MergedHit is one deduplicated result across all responding peers.
+type MergedHit struct {
+	InfoHash string
+	Name     string
+	Size     int64
+	Seeders  int
+	Score    int      // sum of per-peer ranks, capped at 1000
+	Sources  []string // peer addrs that returned this infohash
+	Matches  []ltepwire.FileMatch
+}
+
+// QueryResponse is Layer S's native response (never merged with Layer L).
+type QueryResponse struct {
+	TxID      uint32
+	Hits      []MergedHit
+	Asked     int // peers we sent the query to
+	Responded int // peers that returned a (non-reject) result
+	Rejected  int // peers that returned a reject
+}
+
 type incomingResult struct {
-	peer   string
-	result Result
+	fromAddr string
+	reject   bool
+	code     int
+	total    int
+	hits     []ltepwire.Hit
 }
 
-// nextTxID returns a monotonically increasing transaction id per
-// Protocol. Wraps at uint32 boundaries, which is fine because we
-// only ever have a handful of outbound queries in flight at once.
-func (p *Protocol) nextTxID() uint32 {
-	return atomic.AddUint32(&p.txidCounter, 1)
+type pendingQuery struct {
+	txid    uint32
+	asked   map[string]bool // immutable after registration
+	results chan incomingResult
+
+	// respMu guards responded: each asked peer may contribute at most ONE
+	// frame, so a single peer cannot flood the results channel, end collection
+	// early, or inflate Responded.
+	respMu    sync.Mutex
+	responded map[string]bool
 }
 
-// registerPending stores a pendingQuery under its txid so the
-// result-handling branch of HandleMessage can find it. The caller is
-// responsible for calling releasePending when done.
-func (p *Protocol) registerPending(q *pendingQuery) {
-	p.pendingMu.Lock()
-	if p.pending == nil {
-		p.pending = make(map[uint32]*pendingQuery)
+// firstFrom reports whether addr is answering for the FIRST time (and records
+// it). A repeat frame from an already-answered peer returns false.
+func (pq *pendingQuery) firstFrom(addr string) bool {
+	pq.respMu.Lock()
+	defer pq.respMu.Unlock()
+	if pq.responded[addr] {
+		return false
 	}
-	p.pending[q.txid] = q
+	pq.responded[addr] = true
+	return true
+}
+
+func (p *Protocol) registerPending(pq *pendingQuery) {
+	p.pendingMu.Lock()
+	p.pending[pq.txid] = pq
 	p.pendingMu.Unlock()
 }
-
-// releasePending removes a pendingQuery from the registry. Safe to
-// call multiple times.
-func (p *Protocol) releasePending(txid uint32) {
+func (p *Protocol) lookupPending(txid uint32) *pendingQuery {
+	p.pendingMu.Lock()
+	defer p.pendingMu.Unlock()
+	return p.pending[txid]
+}
+func (p *Protocol) unregisterPending(txid uint32) {
 	p.pendingMu.Lock()
 	delete(p.pending, txid)
 	p.pendingMu.Unlock()
 }
 
-// lookupPending fetches a pendingQuery by txid, or nil if no such
-// query is currently in flight.
-func (p *Protocol) lookupPending(txid uint32) *pendingQuery {
-	p.pendingMu.RLock()
-	defer p.pendingMu.RUnlock()
-	return p.pending[txid]
+// supportedTargets snapshots the addr+token of every sn_search-capable peer.
+// (Slice 7 fans out to all supported peers; the AddrMan peer book + feeler are
+// a deferred local optimization — see DECISIONS S7.)
+func (p *Protocol) supportedTargets() []PeerToken {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]PeerToken, 0, len(p.peers))
+	for _, ps := range p.peers {
+		if ps.Supported && ps.token.valid() {
+			out = append(out, ps.token)
+		}
+	}
+	return out
 }
 
-// Query fans an sn_search query out to every known search-capable
-// peer and returns a merged QueryResponse. Blocks until the
-// per-query Timeout expires or every asked peer has responded
-// (whichever is sooner).
-//
-// The caller is expected to hold a *Protocol whose Sender has been
-// attached (engine.New does this automatically). In tests, SetSender
-// with a fake implementation.
+// Query fans an sn_search query out to every capable peer, collects results
+// until all asked peers answer or the context deadline fires, and merges them.
 func (p *Protocol) Query(ctx context.Context, req QueryRequest) (*QueryResponse, error) {
 	if req.Q == "" {
 		return nil, ErrEmptyQuery
 	}
-	if req.PerPeerLimit <= 0 {
-		req.PerPeerLimit = 50
-	}
-	if req.Timeout <= 0 {
-		req.Timeout = 3 * time.Second
-	}
-
-	p.mu.RLock()
-	sender := p.sender
-	p.mu.RUnlock()
-	if sender == nil {
+	p.mu.Lock()
+	t := p.transport
+	p.mu.Unlock()
+	if t == nil {
 		return nil, ErrNoSender
 	}
-
-	// Snapshot the capable peer set. Peers discovered after this
-	// point won't receive this query — that is intentional, so the
-	// result is bounded.
-	peerSnap := p.KnownPeers()
-	targets := p.selectTargets(peerSnap)
+	targets := p.supportedTargets()
 	if len(targets) == 0 {
 		return nil, ErrNoCapablePeers
 	}
 
 	txid := p.nextTxID()
-	pend := &pendingQuery{
-		txid:     txid,
-		results:  make(chan incomingResult, len(targets)),
-		expected: len(targets),
+	asked := make(map[string]bool, len(targets))
+	for _, tok := range targets {
+		asked[tok.Addr()] = true
 	}
-	p.registerPending(pend)
-	defer p.releasePending(txid)
+	pq := &pendingQuery{
+		txid:      txid,
+		asked:     asked,
+		results:   make(chan incomingResult, len(targets)),
+		responded: make(map[string]bool, len(targets)),
+	}
+	// Register BEFORE sending so a fast reply cannot race the registration.
+	p.registerPending(pq)
+	// Keep the pending alive for a grace window after Query returns so a
+	// slightly-late honest reply is matched (and dropped) instead of charged.
+	defer func() { time.AfterFunc(pendingGrace, func() { p.unregisterPending(txid) }) }()
 
-	payload, err := EncodeQuery(Query{
-		TxID:  txid,
-		Q:     req.Q,
-		Scope: req.Scope,
-		Limit: req.PerPeerLimit,
-	})
+	frame, err := ltepwire.EncodeQuery(ltepwire.Query{TxID: txid, Q: req.Q, Scope: req.Scope, Limit: req.Limit})
 	if err != nil {
-		return nil, fmt.Errorf("swarmsearch: encode query: %w", err)
+		return nil, err
 	}
-
-	// Fire the query at every target. Send errors are counted but
-	// do not abort the fan-out.
-	asked := 0
-	for _, t := range targets {
-		if err := sender.Send(t.Addr, payload); err != nil {
-			p.log.Debug("swarmsearch.query.send_fail",
-				"peer", t.Addr, "txid", txid, "err", err)
+	sent := 0
+	for _, tok := range targets {
+		if err := t.SendExtension(tok, frame); err != nil {
+			p.log.Debug("swarmsearch.query_send_err", "addr", tok.Addr(), "err", err)
 			continue
 		}
-		asked++
+		sent++
+	}
+	if sent == 0 {
+		return nil, ErrNoCapablePeers
 	}
 
-	if asked == 0 {
-		return &QueryResponse{TxID: txid}, nil
-	}
-
-	// Collect responses with a merged deadline (caller ctx + timeout).
-	queryCtx, cancel := context.WithTimeout(ctx, req.Timeout)
-	defer cancel()
-
-	var (
-		responses []incomingResult
-		rejects   int
-	)
-collect:
-	for len(responses)+rejects < asked {
+	resp := &QueryResponse{TxID: txid, Asked: sent}
+	var collected []incomingResult
+	answered := 0
+	for answered < sent {
 		select {
-		case <-queryCtx.Done():
-			break collect
-		case ir := <-pend.results:
-			if ir.result.MsgType == MsgTypeReject {
-				rejects++
+		case <-ctx.Done():
+			resp.Hits = mergeResponses(collected, req.Limit)
+			return resp, nil
+		case in := <-pq.results:
+			answered++
+			if in.reject {
+				resp.Rejected++
 				continue
 			}
-			responses = append(responses, ir)
+			resp.Responded++
+			collected = append(collected, in)
 		}
 	}
-
-	// M15d: promote responding peers in the peer book. A peer
-	// that sent a valid Result (not a Reject, not a timeout) has
-	// demonstrated correct sn_search protocol behavior. This is
-	// the promotion signal that moves them from new → tried.
-	// Rejects and timeouts are recorded as failures.
-	if p.book != nil {
-		responders := make(map[string]bool)
-		for _, ir := range responses {
-			responders[ir.peer] = true
-			p.book.Promote(ir.peer)
-		}
-		// Any target we asked that neither responded nor
-		// rejected is a timeout — record as failure.
-		for _, t := range targets {
-			if !responders[t.Addr] {
-				p.book.RecordFailure(t.Addr)
-			}
-		}
-	}
-
-	merged := mergeResponses(responses)
-
-	// M16c: populate the hit cache with freshly merged hits so
-	// subsequent queries that return the same infohashes can
-	// skip the full merge for the cached portion. This is the
-	// BIP-152 "assume the receiver already has most of the data"
-	// local-side speedup.
-	if p.hitCache != nil {
-		for _, h := range merged {
-			p.hitCache.Store(h)
-		}
-	}
-
-	return &QueryResponse{
-		TxID:      txid,
-		Hits:      merged,
-		Asked:     asked,
-		Responded: len(responses),
-		Rejected:  rejects,
-	}, nil
+	resp.Hits = mergeResponses(collected, req.Limit)
+	return resp, nil
 }
 
-// routeResult is called by HandleMessage when an inbound Result
-// message arrives. It looks up the matching pendingQuery and
-// delivers the result to the collector. Results without a matching
-// pending query (stale responses, spurious messages) are dropped.
-func (p *Protocol) routeResult(peerAddr string, r Result) {
+// routeResult applies the asked-set anti-spoof, charging misbehavior before the
+// txid lookup so guessing a live txid cannot dodge the malformed charge.
+func (p *Protocol) routeResult(fromAddr string, r ltepwire.Result) {
+	if resultIsMalformed(r) {
+		p.ban.Add(fromAddr, ScoreMalformedResult)
+		return
+	}
 	pend := p.lookupPending(r.TxID)
 	if pend == nil {
-		p.log.Debug("swarmsearch.route_result.no_pending",
-			"peer", peerAddr, "txid", r.TxID)
+		p.ban.Add(fromAddr, ScoreStaleTxID)
+		return
+	}
+	if !pend.asked[fromAddr] {
+		// A live txid alone never authenticates — the sender MUST be in the
+		// immutable asked set (txids are guessable).
+		p.ban.Add(fromAddr, ScoreUnexpectedMessage)
+		return
+	}
+	if !pend.firstFrom(fromAddr) {
+		// This peer already answered: drop the repeat (no double-count, no
+		// early-termination, no charge — it may just be a benign duplicate).
 		return
 	}
 	select {
-	case pend.results <- incomingResult{peer: peerAddr, result: r}:
-	default:
-		// Collector buffer full — drop the extra to avoid blocking
-		// the caller (which runs from the read loop).
-		p.log.Debug("swarmsearch.route_result.buffer_full",
-			"peer", peerAddr, "txid", r.TxID)
-	}
-}
-
-// routeReject is the same idea for Reject messages: look up the
-// txid, deliver a reject-shaped Result so the collector sees the
-// outcome. Stale rejects are dropped.
-func (p *Protocol) routeReject(peerAddr string, r Reject) {
-	pend := p.lookupPending(r.TxID)
-	if pend == nil {
-		return
-	}
-	select {
-	case pend.results <- incomingResult{
-		peer: peerAddr,
-		result: Result{
-			MsgType: MsgTypeReject,
-			TxID:    r.TxID,
-		},
-	}:
+	case pend.results <- incomingResult{fromAddr: fromAddr, total: r.Total, hits: r.Hits}:
 	default:
 	}
 }
 
-// mergeResponses deduplicates hits by infohash across the set of
-// responses, summing ranks, taking the max seeder count, and
-// preserving the first non-empty name/size. Returns the merged list
-// sorted by score descending.
-// FeelerCount is the maximum number of "new" (untried) peers
-// included in each query's fan-out alongside all tried peers.
-// Feelers give untried peers a chance to demonstrate correct
-// behavior and earn promotion to tried, while keeping the
-// majority of fan-out slots for peers that already have a
-// track record. Bitcoin's feeler connections serve the exact
-// same purpose.
-const FeelerCount = 2
-
-// selectTargets builds the fan-out target list for a Query.
-// If a PeerBook is wired in, the target set is:
-//
-//	all tried peers (high confidence, always queried)
-//	+ up to FeelerCount random new peers (untried → promotion chance)
-//
-// If the book is empty (testlab Cluster before any queries,
-// or a fresh install) the method falls back to "all supported
-// peers" so the first query bootstraps the book.
-func (p *Protocol) selectTargets(snap []PeerState) []PeerState {
-	// Phase 1: build the candidate set of supported peers.
-	var supported []PeerState
-	for _, ps := range snap {
-		if ps.Supported {
-			supported = append(supported, ps)
-		}
+func (p *Protocol) routeReject(fromAddr string, rj ltepwire.Reject) {
+	pend := p.lookupPending(rj.TxID)
+	if pend == nil {
+		p.ban.Add(fromAddr, ScoreStaleTxID)
+		return
 	}
-	if len(supported) == 0 {
-		return nil
+	if !pend.asked[fromAddr] {
+		p.ban.Add(fromAddr, ScoreUnexpectedMessage)
+		return
 	}
-
-	// Fall back to all-supported in two cases:
-	// 1. No book wired (test harness / backwards compat).
-	// 2. Zero tried peers — the feeler cap is meaningless until
-	//    there IS a trusted core to prefer. Sending to all
-	//    supported peers on the first few queries bootstraps
-	//    the tried table via the Promote path, after which
-	//    subsequent queries use the tried-preferred split.
-	if p.book == nil || p.book.TriedCount() == 0 {
-		return supported
+	if !pend.firstFrom(fromAddr) {
+		return
 	}
-
-	// Phase 2: split supported peers into tried vs. new using
-	// the book's classification.
-	triedSet := make(map[string]bool)
-	for _, a := range p.book.TriedAddrs() {
-		triedSet[a] = true
+	select {
+	case pend.results <- incomingResult{fromAddr: fromAddr, reject: true, code: rj.Code}:
+	default:
 	}
-
-	var targets []PeerState
-	var feelerCandidates []PeerState
-	for _, ps := range supported {
-		if triedSet[ps.Addr] {
-			targets = append(targets, ps) // always include
-		} else {
-			feelerCandidates = append(feelerCandidates, ps)
-		}
-	}
-
-	// Add up to FeelerCount new peers as feelers.
-	feelers := FeelerCount
-	if feelers > len(feelerCandidates) {
-		feelers = len(feelerCandidates)
-	}
-	targets = append(targets, feelerCandidates[:feelers]...)
-
-	// If the tried set somehow has zero overlap with the
-	// supported set (e.g. all tried peers disconnected since
-	// last query), fall back to all supported so we don't
-	// silently return zero targets.
-	if len(targets) == 0 {
-		return supported
-	}
-	return targets
 }
 
-func mergeResponses(responses []incomingResult) []MergedHit {
-	merged := make(map[string]*MergedHit)
+// resultIsMalformed flags a semantically bad result: a non-zero total with no
+// hits, or any hit whose infohash is not exactly 20 bytes.
+func resultIsMalformed(r ltepwire.Result) bool {
+	if r.Total > 0 && len(r.Hits) == 0 {
+		return true
+	}
+	for _, h := range r.Hits {
+		if len(h.IH) != 20 {
+			return true
+		}
+	}
+	return false
+}
 
-	for _, ir := range responses {
-		for _, h := range ir.result.Hits {
-			ih := hex.EncodeToString(h.IH)
-			if len(ih) != 40 {
+// mergeResponses deduplicates hits by infohash (within and across peers),
+// summing ranks (capped 1000), taking the max seeders and first non-empty
+// name/size, unioning matches, and sorting by score then seeders.
+func mergeResponses(results []incomingResult, limit int) []MergedHit {
+	byIH := make(map[string]*MergedHit)
+	var order []string
+	seenPeerIH := make(map[string]bool) // dedup a peer repeating an IH
+	for _, res := range results {
+		for _, h := range res.hits {
+			if len(h.IH) != 20 {
 				continue
 			}
-			m, ok := merged[ih]
-			if !ok {
-				m = &MergedHit{InfoHash: ih}
-				merged[ih] = m
+			ihHex := hex.EncodeToString(h.IH)
+			m := byIH[ihHex]
+			if m == nil {
+				m = &MergedHit{InfoHash: ihHex}
+				byIH[ihHex] = m
+				order = append(order, ihHex)
+			}
+			pk := res.fromAddr + "|" + ihHex
+			if !seenPeerIH[pk] {
+				seenPeerIH[pk] = true
+				m.Score += h.Rank
+				if m.Score > 1000 {
+					m.Score = 1000
+				}
+				m.Sources = append(m.Sources, res.fromAddr)
 			}
 			if m.Name == "" && h.N != "" {
 				m.Name = h.N
 			}
-			if m.Size == 0 && h.Sz > 0 {
+			if m.Size == 0 && h.Sz != 0 {
 				m.Size = h.Sz
 			}
 			if h.S > m.Seeders {
 				m.Seeders = h.S
 			}
-			m.Score += h.Rank
-			if m.Score > 1000 {
-				m.Score = 1000
-			}
 			m.Matches = append(m.Matches, h.Matches...)
-			m.Sources = append(m.Sources, ir.peer)
 		}
 	}
-
-	out := make([]MergedHit, 0, len(merged))
-	for _, m := range merged {
-		out = append(out, *m)
+	out := make([]MergedHit, 0, len(order))
+	for _, ih := range order {
+		out = append(out, *byIH[ih])
 	}
-	sort.Slice(out, func(i, j int) bool {
+	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
 			return out[i].Score > out[j].Score
 		}
 		return out[i].Seeders > out[j].Seeders
 	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out
 }
-
-var _ = sync.Mutex{} // keep the sync import in play even if future refactors remove direct uses

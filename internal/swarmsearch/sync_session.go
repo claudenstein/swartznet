@@ -1,47 +1,27 @@
-// SyncSession: one end of an RIBLT set-reconciliation exchange
-// between two sn_search peers. SPEC.md §2.2 state machine.
-//
-// Usage (initiator side):
-//
-//	s := NewSyncSession(txid, RoleInitiator, localRecords)
-//	begin := s.Begin(filter)
-//	// send `begin` (sync_begin)
-//	// receive sync_symbols frames, feed them via s.ApplySymbols
-//	// eventually s.NeedIDs() reports the decode result
-//	// send sync_need, receive sync_records via s.ApplyRecords
-//	// call s.Finish() to emit sync_end
-//
-// Responder side is symmetric: ApplyBegin, then ProduceSymbols
-// until told to stop, ApplyNeed for fulfillment, ApplyEnd for
-// teardown.
-//
-// This type carries no I/O — callers thread frames through. That
-// keeps it unit-testable and agnostic to the LTEP wire layer.
-
 package swarmsearch
 
 import (
-	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
-	"fmt"
+	"sort"
 	"sync"
+	"time"
+
+	"github.com/swartznet/swartznet/contracts/ltepwire"
+	"github.com/swartznet/swartznet/contracts/riblt"
 )
 
-// SyncRole identifies which side of a session this is.
-type SyncRole int
+// Sync roles and phases.
+type syncRole int
 
 const (
-	RoleInitiator SyncRole = 1
-	RoleResponder SyncRole = 2
+	RoleInitiator syncRole = 1
+	RoleResponder syncRole = 2
 )
 
-// SyncSessionPhase tracks the session's state machine position.
-type SyncSessionPhase int
+type syncPhase int
 
 const (
-	PhaseIdle SyncSessionPhase = iota
+	PhaseIdle syncPhase = iota
 	PhaseBegun
 	PhaseSymbolsFlowing
 	PhaseNeeded
@@ -49,152 +29,142 @@ const (
 	PhaseEnded
 )
 
-// LocalRecord is the wire-format-friendly view of a single
-// signed Aggregate record. Callers map to/from their native
-// companion.Record type. Keeping the session free of that
-// import prevents an import cycle (dhtindex → companion → would
-// eventually pull swarmsearch).
-type LocalRecord struct {
-	Pk  [32]byte
-	Kw  string
-	Ih  [20]byte
-	T   int64
-	Pow uint64
-	Sig [64]byte
-}
+// Sync session errors. ErrSymbolBudgetExceeded → sync_end "limit_exceeded"
+// (penalty-free); every other error → "aborted" (+ misbehavior charge).
+var (
+	ErrSymbolBudgetExceeded    = errors.New("swarmsearch: RIBLT symbol budget exceeded")
+	ErrSyncBytesBudgetExceeded = errors.New("swarmsearch: sync byte budget exceeded")
+	ErrSyncDesync              = errors.New("swarmsearch: sync symbol index desync")
+	ErrSyncPhase               = errors.New("swarmsearch: illegal sync phase transition")
+	ErrSyncTxID                = errors.New("swarmsearch: sync txid mismatch")
+	ErrSyncTooLarge            = errors.New("swarmsearch: sync frame over cap")
+)
 
-// SyncSession carries the full state of one RIBLT exchange.
-//
-// Thread safety: every public method takes `mu` so the session
-// can be driven concurrently from the LTEP read-loop goroutine
-// (which invokes Apply* via the handler) and the caller goroutine
-// (which calls Begin / NeedIDs / CloseSync etc.). Without this,
-// the RIBLTDecoder's internal map races against the caller's
-// NeedIDs/Added reads.
+// SyncSession is one RIBLT reconciliation exchange with a peer, keyed by txid.
+// I/O-free: it produces/consumes ltepwire frames; the caller sends them. The
+// local record set is snapshotted at construction — a live RecordCache.Add does
+// NOT enter an in-flight session.
 type SyncSession struct {
-	mu      sync.Mutex
-	txid    uint32
-	role    SyncRole
-	phase   SyncSessionPhase
-	filter  SyncFilter
-	records map[[32]byte]LocalRecord // indexed by RIBLT element ID
+	mu    sync.Mutex
+	txid  uint32
+	role  syncRole
+	phase syncPhase
 
-	enc *RIBLTEncoder
-	dec *RIBLTDecoder
+	records map[[32]byte]LocalRecord // by ElementID, for ApplyNeed lookups
+	enc     riblt.Encoder
+	dec     *riblt.Decoder
 
-	// Budget tracking. Session aborts with limit_exceeded when
-	// either cap is crossed.
 	maxSymbols int
 	maxBytes   int
-
-	// Observability.
 	symbolsOut int
 	symbolsIn  int
 	bytesIn    int
 	bytesOut   int
+	recordsIn  int
 
-	// After decoding, a stable list of IDs we need records for.
-	neededIDs [][32]byte
+	// pendingSymbols buffers out-of-order symbol batches by their stream index
+	// so the async per-frame dispatch (goroutine per inbound frame) does not
+	// trip the strict index==symbolsIn check. doneReceived records the pump's
+	// terminal done=1. convergeFired is the initiator's once-guard.
+	pendingSymbols map[int]ltepwire.SyncSymbols
+	doneReceived   bool
+	convergeFired  bool
+
+	lastActivity time.Time
+	stopPumpCh   chan struct{}
+	stopOnce     sync.Once
 }
 
-// NewSyncSession constructs a fresh session. `records` is the
-// sender's local set; both sides pre-index it by RIBLT element ID
-// so ApplyNeed can look up records in O(1).
-func NewSyncSession(txid uint32, role SyncRole, records []LocalRecord) *SyncSession {
-	idx := make(map[[32]byte]LocalRecord, len(records))
-	enc := NewRIBLTEncoder()
-	for _, r := range records {
-		id := localRecordID(r)
-		idx[id] = r
-		enc.AddElement(id)
-	}
-	dec := NewRIBLTDecoder()
-	for _, r := range records {
-		dec.AddLocalElement(localRecordID(r))
-	}
-	return &SyncSession{
-		txid:       txid,
-		role:       role,
-		phase:      PhaseIdle,
-		records:    idx,
-		enc:        enc,
-		dec:        dec,
-		maxSymbols: DefaultSyncMaxSymbols,
-		maxBytes:   DefaultSyncMaxBytes,
-	}
+// convergeSymbolFloor is the minimum symbols the initiator applies before it
+// trusts Converged() — rateless "all residual symbols zero" is trivially true
+// on a too-short prefix, so an element that first contributes past a short
+// prefix would be silently lost. 256 makes the escape probability ~2^-21.
+const convergeSymbolFloor = 256
+
+// maxPendingSymbolBatches bounds the reorder buffer; a gap larger than this
+// (a genuinely lost batch) aborts the session rather than buffering forever.
+const maxPendingSymbolBatches = 32
+
+// touch updates the last-activity time (for lazy reaping). Caller holds mu.
+func (s *SyncSession) touch() { s.lastActivity = time.Now() }
+
+// stale reports whether the session has been idle longer than d.
+func (s *SyncSession) stale(now time.Time, d time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return now.Sub(s.lastActivity) > d
 }
 
-// TxID returns the session's transaction id. Immutable after
-// construction; no lock required.
+// StopPump signals a responder's symbol pump to stop (the initiator converged
+// and sent sync_need). Idempotent.
+func (s *SyncSession) StopPump() { s.stopOnce.Do(func() { close(s.stopPumpCh) }) }
+
+// pumpDone is the channel the pump selects on to observe StopPump.
+func (s *SyncSession) pumpDone() <-chan struct{} { return s.stopPumpCh }
+
+// NewSyncSession snapshots records into an indexed map + seeded encoder/decoder.
+func NewSyncSession(txid uint32, role syncRole, records []LocalRecord) *SyncSession {
+	s := &SyncSession{
+		txid:         txid,
+		role:         role,
+		phase:        PhaseIdle,
+		records:      make(map[[32]byte]LocalRecord, len(records)),
+		dec:          riblt.NewDecoder(),
+		maxSymbols:   ltepwire.DefaultSyncMaxSymbols,
+		maxBytes:     ltepwire.DefaultSyncMaxBytes,
+		lastActivity: time.Now(),
+		stopPumpCh:   make(chan struct{}),
+	}
+	for _, r := range records {
+		id := r.ElementID()
+		if _, dup := s.records[id]; dup {
+			continue
+		}
+		s.records[id] = r
+		el := riblt.RIBLTElement(id)
+		s.enc.AddElement(el)
+		s.dec.AddLocalElement(el)
+	}
+	return s
+}
+
+// TxID returns the session's transaction id.
 func (s *SyncSession) TxID() uint32 { return s.txid }
 
-// Phase returns the current state-machine position.
-func (s *SyncSession) Phase() SyncSessionPhase {
+// Phase returns the current phase (test/observability).
+func (s *SyncSession) Phase() syncPhase {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.phase
 }
 
-// Role returns the role this session was constructed with.
-// Immutable; no lock required.
-func (s *SyncSession) Role() SyncRole { return s.role }
-
-// SetBudgets overrides the default symbol/bytes caps.
-func (s *SyncSession) SetBudgets(maxSymbols, maxBytes int) {
+// Begin (initiator) emits the sync_begin frame. Idle→Begun.
+func (s *SyncSession) Begin(filter ltepwire.SyncFilter) ltepwire.SyncBegin {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if maxSymbols > 0 {
-		s.maxSymbols = maxSymbols
-	}
-	if maxBytes > 0 {
-		s.maxBytes = maxBytes
-	}
-}
-
-// Begin produces the SyncBegin frame for the initiator. Returns
-// an error if the session is in the wrong phase.
-func (s *SyncSession) Begin(filter SyncFilter) (SyncBegin, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.role != RoleInitiator {
-		return SyncBegin{}, errors.New("swarmsearch: Begin on non-initiator session")
-	}
-	if s.phase != PhaseIdle {
-		return SyncBegin{}, fmt.Errorf("swarmsearch: Begin in phase %d", s.phase)
-	}
-	s.filter = filter
 	s.phase = PhaseBegun
-	return SyncBegin{
+	return ltepwire.SyncBegin{
 		TxID:        s.txid,
-		Algo:        "riblt-v1",
+		Algo:        ltepwire.SyncAlgo,
+		ElementSize: ltepwire.RIBLTElementSize,
 		Filter:      filter,
-		ElementSize: 32,
 		LocalCount:  s.enc.Len(),
 		MaxSymbols:  s.maxSymbols,
 		MaxBytes:    s.maxBytes,
-	}, nil
+	}
 }
 
-// ApplyBegin consumes a SyncBegin frame on the responder side.
-// After this, callers should call ProduceSymbols to stream RIBLT
-// symbols back.
-func (s *SyncSession) ApplyBegin(m SyncBegin) error {
+// ApplyBegin (responder) records the peer's begin and negotiates the budgets
+// DOWNWARD (min of peer's and own). Idle→Begun.
+func (s *SyncSession) ApplyBegin(m ltepwire.SyncBegin) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.role != RoleResponder {
-		return errors.New("swarmsearch: ApplyBegin on non-responder session")
-	}
-	if s.phase != PhaseIdle {
-		return fmt.Errorf("swarmsearch: ApplyBegin in phase %d", s.phase)
-	}
 	if m.TxID != s.txid {
-		return fmt.Errorf("swarmsearch: sync_begin txid %d, session expects %d",
-			m.TxID, s.txid)
+		return ErrSyncTxID
 	}
-	if m.ElementSize != 32 {
-		return fmt.Errorf("swarmsearch: unsupported element_size %d", m.ElementSize)
+	if m.ElementSize != ltepwire.RIBLTElementSize {
+		return ErrSyncDesync
 	}
-	s.filter = m.Filter
 	if m.MaxSymbols > 0 && m.MaxSymbols < s.maxSymbols {
 		s.maxSymbols = m.MaxSymbols
 	}
@@ -205,294 +175,309 @@ func (s *SyncSession) ApplyBegin(m SyncBegin) error {
 	return nil
 }
 
-// ProduceSymbols emits up to `count` RIBLT symbols in one batch.
-// Returned batch size is min(count, MaxSymbolsPerMessage). The
-// caller should wrap the result into SyncSymbols and send. Phase
-// advances to PhaseSymbolsFlowing.
-func (s *SyncSession) ProduceSymbols(count int) ([]SyncSymbol, uint32, error) {
+// ProduceSymbols (sender) emits the next batch (≤100, ≤ remaining budget).
+func (s *SyncSession) ProduceSymbols(count int) (ltepwire.SyncSymbols, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.phase != PhaseBegun && s.phase != PhaseSymbolsFlowing {
-		return nil, 0, fmt.Errorf("swarmsearch: ProduceSymbols in phase %d", s.phase)
+	if count > ltepwire.MaxSymbolsPerMessage {
+		count = ltepwire.MaxSymbolsPerMessage
+	}
+	if remaining := s.maxSymbols - s.symbolsOut; count > remaining {
+		count = remaining
 	}
 	if count <= 0 {
-		count = MaxSymbolsPerMessage
+		return ltepwire.SyncSymbols{}, ErrSymbolBudgetExceeded
 	}
-	if count > MaxSymbolsPerMessage {
-		count = MaxSymbolsPerMessage
-	}
-	if s.symbolsOut+count > s.maxSymbols {
-		count = s.maxSymbols - s.symbolsOut
-		if count <= 0 {
-			return nil, 0, ErrSymbolBudgetExceeded
-		}
-	}
-	baseIdx := uint32(s.enc.NextSymbolIndex())
-	out := make([]SyncSymbol, 0, count)
+	baseIdx := int(s.enc.NextSymbolIndex())
+	syms := make([]ltepwire.SyncSymbol, count)
 	for i := 0; i < count; i++ {
-		sym := s.enc.NextSymbol()
-		copiedData := make([]byte, 32)
-		copy(copiedData, sym.DataXOR[:])
-		out = append(out, SyncSymbol{
-			Count:   sym.Count,
-			KeyXOR:  sym.KeyXOR,
-			DataXOR: copiedData,
-		})
+		cs := s.enc.NextSymbol()
+		b := cs.DataXOR
+		syms[i] = ltepwire.SyncSymbol{C: cs.Count, H: cs.KeyXOR, B: b[:]}
 	}
-	s.symbolsOut += len(out)
+	s.symbolsOut += count
 	s.phase = PhaseSymbolsFlowing
-	return out, baseIdx, nil
+	return ltepwire.SyncSymbols{TxID: s.txid, Index: baseIdx, Symbols: syms}, nil
 }
 
-// ApplySymbols ingests a SyncSymbols frame from the peer. Runs
-// peeling internally; after the call, NeedIDs returns IDs the
-// local side needs records for.
-func (s *SyncSession) ApplySymbols(m SyncSymbols) error {
+// SymbolsOut / MaxSymbols expose budget state (for the pump).
+func (s *SyncSession) SymbolsOut() int { s.mu.Lock(); defer s.mu.Unlock(); return s.symbolsOut }
+func (s *SyncSession) MaxSymbols() int { s.mu.Lock(); defer s.mu.Unlock(); return s.maxSymbols }
+
+// ApplySymbols (receiver) folds a batch into the decoder. It tolerates
+// reordering: a batch ahead of the stream position is buffered; a stale/
+// duplicate batch behind it is dropped idempotently; the contiguous prefix is
+// applied in order. A gap larger than the reorder buffer (a lost batch) aborts.
+func (s *SyncSession) ApplySymbols(m ltepwire.SyncSymbols) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.phase != PhaseBegun && s.phase != PhaseSymbolsFlowing {
-		return fmt.Errorf("swarmsearch: ApplySymbols in phase %d", s.phase)
-	}
 	if m.TxID != s.txid {
-		return fmt.Errorf("swarmsearch: sync_symbols txid %d, want %d", m.TxID, s.txid)
+		return ErrSyncTxID
 	}
-	if s.symbolsIn+len(m.Symbols) > s.maxSymbols {
-		return ErrSymbolBudgetExceeded
-	}
-	for _, ws := range m.Symbols {
-		var sym RIBLTSymbol
-		sym.Count = ws.Count
-		sym.KeyXOR = ws.KeyXOR
-		copy(sym.DataXOR[:], ws.DataXOR)
-		s.dec.AddRemoteSymbol(sym)
-	}
-	s.symbolsIn += len(m.Symbols)
 	s.phase = PhaseSymbolsFlowing
+	if m.Index < s.symbolsIn {
+		return nil // stale/duplicate — idempotent drop
+	}
+	if m.Index > s.symbolsIn {
+		if s.pendingSymbols == nil {
+			s.pendingSymbols = make(map[int]ltepwire.SyncSymbols)
+		}
+		if _, dup := s.pendingSymbols[m.Index]; dup {
+			return nil
+		}
+		if len(s.pendingSymbols) >= maxPendingSymbolBatches {
+			return ErrSyncDesync // gap too large — a batch was lost
+		}
+		s.pendingSymbols[m.Index] = m
+		return nil
+	}
+	// m.Index == symbolsIn: apply this batch and drain contiguous buffered ones.
+	cur := m
+	for {
+		if s.symbolsIn+len(cur.Symbols) > s.maxSymbols {
+			return ErrSymbolBudgetExceeded
+		}
+		for _, w := range cur.Symbols {
+			var data [32]byte
+			copy(data[:], w.B)
+			s.dec.AddRemoteSymbol(riblt.Symbol{Count: w.C, KeyXOR: w.H, DataXOR: data})
+		}
+		s.symbolsIn += len(cur.Symbols)
+		if cur.Done {
+			s.doneReceived = true
+		}
+		next, ok := s.pendingSymbols[s.symbolsIn]
+		if !ok {
+			break
+		}
+		delete(s.pendingSymbols, s.symbolsIn)
+		cur = next
+	}
 	return nil
 }
 
-// NeedIDs returns the element IDs decoded as "peer has, I lack".
-// Result is stable: if called twice with no intervening
-// ApplySymbols, returns the same set. Empty when no decoding has
-// happened yet or when sets are already equal.
-func (s *SyncSession) NeedIDs() [][32]byte {
+// ShouldInitiatorConverge reports (at most ONCE — the once-guard) whether the
+// initiator should now finalize: the decoder resolved the diff AND enough
+// symbols were seen to trust it, OR the responder signaled it is done
+// streaming (its budget was exhausted). This prevents both premature
+// convergence on a short prefix and re-firing on every post-convergence batch.
+func (s *SyncSession) ShouldInitiatorConverge() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	added := s.dec.Added()
-	ids := make([][32]byte, 0, len(added))
-	for _, e := range added {
-		var id [32]byte
-		copy(id[:], e[:])
-		ids = append(ids, id)
+	if s.convergeFired {
+		return false
 	}
-	s.neededIDs = ids
-	return ids
+	ready := (s.dec.Converged() && s.symbolsIn >= convergeSymbolFloor) || s.doneReceived
+	if ready {
+		s.convergeFired = true
+	}
+	return ready
 }
 
-// RemovedIDs returns the element IDs decoded as "I have, peer
-// lacks". Caller may use this to decide whether to ALSO send the
-// peer records (mirror flow).
-func (s *SyncSession) RemovedIDs() [][32]byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	removed := s.dec.Removed()
-	out := make([][32]byte, 0, len(removed))
-	for _, e := range removed {
-		var id [32]byte
-		copy(id[:], e[:])
-		out = append(out, id)
-	}
-	return out
-}
-
-// Converged reports whether the RIBLT decoder has zeroed out its
-// residual diff — i.e., all differences are enumerated in
-// NeedIDs + RemovedIDs.
+// Converged reports whether the decoder has resolved the full difference. NOTE:
+// this is trivially true on a too-short prefix — for the initiator's finalize
+// decision use ShouldInitiatorConverge / Finalized, which apply the floor.
 func (s *SyncSession) Converged() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.dec.Converged()
 }
 
-// NeedFrame produces the SyncNeed frame requesting records for
-// the given IDs. Phase advances to PhaseNeeded. IDs may be empty
-// to signal "I'm done decoding" per SPEC §2.6.
-func (s *SyncSession) NeedFrame(ids [][32]byte) (SyncNeed, error) {
+// Finalized reports whether the initiator has fired its (once-only) convergence
+// — i.e. the reconciliation request/push has been issued. This is the safe
+// signal for a caller to wait on before closing the session.
+func (s *SyncSession) Finalized() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.phase != PhaseSymbolsFlowing && s.phase != PhaseBegun {
-		return SyncNeed{}, fmt.Errorf("swarmsearch: NeedFrame in phase %d", s.phase)
-	}
-	if len(ids) > MaxNeedIDsPerMessage {
-		return SyncNeed{}, fmt.Errorf("swarmsearch: %d ids exceeds cap %d",
-			len(ids), MaxNeedIDsPerMessage)
-	}
-	idSlices := make([][]byte, len(ids))
-	for i, id := range ids {
-		b := make([]byte, 32)
-		copy(b, id[:])
-		idSlices[i] = b
-	}
-	s.phase = PhaseNeeded
-	return SyncNeed{TxID: s.txid, IDs: idSlices}, nil
+	return s.convergeFired
 }
 
-// ApplyNeed processes an incoming SyncNeed, returning records
-// matching the requested IDs. Unknown IDs (we don't have records
-// for them) land in the `missing` return.
-func (s *SyncSession) ApplyNeed(m SyncNeed) (records []LocalRecord, missing [][32]byte, err error) {
+// NeedIDs returns the sorted ElementIDs the peer has that we lack (→ sync_need).
+func (s *SyncSession) NeedIDs() [][32]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	added := s.dec.Added()
+	out := make([][32]byte, len(added))
+	for i, e := range added {
+		out[i] = e
+	}
+	sort.Slice(out, func(i, j int) bool { return less32(out[i], out[j]) })
+	return out
+}
+
+// RemovedRecords returns the local records the peer lacks (→ proactive push).
+func (s *SyncSession) RemovedRecords() []LocalRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []LocalRecord
+	for _, e := range s.dec.Removed() {
+		if r, ok := s.records[e]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// NeedFrame (receiver) builds a sync_need. Flowing/Begun→Needed.
+func (s *SyncSession) NeedFrame(ids [][32]byte) (ltepwire.SyncNeed, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(ids) > ltepwire.MaxNeedIDsPerMessage {
+		return ltepwire.SyncNeed{}, ErrSyncTooLarge
+	}
+	wire := make([][]byte, len(ids))
+	for i, id := range ids {
+		b := id
+		wire[i] = b[:]
+	}
+	s.phase = PhaseNeeded
+	return ltepwire.SyncNeed{TxID: s.txid, IDs: wire}, nil
+}
+
+// ApplyNeed (responder) resolves requested ids into (found records, missing
+// ids). No phase change.
+func (s *SyncSession) ApplyNeed(m ltepwire.SyncNeed) ([]LocalRecord, [][32]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if m.TxID != s.txid {
-		return nil, nil, fmt.Errorf("swarmsearch: sync_need txid %d, want %d", m.TxID, s.txid)
+		return nil, nil, ErrSyncTxID
 	}
-	if len(m.IDs) > MaxNeedIDsPerMessage {
-		return nil, nil, fmt.Errorf("swarmsearch: sync_need has %d ids (cap %d)",
-			len(m.IDs), MaxNeedIDsPerMessage)
+	if len(m.IDs) > ltepwire.MaxNeedIDsPerMessage {
+		return nil, nil, ErrSyncTooLarge
 	}
-	for _, raw := range m.IDs {
-		if len(raw) != 32 {
-			return nil, nil, fmt.Errorf("swarmsearch: sync_need id %d bytes", len(raw))
+	var found []LocalRecord
+	var missing [][32]byte
+	for _, idb := range m.IDs {
+		if len(idb) != 32 {
+			continue
 		}
 		var id [32]byte
-		copy(id[:], raw)
+		copy(id[:], idb)
 		if r, ok := s.records[id]; ok {
-			records = append(records, r)
+			found = append(found, r)
 		} else {
 			missing = append(missing, id)
 		}
 	}
-	return records, missing, nil
+	return found, missing, nil
 }
 
-// BuildRecordsFrame emits a SyncRecords frame carrying the given
-// records. Caller is responsible for chunking when len > cap.
-func (s *SyncSession) BuildRecordsFrame(recs []LocalRecord, missing [][32]byte) (SyncRecords, error) {
+// BuildRecordsFrame (responder) builds a sync_records reply, accounting bytes
+// on the semantic record size. →Fulfilled.
+func (s *SyncSession) BuildRecordsFrame(recs []LocalRecord, missing [][32]byte) (ltepwire.SyncRecords, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(recs) > MaxRecordsPerMessage {
-		return SyncRecords{}, fmt.Errorf("swarmsearch: %d records exceeds cap %d",
-			len(recs), MaxRecordsPerMessage)
+	if len(recs) > ltepwire.MaxRecordsPerMessage {
+		return ltepwire.SyncRecords{}, ErrSyncTooLarge
 	}
-	wireRecs := make([]SyncRecord, 0, len(recs))
-	for _, r := range recs {
-		wireRecs = append(wireRecs, SyncRecord{
-			Pk:  append([]byte(nil), r.Pk[:]...),
-			Kw:  r.Kw,
-			Ih:  append([]byte(nil), r.Ih[:]...),
-			T:   r.T,
-			Pow: r.Pow,
-			Sig: append([]byte(nil), r.Sig[:]...),
-		})
+	wire := make([]ltepwire.SyncRecord, len(recs))
+	for i, r := range recs {
+		wire[i] = toWireRecord(r)
+		s.bytesOut += syncRecordWireSize(r)
 	}
-	missingSlices := make([][]byte, 0, len(missing))
-	for _, id := range missing {
-		b := make([]byte, 32)
-		copy(b, id[:])
-		missingSlices = append(missingSlices, b)
+	miss := make([][]byte, len(missing))
+	for i, id := range missing {
+		b := id
+		miss[i] = b[:]
+		s.bytesOut += 32
 	}
 	s.phase = PhaseFulfilled
-	return SyncRecords{
-		TxID:    s.txid,
-		Records: wireRecs,
-		Missing: missingSlices,
-	}, nil
+	return ltepwire.SyncRecords{TxID: s.txid, Records: wire, Missing: miss}, nil
 }
 
-// ApplyRecords consumes a SyncRecords frame. Returns the records
-// that were newly learned (for caller-side ingestion). The caller
-// is responsible for verifying per-record signatures + PoW and
-// handing them off to the indexer.
-func (s *SyncSession) ApplyRecords(m SyncRecords) ([]SyncRecord, error) {
+// ApplyRecords (receiver) accepts a sync_records frame (records treated opaque;
+// signatures verified by the caller). Legal ONLY in Needed/Fulfilled. Bytes
+// accounted on the semantic size. →Fulfilled.
+func (s *SyncSession) ApplyRecords(m ltepwire.SyncRecords) ([]LocalRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if m.TxID != s.txid {
-		return nil, fmt.Errorf("swarmsearch: sync_records txid %d, want %d", m.TxID, s.txid)
+		return nil, ErrSyncTxID
 	}
-	// SPEC §2.7: receiver re-verifies sigs. This session wrapper
-	// treats records as opaque — it's the dhtindex/companion
-	// layer that knows how to verify. We still range-check sizes
-	// as the wire-level guard.
-	for i, r := range m.Records {
-		if len(r.Pk) != 32 || len(r.Ih) != 20 || len(r.Sig) != 64 {
-			return nil, fmt.Errorf("swarmsearch: sync_records record[%d] bad sizes", i)
+	// Records are illegal only BEFORE the RIBLT exchange (an unsolicited dump
+	// straight after sync_begin). Once symbols are flowing — or we sent
+	// sync_need — a proactive push is expected. This is broader than the
+	// legacy "Needed/Fulfilled only" because the rebuild dispatches inbound
+	// frames on independent goroutines, so a pushed sync_records can be
+	// processed while the responder is still SymbolsFlowing (DECISIONS S8).
+	if s.phase == PhaseIdle || s.phase == PhaseBegun {
+		return nil, ErrSyncPhase
+	}
+	if len(m.Records) > ltepwire.MaxRecordsPerMessage {
+		return nil, ErrSyncTooLarge
+	}
+	frameBytes := 0
+	out := make([]LocalRecord, 0, len(m.Records))
+	for _, w := range m.Records {
+		if len(w.Pk) != 32 || len(w.Ih) != 20 || len(w.Sig) != 64 {
+			return nil, ErrSyncPhase
 		}
+		r := fromWireRecord(w)
+		frameBytes += syncRecordWireSize(r)
+		out = append(out, r)
 	}
+	frameBytes += 32 * len(m.Missing)
+	if s.bytesIn+frameBytes > s.maxBytes {
+		return nil, ErrSyncBytesBudgetExceeded
+	}
+	s.bytesIn += frameBytes
+	s.recordsIn += len(out)
 	s.phase = PhaseFulfilled
-	return m.Records, nil
+	return out, nil
 }
 
-// Finish emits a SyncEnd frame terminating the session.
-func (s *SyncSession) Finish(status string) SyncEnd {
+// Finish emits a sync_end. any→Ended.
+func (s *SyncSession) Finish(status string) ltepwire.SyncEnd {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.phase = PhaseEnded
 	if status == "" {
-		status = SyncStatusConverged
+		status = ltepwire.SyncStatusConverged
 	}
-	return SyncEnd{
+	s.phase = PhaseEnded
+	return ltepwire.SyncEnd{
 		TxID:     s.txid,
 		Status:   status,
+		Decoded:  s.recordsIn,
 		Sent:     s.symbolsOut,
 		BytesIn:  s.bytesIn,
 		BytesOut: s.bytesOut,
 	}
 }
 
-// ApplyEnd consumes an incoming SyncEnd and closes the session.
-func (s *SyncSession) ApplyEnd(m SyncEnd) error {
+// ApplyEnd marks the session ended.
+func (s *SyncSession) ApplyEnd(m ltepwire.SyncEnd) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if m.TxID != s.txid {
-		return fmt.Errorf("swarmsearch: sync_end txid %d, want %d", m.TxID, s.txid)
+		return ErrSyncTxID
 	}
 	s.phase = PhaseEnded
 	return nil
 }
 
-// RecordByID returns the local record matching the given RIBLT
-// element ID, or ok=false if absent. Used by handler.go when a
-// peer sends a sync_need we must respond to.
-func (s *SyncSession) RecordByID(id [32]byte) (LocalRecord, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.records[id]
-	return r, ok
+func toWireRecord(r LocalRecord) ltepwire.SyncRecord {
+	pk := r.Pk
+	ih := r.Ih
+	sig := r.Sig
+	return ltepwire.SyncRecord{Pk: pk[:], Kw: r.Kw, Ih: ih[:], T: r.T, Pow: r.Pow, Sig: sig[:]}
 }
 
-// verifyLocalRecordSig returns true iff the record's ed25519
-// signature is valid against its embedded pubkey. The signing
-// message is pk || kw || ih || t_LE || pow_varint, matching
-// companion.RecordSigMessage exactly (duplicated here so the
-// swarmsearch package stays free of an import on companion,
-// which would pull a heavy dependency chain).
-func verifyLocalRecordSig(r LocalRecord) bool {
-	msg := make([]byte, 0, 32+len(r.Kw)+20+8+binary.MaxVarintLen64)
-	msg = append(msg, r.Pk[:]...)
-	msg = append(msg, r.Kw...)
-	msg = append(msg, r.Ih[:]...)
-	var ts [8]byte
-	binary.LittleEndian.PutUint64(ts[:], uint64(r.T))
-	msg = append(msg, ts[:]...)
-	var nonce [binary.MaxVarintLen64]byte
-	n := binary.PutUvarint(nonce[:], r.Pow)
-	msg = append(msg, nonce[:n]...)
-	return ed25519.Verify(ed25519.PublicKey(r.Pk[:]), msg, r.Sig[:])
+func fromWireRecord(w ltepwire.SyncRecord) LocalRecord {
+	var r LocalRecord
+	copy(r.Pk[:], w.Pk)
+	copy(r.Ih[:], w.Ih)
+	copy(r.Sig[:], w.Sig)
+	r.Kw = w.Kw
+	r.T = w.T
+	r.Pow = w.Pow
+	return r
 }
 
-// localRecordID derives the 32-byte RIBLT element ID from a
-// LocalRecord by SHA-256-ing the canonical sign message. Matches
-// SPEC.md §2.4 exactly so both peers converge on the same id
-// for the same record.
-func localRecordID(r LocalRecord) [32]byte {
-	msg := make([]byte, 0, 32+len(r.Kw)+20+8)
-	msg = append(msg, r.Pk[:]...)
-	msg = append(msg, r.Kw...)
-	msg = append(msg, r.Ih[:]...)
-	var ts [8]byte
-	for i := 0; i < 8; i++ {
-		ts[i] = byte(r.T >> (8 * i))
+func less32(a, b [32]byte) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
 	}
-	msg = append(msg, ts[:]...)
-	return sha256.Sum256(msg)
+	return false
 }

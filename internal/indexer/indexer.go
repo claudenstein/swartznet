@@ -15,26 +15,18 @@ import (
 	"github.com/blevesearch/bleve/v2/search/query"
 )
 
-// schemaSentinelKey is the Bleve Index.SetInternal key under which we
-// record the schema version an index was created with. Internal metadata
-// lives outside the searchable document store, so the sentinel never
-// appears in search results. The first call to Open on a fresh path writes
-// it; every subsequent Open verifies it. A mismatch triggers a clean
-// rebuild.
+// schemaSentinelKey is the Bleve SetInternal key under which the schema
+// version an index was created with is recorded. Internal metadata lives
+// outside the searchable document store, so the sentinel never appears in
+// search results or DocCount. The first Open on a fresh path writes it;
+// every subsequent Open verifies it; a mismatch triggers a clean rebuild.
 var schemaSentinelKey = []byte("_swartznet_schema_version")
 
-// MaxSearchLimit is a defensive upper bound on Search.req.Limit.
-// 10 000 is an order of magnitude above the largest legitimate
-// caller (the httpapi /search cap is 500), so no realistic user
-// hits it — but it prevents a misbehaving internal caller from
-// pinning the index mutex while Bleve materialises a multi-
-// million-hit result.
-const MaxSearchLimit = 10_000
-
-// Index is SwartzNet's local full-text search index. It wraps a Bleve index
-// on disk and exposes a narrow, intention-revealing API to callers.
+// Index is SwartzNet's local full-text search index. It wraps a Bleve
+// index on disk and exposes a narrow, intention-revealing API.
 //
-// Concurrency: all methods are safe for concurrent use.
+// Concurrency: all methods are safe for concurrent use; every method
+// serializes on one global mutex.
 type Index struct {
 	path string
 	log  *slog.Logger
@@ -43,20 +35,16 @@ type Index struct {
 	bleve bleve.Index
 }
 
-// Open opens (or creates) a Bleve index at path. If path already contains a
-// Bleve index with a matching SchemaVersion, it is opened read-write;
-// otherwise a new index is created with the SwartzNet schema. If an
-// existing index is found but its schema version does not match, the old
-// directory is removed and a fresh index is created — this is safe because
-// any lost documents will be rebuilt from re-adding torrents.
-//
-// The logger is optional; pass nil to silence schema-rebuild messages.
+// Open opens (or creates) a Bleve index at path. An existing index whose
+// stored schema version does not match SchemaVersion is removed wholesale
+// and recreated empty — lost documents regenerate when torrents re-index.
 func Open(path string) (*Index, error) {
 	return OpenWithLogger(path, nil)
 }
 
 // OpenWithLogger is like Open but lets the caller supply a slog.Logger for
-// schema-rebuild and recovery diagnostics.
+// schema-rebuild and recovery diagnostics. A nil logger falls back to a
+// warn-level stderr handler.
 func OpenWithLogger(path string, log *slog.Logger) (*Index, error) {
 	if path == "" {
 		return nil, errors.New("indexer: path must not be empty")
@@ -72,9 +60,9 @@ func OpenWithLogger(path string, log *slog.Logger) (*Index, error) {
 		return nil, err
 	}
 
-	// For a freshly-created index the sentinel is always absent and we
-	// simply write it. For an existing index the sentinel tells us whether
-	// a rebuild is needed.
+	// For a freshly-created index the sentinel is always absent and is
+	// simply written below. For an existing index the sentinel decides
+	// whether a rebuild is needed.
 	if existed {
 		stored := readSchemaVersion(bi)
 		if stored != SchemaVersion {
@@ -105,17 +93,15 @@ func OpenWithLogger(path string, log *slog.Logger) (*Index, error) {
 }
 
 // indexDirExists reports whether path already holds a Bleve index.
-// Uses filepath.Join so the marker lookup works on Windows too
-// (anacrolix's Bleve backend creates the file with the host
-// separator, not a hard-coded "/").
+// filepath.Join keeps the marker lookup correct on Windows.
 func indexDirExists(path string) bool {
 	_, err := os.Stat(filepath.Join(path, "index_meta.json"))
 	return err == nil
 }
 
 // openOrCreate opens an existing Bleve index at path or creates a new one
-// with the current schema if the directory is missing. It does NOT check
-// the schema version; callers must do that separately.
+// with the current schema when the directory is missing. It does NOT
+// check the schema version; callers must do that separately.
 func openOrCreate(path string) (bleve.Index, error) {
 	if indexDirExists(path) {
 		bi, err := bleve.Open(path)
@@ -132,8 +118,8 @@ func openOrCreate(path string) (bleve.Index, error) {
 }
 
 // readSchemaVersion reads the sentinel from an open Bleve index's internal
-// metadata store. Returns 0 if the sentinel is missing or unparseable,
-// which triggers a rebuild.
+// metadata store. Missing, empty, or unparseable sentinels yield 0, which
+// triggers a rebuild.
 func readSchemaVersion(bi bleve.Index) int {
 	val, err := bi.GetInternal(schemaSentinelKey)
 	if err != nil || len(val) == 0 {
@@ -147,8 +133,7 @@ func readSchemaVersion(bi bleve.Index) int {
 }
 
 // writeSchemaVersion persists the schema version integer as internal
-// metadata. It lives outside the search document store, so it does not
-// pollute search results or doc counts.
+// metadata, outside the search document store.
 func writeSchemaVersion(bi bleve.Index, v int) error {
 	return bi.SetInternal(schemaSentinelKey, []byte(strconv.Itoa(v)))
 }
@@ -166,8 +151,7 @@ func (i *Index) Close() error {
 }
 
 // TorrentDoc is the in-memory representation of a torrent-level index
-// document. It is what callers hand to IndexTorrent and what Search returns
-// in hit previews.
+// document: what callers hand to IndexTorrent and what walks reconstruct.
 type TorrentDoc struct {
 	InfoHash  string    // 40-char lowercase hex
 	Name      string    // torrent name as shown to the user
@@ -176,22 +160,29 @@ type TorrentDoc struct {
 	SizeBytes int64     // total torrent size in bytes
 	FileCount int       // cached len(FilePaths) for faceting
 	AddedAt   time.Time // when this was added to the index
-	// SignedBy is the 64-char hex ed25519 pubkey of whoever
-	// signed this torrent's .torrent file, or empty for
-	// unsigned torrents. Stored as a keyword field so the
-	// search-by-publisher facet can match it exactly.
+	// SignedBy is the 64-char hex ed25519 pubkey of whoever signed this
+	// torrent's .torrent file, or empty for unsigned torrents. Keyword
+	// field, so the search-by-publisher facet matches it exactly.
 	SignedBy string
+	// PreserveExistingSigner, when set, forbids a non-empty SignedBy from
+	// OVERWRITING a different existing attribution. The companion subscriber
+	// sets it: its snapshot proves the publisher authored the LIST, not that it
+	// signed each torrent (there is no per-torrent signature), so it must never
+	// hijack a torrent the node already attributes to another publisher.
+	// Transient — never serialized.
+	PreserveExistingSigner bool
 }
 
-// docID returns the Bleve document ID for a torrent. We use the infohash
-// directly so re-indexing the same torrent is a pure update (no duplicates).
+// docID keys a torrent doc by infohash so re-indexing the same torrent is
+// a pure update, never a duplicate.
 func (d TorrentDoc) docID() string {
 	return "t:" + strings.ToLower(d.InfoHash)
 }
 
 // toBleve converts the public TorrentDoc into the map form Bleve expects.
-// Multi-value fields (files, trackers) are joined with a separator that
-// the standard analyzer will tokenise cleanly.
+// FilePaths are joined with "\n" into the single-string files field and
+// split back on "\n" during reconstruction — a path containing a newline
+// corrupts the round-trip (frozen legacy behavior, SPEC §5.5).
 func (d TorrentDoc) toBleve() map[string]any {
 	if d.FileCount == 0 {
 		d.FileCount = len(d.FilePaths)
@@ -212,9 +203,20 @@ func (d TorrentDoc) toBleve() map[string]any {
 	}
 }
 
-// IndexTorrent adds or updates a torrent document. Safe to call on the same
-// infohash multiple times; later calls overwrite earlier ones (Bleve's
-// Index() semantics are put-or-replace on the document ID).
+// ErrForeignTorrent is returned by IndexTorrent when a PreserveExistingSigner
+// write targets a torrent already attributed to a DIFFERENT publisher. It is a
+// benign skip signal, not a failure: the companion subscriber uses it to skip
+// that torrent's content docs too, so a followed publisher cannot hijack a
+// torrent the node holds.
+var ErrForeignTorrent = errors.New("indexer: torrent already attributed to a different publisher")
+
+// IndexTorrent adds or updates a torrent document (put-or-replace on the
+// doc ID). Non-empty stored signed_by is sticky (DECISIONS §7-Q37): a
+// later upsert with an empty SignedBy — a local magnet re-add, a
+// companion import — carries the stored signer forward instead of
+// blanking it. The point read and the write happen under the same mutex
+// hold, so the carry-forward is atomic for every writer crossing this
+// seam.
 func (i *Index) IndexTorrent(doc TorrentDoc) error {
 	if doc.InfoHash == "" {
 		return errors.New("indexer: TorrentDoc.InfoHash must not be empty")
@@ -224,11 +226,44 @@ func (i *Index) IndexTorrent(doc TorrentDoc) error {
 	if i.bleve == nil {
 		return errors.New("indexer: closed")
 	}
+	if doc.SignedBy == "" {
+		if stored := i.storedSignedByLocked(doc.docID()); stored != "" {
+			doc.SignedBy = stored
+		}
+	} else if doc.PreserveExistingSigner {
+		// A companion import must not hijack a torrent the node ALREADY HOLDS: the
+		// snapshot proves the publisher authored the LIST, not that it owns this
+		// torrent. If a doc already exists under a DIFFERENT signer — including an
+		// UNSIGNED local torrent (stored ""), the common case — skip the ENTIRE
+		// write (Name/FilePaths/Size + attribution) and signal the caller to skip
+		// its content too. A new torrent (no existing doc) or one already
+		// attributed to the SAME publisher is stamped normally.
+		if d, err := i.bleve.Document(doc.docID()); err == nil && d != nil {
+			if stored := i.storedSignedByLocked(doc.docID()); stored != strings.ToLower(doc.SignedBy) {
+				return ErrForeignTorrent
+			}
+		}
+	}
 	return i.bleve.Index(doc.docID(), doc.toBleve())
 }
 
-// DeleteTorrent removes a torrent document from the index. Not an error if
-// the infohash is not present.
+// storedSignedByLocked returns the stored signed_by field of the document
+// with the given ID, or "" when the document is absent or the read fails
+// (a failed read must not block indexing). Caller must hold i.mu.
+func (i *Index) storedSignedByLocked(docID string) string {
+	q := bleve.NewDocIDQuery([]string{docID})
+	sr := bleve.NewSearchRequestOptions(q, 1, 0, false)
+	sr.Fields = []string{fieldSignedBy}
+	res, err := i.bleve.Search(sr)
+	if err != nil || len(res.Hits) == 0 {
+		return ""
+	}
+	v, _ := res.Hits[0].Fields[fieldSignedBy].(string)
+	return v
+}
+
+// DeleteTorrent removes a torrent document from the index. Not an error
+// if the infohash is not present.
 func (i *Index) DeleteTorrent(infoHash string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -238,8 +273,22 @@ func (i *Index) DeleteTorrent(infoHash string) error {
 	return i.bleve.Delete("t:" + strings.ToLower(infoHash))
 }
 
-// DocCount returns the number of documents currently in the index. Useful
-// for smoke tests and debug output.
+// DeleteContentForTorrent removes every content-level document belonging
+// to the given infohash and returns how many were deleted. Selection uses
+// exact-match term queries (never a QueryString) so a hostile or
+// malformed infohash cannot inject query syntax.
+func (i *Index) DeleteContentForTorrent(infoHash string) (int, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.bleve == nil {
+		return 0, errors.New("indexer: closed")
+	}
+	return i.deleteByQueryLocked(contentForInfoHashQuery(infoHash))
+}
+
+// DocCount returns the number of documents currently in the index. The
+// schema sentinel is internal metadata, not a document, so DocCount is
+// exactly torrent docs + content docs.
 func (i *Index) DocCount() (uint64, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -249,166 +298,11 @@ func (i *Index) DocCount() (uint64, error) {
 	return i.bleve.DocCount()
 }
 
-// Stats is the per-index snapshot returned by Stats(). Exposed by
-// the HTTP /index/stats endpoint and the GUI Status tab. All byte
-// counts are "as seen by the file system" — DirSizeBytes is the
-// sum of every regular file under Index.path, so it measures what
-// Bleve's scorch backend actually costs on disk.
-//
-// CorpusTextBytes is the sum of every ContentDoc.Text length in
-// the index — the "raw text we fed to Bleve" number that can be
-// divided into DirSizeBytes to get the text-to-index inflation
-// ratio. This is the measurement that the v1.0.0 open question
-// "how big is Bleve's index per TB of indexed text" wants.
-type Stats struct {
-	// DirBytes is the total on-disk size of the Bleve directory
-	// (the sum of every regular file under Index.path).
-	DirBytes int64 `json:"dir_bytes"`
-	// DocCount is the total number of Bleve documents (torrent +
-	// content, plus the schema sentinel).
-	DocCount uint64 `json:"doc_count"`
-	// TorrentCount is the number of torrent-level documents.
-	TorrentCount uint64 `json:"torrent_count"`
-	// ContentCount is the number of content-level documents
-	// (one per file-chunk extraction).
-	ContentCount uint64 `json:"content_count"`
-	// CorpusTextBytes is the sum of every ContentDoc.Text field
-	// currently in the index. Divide DirBytes by this to get the
-	// index inflation ratio. Zero if the index has no content
-	// docs yet.
-	CorpusTextBytes int64 `json:"corpus_text_bytes"`
-	// InflationRatio is DirBytes / CorpusTextBytes, for when the
-	// corpus is non-empty. Zero otherwise. Useful as a one-number
-	// summary for the GUI.
-	InflationRatio float64 `json:"inflation_ratio"`
-}
-
-// Stats returns a Stats snapshot. Cheap-ish — the corpus-bytes
-// sum requires scanning every content doc via a paginated
-// MatchAll query, so callers should poll at human cadences (e.g.
-// once every few seconds in the GUI), not in tight loops.
-//
-// Used by the HTTP API /index/stats endpoint that exposes the
-// v1.0.0 index-size measurement.
-func (i *Index) Stats() (Stats, error) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.bleve == nil {
-		return Stats{}, errors.New("indexer: closed")
-	}
-
-	var out Stats
-
-	// Total doc count is straight off the index.
-	total, err := i.bleve.DocCount()
-	if err != nil {
-		return Stats{}, fmt.Errorf("indexer: Stats doc count: %w", err)
-	}
-	out.DocCount = total
-
-	// Per-type counts via two cheap MatchAll queries that only
-	// ask for the type field. We use Size=0 and read Total from
-	// the response envelope so Bleve never has to materialise the
-	// hit list — it's the cheapest "how many docs match" call.
-	for _, tt := range []struct {
-		ty  string
-		dst *uint64
-	}{
-		{typeTorrent, &out.TorrentCount},
-		{typeContent, &out.ContentCount},
-	} {
-		q := bleve.NewQueryStringQuery("+" + fieldType + ":" + tt.ty)
-		sr := bleve.NewSearchRequestOptions(q, 0, 0, false)
-		res, err := i.bleve.Search(sr)
-		if err != nil {
-			return Stats{}, fmt.Errorf("indexer: Stats %s count: %w", tt.ty, err)
-		}
-		*tt.dst = res.Total
-	}
-
-	// Corpus text bytes: walk every content doc in batches and
-	// sum the length of the stored Text field. We ask Bleve to
-	// project only the text field to keep the response payload
-	// small.
-	q := bleve.NewQueryStringQuery("+" + fieldType + ":" + typeContent)
-	const batch = 1000
-	var (
-		from     = 0
-		textSum  int64
-		guardTTL = 64 // bound the loop defensively
-	)
-	for guardTTL > 0 {
-		guardTTL--
-		sr := bleve.NewSearchRequestOptions(q, batch, from, false)
-		sr.Fields = []string{fieldText}
-		res, err := i.bleve.Search(sr)
-		if err != nil {
-			return Stats{}, fmt.Errorf("indexer: Stats text scan: %w", err)
-		}
-		if len(res.Hits) == 0 {
-			break
-		}
-		for _, h := range res.Hits {
-			if v, ok := h.Fields[fieldText].(string); ok {
-				textSum += int64(len(v))
-			}
-		}
-		if len(res.Hits) < batch {
-			break
-		}
-		from += batch
-	}
-	out.CorpusTextBytes = textSum
-
-	// On-disk size: sum every regular file under Index.path.
-	// Follows symlinks but does not descend into them (Bleve
-	// doesn't use symlinks internally).
-	if size, err := dirBytes(i.path); err == nil {
-		out.DirBytes = size
-	}
-
-	if out.CorpusTextBytes > 0 {
-		out.InflationRatio = float64(out.DirBytes) / float64(out.CorpusTextBytes)
-	}
-	return out, nil
-}
-
-// dirBytes sums the size of every regular file under root. Uses
-// filepath.Join so the path concat is Windows-safe, and skips
-// symlinks (os.DirEntry.IsDir returns false for symlinked
-// directories, so the recursion naturally avoids symlink loops).
-// Returns 0 for a missing or unreadable root so Stats() can
-// degrade gracefully.
-func dirBytes(root string) (int64, error) {
-	var total int64
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return 0, err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			sub, _ := dirBytes(filepath.Join(root, e.Name()))
-			total += sub
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		total += info.Size()
-	}
-	return total, nil
-}
-
-// AllTorrentDocs returns every torrent-level document in the
-// index, reconstructed from the stored fields. Used by the M11
-// companion-index publisher to walk the local index when
-// generating its serialised digest.
-//
-// Pagination is handled internally — Bleve's MatchAllQuery is
-// run in batches of 1000 docs each. The returned slice is
-// freshly allocated and is safe to retain after the index is
-// closed.
+// AllTorrentDocs returns every torrent-level document, reconstructed from
+// stored fields, paginated internally in 1000-doc batches. The walk holds
+// the global mutex, so a count-scaled page ceiling bounds it against an
+// index that never returns a short page; hitting the ceiling logs
+// indexer.all_torrent_docs_truncated and truncates rather than spinning.
 func (i *Index) AllTorrentDocs() ([]TorrentDoc, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -421,11 +315,22 @@ func (i *Index) AllTorrentDocs() ([]TorrentDoc, error) {
 		out  []TorrentDoc
 		from = 0
 	)
-	for {
+	countReq := bleve.NewSearchRequestOptions(q, 0, 0, false)
+	countRes, err := i.bleve.Search(countReq)
+	if err != nil {
+		return nil, fmt.Errorf("indexer: AllTorrentDocs count: %w", err)
+	}
+	maxPages := int(countRes.Total/batch) + 2
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			i.log.Warn("indexer.all_torrent_docs_truncated",
+				"pages", page, "scanned", from, "torrent_count", countRes.Total)
+			break
+		}
 		sr := bleve.NewSearchRequestOptions(q, batch, from, false)
 		sr.Fields = []string{
 			fieldInfoHash, fieldName, fieldFilePaths, fieldTrackers,
-			fieldSizeBytes, fieldFileCount, fieldAddedAt,
+			fieldSizeBytes, fieldFileCount, fieldAddedAt, fieldSignedBy,
 		}
 		res, err := i.bleve.Search(sr)
 		if err != nil {
@@ -445,25 +350,35 @@ func (i *Index) AllTorrentDocs() ([]TorrentDoc, error) {
 	return out, nil
 }
 
-// ContentDocsForInfoHash returns every content-level document
-// stored under the given infohash, reconstructed from the
-// stored fields. Used by the M11 companion-index publisher to
-// pair each torrent record with its extracted text.
+// ContentDocsForInfoHash returns every content-level document stored
+// under the given infohash, reconstructed from stored fields. Same
+// pagination and count-scaled ceiling as AllTorrentDocs; truncation logs
+// indexer.content_docs_truncated.
 func (i *Index) ContentDocsForInfoHash(infoHash string) ([]ContentDoc, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.bleve == nil {
 		return nil, errors.New("indexer: closed")
 	}
-	infoHash = strings.ToLower(infoHash)
-	q := bleve.NewQueryStringQuery("+" + fieldType + ":" + typeContent +
-		" +" + fieldInfoHash + ":" + infoHash)
+	q := contentForInfoHashQuery(infoHash)
 	const batch = 1000
 	var (
 		out  []ContentDoc
 		from = 0
 	)
-	for {
+	countReq := bleve.NewSearchRequestOptions(q, 0, 0, false)
+	countRes, err := i.bleve.Search(countReq)
+	if err != nil {
+		return nil, fmt.Errorf("indexer: ContentDocsForInfoHash count: %w", err)
+	}
+	maxPages := int(countRes.Total/batch) + 2
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			i.log.Warn("indexer.content_docs_truncated",
+				"pages", page, "scanned", from,
+				"info_hash", infoHash, "content_count", countRes.Total)
+			break
+		}
 		sr := bleve.NewSearchRequestOptions(q, batch, from, true)
 		sr.Fields = []string{
 			fieldInfoHash, fieldFileIndex, fieldFilePath, fieldFileSize,
@@ -487,8 +402,10 @@ func (i *Index) ContentDocsForInfoHash(infoHash string) ([]ContentDoc, error) {
 	return out, nil
 }
 
-// torrentDocFromFields reconstructs a TorrentDoc from the
-// projection map Bleve returns in SearchHit.Fields.
+// torrentDocFromFields reconstructs a TorrentDoc from the projection map
+// Bleve returns in SearchHit.Fields. Multi-value keyword fields project
+// as string for one value and []any for several; both branches must be
+// handled. Datetimes round-trip as RFC3339 strings.
 func torrentDocFromFields(fields map[string]any) TorrentDoc {
 	doc := TorrentDoc{}
 	if v, ok := fields[fieldInfoHash].(string); ok {
@@ -519,16 +436,20 @@ func torrentDocFromFields(fields map[string]any) TorrentDoc {
 		doc.FileCount = int(v)
 	}
 	if v, ok := fields[fieldAddedAt].(string); ok && v != "" {
-		// Bleve stores datetimes as RFC3339-formatted strings.
 		if t, err := time.Parse(time.RFC3339, v); err == nil {
 			doc.AddedAt = t
 		}
 	}
+	if v, ok := fields[fieldSignedBy].(string); ok {
+		doc.SignedBy = v
+	}
 	return doc
 }
 
-// contentDocFromFields reconstructs a ContentDoc from the
-// projection map Bleve returns in SearchHit.Fields.
+// contentDocFromFields reconstructs a ContentDoc from the projection map
+// Bleve returns in SearchHit.Fields. ChunkIndex is encoded only in the
+// doc ID — there is no stored chunk_index field in schema v3 — so every
+// reconstructed doc carries ChunkIndex 0 (frozen for byte-compat).
 func contentDocFromFields(fields map[string]any) ContentDoc {
 	doc := ContentDoc{}
 	if v, ok := fields[fieldInfoHash].(string); ok {
@@ -560,226 +481,53 @@ func contentDocFromFields(fields map[string]any) ContentDoc {
 	return doc
 }
 
-// SearchRequest describes a query. Only Query is required.
-type SearchRequest struct {
-	Query string // free-form text; matches against name and file paths
-	Limit int    // max hits to return; defaults to 20 if zero
-	// Highlight, when true, asks Bleve to return matched text
-	// fragments on each hit (SearchHit.Fragments). Fragments are
-	// wrapped with <mark>...</mark> by Bleve's HTML highlighter
-	// and are most useful for content-level hits where the caller
-	// wants to show the match in context.
-	Highlight bool
-	// SignedBy, when non-empty, restricts results to torrents
-	// whose .torrent file was signed with this 64-char hex
-	// ed25519 pubkey. Combine with Query (or leave Query empty
-	// to fetch every signed torrent from this publisher).
-	SignedBy string
+// contentForInfoHashQuery builds the exact-match conjunction selecting
+// every content doc for one infohash. Term queries (not a QueryString)
+// mean the infohash is never re-parsed by Bleve's query grammar, so a
+// hostile or malformed infohash cannot inject query syntax. Mirrors the
+// SignedBy filter path in Search.
+func contentForInfoHashQuery(infoHash string) query.Query {
+	typeQ := bleve.NewTermQuery(typeContent)
+	typeQ.SetField(fieldType)
+	ihQ := bleve.NewTermQuery(strings.ToLower(infoHash))
+	ihQ.SetField(fieldInfoHash)
+	return bleve.NewConjunctionQuery(typeQ, ihQ)
 }
 
-// SearchHit is a single result row returned by Search. Fields marked
-// "torrent" are populated when the hit is a torrent-level document; fields
-// marked "content" are populated for content-level hits. A single call to
-// Search can return both kinds interleaved — check DocType to tell them
-// apart.
-type SearchHit struct {
-	DocType  string  // "torrent" or "content"
-	InfoHash string  // 40-char lowercase hex
-	Score    float64 // Bleve relevance score
-
-	// Torrent-level fields.
-	Name      string   // torrent name
-	SizeBytes int64    // total torrent bytes
-	FileCount int      // cached file count
-	Trackers  []string // tracker URLs (may be empty)
-	SignedBy  string   // 64-char hex pubkey of the .torrent signer (empty for unsigned)
-
-	// Content-level fields.
-	FileIndex int    // position in torrent's file list
-	FilePath  string // user-visible file path
-	FileSize  int64  // file bytes on disk
-	Mime      string // MIME type
-	Extractor string // producer extractor name
-
-	// Fragments maps a Bleve field name to a list of matched
-	// text fragments, pre-wrapped by Bleve's HTML highlighter
-	// so that matching terms appear as <mark>term</mark>.
-	// Populated by Search() whenever SearchRequest.Highlight is
-	// true. Callers rendering to plain text should strip the
-	// <mark> wrappers; the web UI renders them as emphasised
-	// spans.
-	//
-	// The most useful field names here are "text" (content hits)
-	// and "name"/"files" (torrent hits).
-	Fragments map[string][]string
-}
-
-// SearchResponse is the result envelope for a Search call.
-type SearchResponse struct {
-	Total uint64      // total hit count across the whole index
-	Hits  []SearchHit // hits, up to Limit, ordered by descending Score
-	Took  time.Duration
-}
-
-// Search runs a query against the index and returns a SearchResponse.
+// deleteByQueryLocked deletes every document matching q. Caller must hold
+// i.mu. Returns the number of documents deleted.
 //
-// The query is a Bleve QueryString, which supports the following
-// syntax end-users can type directly into the search box:
-//
-//   - `word1 word2` — any document containing any term
-//     (Bleve's default is SHOULD, not MUST).
-//   - `+required` — prefix with `+` to make a term required.
-//   - `-excluded` — prefix with `-` to exclude docs matching it.
-//   - `"exact phrase"` — double quotes for phrase match.
-//   - `name:ubuntu` — restrict a term to a specific field.
-//     Text-analyzed fields (`name`, `files`, `text`) take any
-//     tokenized term. Keyword-analyzed fields (`infohash`,
-//     `trackers`, `file_path`, `mime`, `extractor`) match the
-//     exact stored value only.
-//   - `word~1` — fuzzy match with edit distance 1.
-//   - `word^2` — boost a term.
-//
-// These are all locked down by TestSearchQueryOperators in
-// indexer_test.go. The Layer-S swarm search and Layer-D DHT
-// lookup both pass the raw query string through this same path,
-// so the syntax is consistent across all three layers.
-func (i *Index) Search(req SearchRequest) (*SearchResponse, error) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.bleve == nil {
-		return nil, errors.New("indexer: closed")
-	}
-	if req.Query == "" {
-		return nil, errors.New("indexer: empty query")
-	}
-	if req.Limit <= 0 {
-		req.Limit = 20
-	}
-	// Defence-in-depth cap. The upstream layers already apply
-	// their own caps (httpapi 500, sn_search handler 100), but a
-	// direct caller (tests, a future internal API) shouldn't be
-	// able to ask Bleve to materialise an arbitrarily large
-	// result set and pin the entire index mutex while it does.
-	if req.Limit > MaxSearchLimit {
-		req.Limit = MaxSearchLimit
-	}
-
-	// Build the query: free-form text (req.Query) AND, if
-	// SignedBy is set, an exact-match keyword filter on the
-	// signing pubkey.
-	var q query.Query = bleve.NewQueryStringQuery(req.Query)
-	if req.SignedBy != "" {
-		signedQ := bleve.NewTermQuery(strings.ToLower(req.SignedBy))
-		signedQ.SetField(fieldSignedBy)
-		q = bleve.NewConjunctionQuery(q, signedQ)
-	}
-	sr := bleve.NewSearchRequestOptions(q, req.Limit, 0, false)
-	sr.Fields = []string{
-		fieldType,
-		fieldInfoHash,
-		// torrent fields
-		fieldName, fieldSizeBytes, fieldFileCount, fieldTrackers, fieldSignedBy,
-		// content fields
-		fieldFileIndex, fieldFilePath, fieldFileSize, fieldMime, fieldExtractor,
-	}
-	if req.Highlight {
-		// html highlighter wraps matches with <mark>...</mark>.
-		// We scope it to the fields most useful for the UI
-		// rather than the default "every stored field" so the
-		// payload stays small.
-		sr.Highlight = bleve.NewHighlightWithStyle("html")
-		sr.Highlight.Fields = []string{fieldName, fieldFilePaths, fieldText}
-	}
-
-	res, err := i.bleve.Search(sr)
-	if err != nil {
-		return nil, fmt.Errorf("indexer: search: %w", err)
-	}
-
-	out := &SearchResponse{
-		Total: res.Total,
-		Hits:  make([]SearchHit, 0, len(res.Hits)),
-		Took:  res.Took,
-	}
-	for _, h := range res.Hits {
-		hit := SearchHit{Score: h.Score}
-		if v, ok := h.Fields[fieldType].(string); ok {
-			hit.DocType = v
-		}
-		if v, ok := h.Fields[fieldInfoHash].(string); ok {
-			hit.InfoHash = v
-		}
-		// Torrent-level fields.
-		if v, ok := h.Fields[fieldName].(string); ok {
-			hit.Name = v
-		}
-		if v, ok := h.Fields[fieldSizeBytes].(float64); ok {
-			hit.SizeBytes = int64(v)
-		}
-		if v, ok := h.Fields[fieldFileCount].(float64); ok {
-			hit.FileCount = int(v)
-		}
-		switch v := h.Fields[fieldTrackers].(type) {
-		case string:
-			hit.Trackers = []string{v}
-		case []any:
-			for _, t := range v {
-				if s, ok := t.(string); ok {
-					hit.Trackers = append(hit.Trackers, s)
-				}
-			}
-		}
-		if v, ok := h.Fields[fieldSignedBy].(string); ok {
-			hit.SignedBy = v
-		}
-		// Content-level fields.
-		if v, ok := h.Fields[fieldFileIndex].(float64); ok {
-			hit.FileIndex = int(v)
-		}
-		if v, ok := h.Fields[fieldFilePath].(string); ok {
-			hit.FilePath = v
-		}
-		if v, ok := h.Fields[fieldFileSize].(float64); ok {
-			hit.FileSize = int64(v)
-		}
-		if v, ok := h.Fields[fieldMime].(string); ok {
-			hit.Mime = v
-		}
-		if v, ok := h.Fields[fieldExtractor].(string); ok {
-			hit.Extractor = v
-		}
-		// Copy Bleve's highlighted fragment map straight through
-		// when the request asked for it. The map is nil when
-		// Highlight is false, which is what callers expect.
-		if len(h.Fragments) > 0 {
-			hit.Fragments = make(map[string][]string, len(h.Fragments))
-			for k, v := range h.Fragments {
-				hit.Fragments[k] = append([]string(nil), v...)
-			}
-		}
-		out.Hits = append(out.Hits, hit)
-	}
-	return out, nil
-}
-
-// deleteByQueryLocked deletes every document matching the given query
-// string. Caller must hold i.mu. Returns the number of documents deleted.
-//
-// Bleve 2.x does not ship a public DeleteByQuery, so we fetch IDs in
-// batches and delete them one by one. For the sizes we care about
-// (~thousands of content docs per removed torrent) this is acceptable.
-func (i *Index) deleteByQueryLocked(queryString string) (int, error) {
+// Bleve 2.x has no public DeleteByQuery, so IDs are fetched in batches
+// and deleted one by one. The loop is bounded off the matching-set size
+// reported by the first search: a working delete shrinks that set each
+// batch, so exceeding the bound means deletes are silently ineffective —
+// the loop fails closed with an error rather than spinning forever under
+// the global mutex.
+func (i *Index) deleteByQueryLocked(q query.Query) (int, error) {
 	const batchSize = 1000
-	q := bleve.NewQueryStringQuery(queryString)
 	sr := bleve.NewSearchRequestOptions(q, batchSize, 0, false)
-	// We only need IDs for deletion; no field projection.
+	// Only IDs are needed for deletion; no field projection.
 	sr.Fields = nil
 
-	var deleted int
-	for {
+	var (
+		deleted  int
+		maxIters int // computed from the first search's Total
+	)
+	for iter := 0; ; iter++ {
 		res, err := i.bleve.Search(sr)
 		if err != nil {
 			return deleted, fmt.Errorf("indexer: deleteByQuery search: %w", err)
+		}
+		if iter == 0 {
+			// (Total/batchSize)+1 batches suffice when each delete
+			// takes effect; 2x slack + a floor absorbs index churn
+			// without ever becoming unbounded.
+			maxIters = int(res.Total/batchSize)*2 + 4
+		}
+		if iter >= maxIters {
+			return deleted, fmt.Errorf(
+				"indexer: deleteByQuery made no progress (%d deleted, %d iterations) — deletes ineffective",
+				deleted, iter)
 		}
 		if len(res.Hits) == 0 {
 			return deleted, nil

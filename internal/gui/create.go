@@ -8,320 +8,175 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/swartznet/swartznet/internal/daemon"
 	"github.com/swartznet/swartznet/internal/engine"
 )
 
-// pieceLengthOptions mirrors common BitTorrent client presets.
-// Zero means "auto" (uses metainfo.ChoosePieceLength).
-var pieceLengthOptions = []struct {
-	label string
-	value int64
-}{
-	{"Auto", 0},
-	{"64 KiB", 64 * 1024},
-	{"256 KiB", 256 * 1024},
-	{"1 MiB", 1 << 20},
-	{"2 MiB", 2 << 20},
-	{"4 MiB", 4 << 20},
-	{"8 MiB", 8 << 20},
-	{"16 MiB", 16 << 20},
-}
-
-func pieceLengthLabels() []string {
-	out := make([]string, len(pieceLengthOptions))
-	for i, o := range pieceLengthOptions {
-		out[i] = o.label
+// showCreateDialog builds a .torrent from a file or folder — the GUI counterpart
+// of `swartznet create`. It optionally signs the file with the node's identity
+// and seeds the content in place through the RUNNING engine (so the new torrent
+// appears in the Downloads list immediately). Hashing runs off the UI thread
+// behind a modal progress indicator.
+func (dl *downloadsTab) showCreateDialog() {
+	if dl.d == nil || dl.d.Eng == nil {
+		return
 	}
-	return out
-}
+	win := dl.window()
+	if win == nil {
+		return
+	}
 
-func pieceLengthFromLabel(label string) int64 {
-	for _, o := range pieceLengthOptions {
-		if o.label == label {
-			return o.value
+	source := widget.NewEntry()
+	source.SetPlaceHolder("file or folder to share")
+	output := widget.NewEntry()
+	output.SetPlaceHolder("output .torrent path (defaults next to the source)")
+
+	// Auto-derive the output path from the source, RE-deriving whenever the source
+	// changes — but never clobbering a path the user typed. We remember the value
+	// WE last auto-filled; if output still holds exactly that, the user has not
+	// touched it, so refreshing it is safe. (No file-picker for the output: Fyne's
+	// save dialog os.Create()s the chosen file immediately, which would truncate an
+	// existing file to zero bytes if the user then cancelled.)
+	lastDerived := ""
+	source.OnChanged = func(string) {
+		if output.Text != lastDerived {
+			return // user edited the output path; leave it
 		}
+		derived := deriveTorrentPath(source.Text)
+		lastDerived = derived
+		output.SetText(derived)
 	}
-	return 0
-}
 
-// createTorrentDialog shows the Create Torrent modal.
-// Hashing runs in a background goroutine so the UI stays live;
-// progress is reported via a modal progress dialog the goroutine
-// dismisses on completion.
-func createTorrentDialog(d *daemon.Daemon, win fyne.Window) {
-	rootEntry := widget.NewEntry()
-	rootEntry.SetPlaceHolder("/path/to/file-or-folder")
+	pickFile := widget.NewButton("File…", func() {
+		dialog.ShowFileOpen(func(rc fyne.URIReadCloser, err error) {
+			if err != nil || rc == nil {
+				return
+			}
+			defer rc.Close()
+			source.SetText(rc.URI().Path())
+		}, win)
+	})
+	pickFolder := widget.NewButton("Folder…", func() {
+		dialog.ShowFolderOpen(func(u fyne.ListableURI, err error) {
+			if err != nil || u == nil {
+				return
+			}
+			source.SetText(u.Path())
+		}, win)
+	})
 
-	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("Torrent display name — edit to rename")
+	trackers := widget.NewEntry()
+	trackers.SetPlaceHolder("optional tracker URLs (space or comma separated)")
+	comment := widget.NewEntry()
+	comment.SetPlaceHolder("optional comment")
+	privateChk := widget.NewCheck("Private (BEP-27: no DHT / PEX)", nil)
+	seedChk := widget.NewCheck("Seed the content after creating", nil)
+	seedChk.SetChecked(true)
+	signChk := widget.NewCheck("Sign with my identity", nil)
+	if dl.d.Identity == nil {
+		signChk.SetText("Sign with my identity  (no identity loaded)")
+		signChk.Disable()
+	}
 
-	// autofillName pre-populates the Name field with the basename
-	// of the chosen root. The user can then edit it to anything
-	// they like; we only overwrite when the Name is still empty or
-	// still matches the previous auto-fill so a user-edited name
-	// survives re-browsing. BitTorrent's info.name becomes the
-	// visible torrent name AND the containing folder name on
-	// downloaders, so making it obviously editable avoids users
-	// getting stuck with the raw on-disk folder name.
-	var lastAutofill string
-	autofillName := func(rootPath string) {
-		base := filepath.Base(strings.TrimSpace(rootPath))
-		if base == "" || base == "." || base == "/" {
+	// A labelled row: fixed-width label, an entry that expands, optional trailing buttons.
+	labeled := func(label string, field fyne.CanvasObject, trailing ...fyne.CanvasObject) fyne.CanvasObject {
+		var right fyne.CanvasObject
+		if len(trailing) > 0 {
+			right = container.NewHBox(trailing...)
+		}
+		return container.NewBorder(nil, nil, widget.NewLabel(label), right, field)
+	}
+
+	content := container.NewVBox(
+		labeled("Source", source, pickFile, pickFolder),
+		labeled("Output", output),
+		labeled("Trackers", trackers),
+		labeled("Comment", comment),
+		privateChk, seedChk, signChk,
+	)
+
+	form := dialog.NewCustomConfirm("Create torrent", "Create", "Cancel", content, func(ok bool) {
+		if !ok {
 			return
 		}
-		if nameEntry.Text == "" || nameEntry.Text == lastAutofill {
-			nameEntry.SetText(base)
-			lastAutofill = base
-		}
-	}
-
-	// outEntry needs to be referenced inside autofillOutput
-	// before the widget is constructed below, so declare it now
-	// and set placeholder later.
-	outEntry := widget.NewEntry()
-	outEntry.SetPlaceHolder("/path/to/output.torrent")
-
-	// autofillOutput pre-populates the Output path with
-	// "<root>.torrent" so users don't have to think about where
-	// the file goes — most torrent clients write the .torrent next
-	// to the source by default. Same edit-survives policy as
-	// autofillName: we only overwrite when the user hasn't typed
-	// anything custom yet.
-	var lastAutofillOut string
-	autofillOutput := func(rootPath string) {
-		root := strings.TrimSpace(rootPath)
-		if root == "" {
+		root := strings.TrimSpace(source.Text)
+		out := strings.TrimSpace(output.Text)
+		if root == "" || out == "" {
+			dl.showErr(fmt.Errorf("both a source file/folder and an output .torrent path are required"))
 			return
 		}
-		// Strip a trailing slash so /a/b/ → /a/b.torrent rather
-		// than /a/b/.torrent.
-		root = strings.TrimRight(root, string(filepath.Separator))
-		candidate := root + ".torrent"
-		if outEntry.Text == "" || outEntry.Text == lastAutofillOut {
-			outEntry.SetText(candidate)
-			lastAutofillOut = candidate
+		opts := engine.CreateTorrentOptions{
+			Root:      root,
+			Trackers:  splitList(trackers.Text),
+			Private:   privateChk.Checked,
+			Comment:   strings.TrimSpace(comment.Text),
+			CreatedBy: "swartznet (gui)",
 		}
-	}
-
-	browseFileBtn := widget.NewButton("Choose File...", func() {
-		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
-			if err != nil || r == nil {
-				return
-			}
-			p := r.URI().Path()
-			rootEntry.SetText(p)
-			autofillName(p)
-			autofillOutput(p)
-			r.Close()
-		}, win)
-		fd.Show()
-	})
-	browseFolderBtn := widget.NewButton("Choose Folder...", func() {
-		fd := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
-			if err != nil || lu == nil {
-				return
-			}
-			p := lu.Path()
-			rootEntry.SetText(p)
-			autofillName(p)
-			autofillOutput(p)
-		}, win)
-		fd.Show()
-	})
-	rootEntry.OnChanged = func(s string) {
-		autofillName(s)
-		autofillOutput(s)
-	}
-	rootRow := container.NewBorder(nil, nil, nil,
-		container.NewHBox(browseFileBtn, browseFolderBtn),
-		rootEntry)
-
-	pieceSelect := widget.NewSelect(pieceLengthLabels(), nil)
-	pieceSelect.SetSelected("Auto")
-
-	trackersEntry := widget.NewMultiLineEntry()
-	trackersEntry.SetPlaceHolder("One tracker URL per line (optional — empty = DHT-only)")
-	trackersEntry.SetMinRowsVisible(3)
-
-	webseedsEntry := widget.NewMultiLineEntry()
-	webseedsEntry.SetPlaceHolder("Optional: HTTP(S) webseed URLs, one per line (BEP-19)")
-	webseedsEntry.SetMinRowsVisible(2)
-
-	commentEntry := widget.NewEntry()
-	commentEntry.SetPlaceHolder("Optional human-readable comment")
-
-	privateCheck := widget.NewCheck("Private torrent (disable DHT/PEX discovery, BEP-27)", nil)
-
-	signCheck := widget.NewCheck("Sign with my ed25519 identity (SwartzNet downloaders can verify publisher)", nil)
-	// Default on: every running SwartzNet node has an identity
-	// available, and signing costs effectively nothing.
-	signCheck.SetChecked(true)
-
-	seedCheck := widget.NewCheck("Start seeding immediately after creation", nil)
-	seedCheck.SetChecked(true)
-
-	browseOutBtn := widget.NewButton("Save As...", func() {
-		fd := dialog.NewFileSave(func(wc fyne.URIWriteCloser, err error) {
-			if err != nil || wc == nil {
-				return
-			}
-			outEntry.SetText(wc.URI().Path())
-			lastAutofillOut = wc.URI().Path()
-			// We don't actually want to write via the Fyne writer;
-			// close it without writing so the real CreateTorrentFile
-			// path handles the atomic rename itself.
-			_ = wc.Close()
-			// Remove the empty file Fyne created (best-effort; user
-			// may have picked a brand-new path).
-			_ = storage.Delete(wc.URI())
-		}, win)
-		// Pre-fill the Save As dialog with the basename already in
-		// outEntry (set via autofillOutput when the user picked a
-		// root). Falls back to "new.torrent" only when outEntry is
-		// empty.
-		defaultName := "new.torrent"
-		if base := filepath.Base(strings.TrimSpace(outEntry.Text)); base != "" && base != "." && base != "/" {
-			defaultName = base
+		if signChk.Checked && dl.d.Identity != nil {
+			s := dl.d.Identity.Signer()
+			opts.SignWith = &s
 		}
-		fd.SetFileName(defaultName)
-		fd.Show()
-	})
-	outRow := container.NewBorder(nil, nil, nil, browseOutBtn, outEntry)
+		doSeed := seedChk.Checked
 
-	form := container.NewVBox(
-		widget.NewCard("Source", "", container.NewVBox(
-			widget.NewLabel("Root (file or folder to share)"),
-			rootRow,
-			widget.NewLabel("Torrent name (becomes the top-level folder for downloaders)"),
-			nameEntry,
-		)),
-		widget.NewCard("Pieces & Metadata", "", container.NewVBox(
-			widget.NewLabel("Piece length"),
-			pieceSelect,
-			widget.NewLabel("Trackers"),
-			trackersEntry,
-			widget.NewLabel("Webseeds"),
-			webseedsEntry,
-			widget.NewLabel("Comment"),
-			commentEntry,
-			privateCheck,
-			signCheck,
-		)),
-		widget.NewCard("Output", "", container.NewVBox(
-			widget.NewLabel("Output .torrent path"),
-			outRow,
-			seedCheck,
-		)),
-	)
-
-	scroll := container.NewVScroll(form)
-	scroll.SetMinSize(fyne.NewSize(600, 500))
-
-	dlg := dialog.NewCustomConfirm(
-		"Create Torrent",
-		"Create",
-		"Cancel",
-		scroll,
-		func(ok bool) {
-			if !ok {
-				return
+		// Hashing a large folder can take a while: run it off the UI thread behind
+		// a modal progress bar, then report the result on the UI thread.
+		prog := dialog.NewCustomWithoutButtons("Creating torrent…", widget.NewProgressBarInfinite(), win)
+		prog.Show()
+		go func() {
+			ihHex, raw, err := engine.CreateTorrentFile(opts, out)
+			var seedErr error
+			if err == nil && doSeed {
+				_, seedErr = dl.d.Eng.AddTorrentBytesSeedFrom(raw, root)
 			}
-			rootPath := strings.TrimSpace(rootEntry.Text)
-			if rootPath == "" {
-				dialog.ShowError(fmt.Errorf("root path required"), win)
-				return
-			}
-			outPath := strings.TrimSpace(outEntry.Text)
-			if outPath == "" {
-				// Defensive autofill on submit. Normally autofillOutput
-				// fires on root edits, but several real flows can leave
-				// outEntry empty (manual deletion, focus quirks, paste
-				// without a triggering OnChanged on some platforms),
-				// and the user just sees a confusing "Output path
-				// required" dialog. Filling here makes the common case
-				// (just pick a root and click Create) always work.
-				outPath = strings.TrimRight(rootPath, string(filepath.Separator)) + ".torrent"
-				outEntry.SetText(outPath)
-			}
-			opts := engine.CreateTorrentOptions{
-				Root:        rootPath,
-				Name:        strings.TrimSpace(nameEntry.Text),
-				PieceLength: pieceLengthFromLabel(pieceSelect.Selected),
-				Trackers:    splitLines(trackersEntry.Text),
-				WebSeeds:    splitLines(webseedsEntry.Text),
-				Private:     privateCheck.Checked,
-				Comment:     strings.TrimSpace(commentEntry.Text),
-			}
-			if signCheck.Checked {
-				if id := d.Eng.Identity(); id != nil {
-					opts.SignWith = id.PrivateKey
+			fyne.Do(func() {
+				prog.Hide()
+				if err != nil {
+					dl.showErr(fmt.Errorf("create torrent: %w", err))
+					return
 				}
-			}
-			runCreateTorrent(d, win, opts, outPath, seedCheck.Checked)
-		},
-		win,
-	)
-	dlg.Resize(fyne.NewSize(650, 600))
-	dlg.Show()
+				dl.refresh()
+				if seedErr != nil {
+					dl.showErr(fmt.Errorf("created %s (infohash %s) but seeding failed: %w", out, ihHex, seedErr))
+					return
+				}
+				msg := fmt.Sprintf("Created %s\nInfoHash: %s", out, ihHex)
+				if doSeed {
+					msg += "\nNow seeding the content."
+				}
+				dialog.ShowInformation("Torrent created", msg, win)
+			})
+		}()
+	}, win)
+	form.Resize(fyne.NewSize(660, 380))
+	form.Show()
 }
 
-// runCreateTorrent spawns the hashing goroutine and shows a
-// progress dialog until it completes.
-func runCreateTorrent(d *daemon.Daemon, win fyne.Window, opts engine.CreateTorrentOptions, outPath string, andSeed bool) {
-	progress := dialog.NewCustomWithoutButtons(
-		"Hashing pieces...",
-		container.NewVBox(
-			widget.NewLabel("Reading "+opts.Root),
-			widget.NewProgressBarInfinite(),
-			widget.NewLabel("Large torrents can take several minutes."),
-		),
-		win,
-	)
-	progress.Show()
-
-	go func() {
-		ih, mi, err := d.Eng.CreateTorrentFile(opts, outPath)
-		fyne.Do(func() {
-			progress.Hide()
-			if err != nil {
-				dialog.ShowError(err, win)
-				return
-			}
-
-			msg := fmt.Sprintf("Created:\n  %s\n\nInfoHash:\n  %s", outPath, ih)
-			if andSeed && mi != nil {
-				// Seed from the user's source location rather than
-				// re-locating the bytes under cfg.DataDir. anacrolix's
-				// default storage roots every torrent at DataDir, so
-				// without the per-torrent override the just-hashed
-				// content is effectively invisible — VerifyData runs
-				// against an empty directory and the row sits at 0%.
-				// filepath.Dir(opts.Root) is the layout anacrolix
-				// expects: parent dir + info.Name resolves to the
-				// real file (single-file) or the real folder
-				// (multi-file).
-				dataParent := filepath.Dir(strings.TrimRight(opts.Root, string(filepath.Separator)))
-				if _, err := d.Eng.AddTorrentMetaInfoSeedFrom(mi, dataParent); err != nil {
-					msg += "\n\nSeed start failed: " + err.Error()
-				} else {
-					msg += "\n\nSeeding started."
-				}
-			}
-			dialog.ShowInformation("Torrent created", msg, win)
-		})
-	}()
+// deriveTorrentPath returns the default output ".torrent" path for a source path
+// (its cleaned value plus ".torrent"), or "" for an empty source. Trailing path
+// separators are trimmed so a folder like "/a/b/" maps to "/a/b.torrent".
+func deriveTorrentPath(source string) string {
+	src := strings.TrimRight(strings.TrimSpace(source), string(filepath.Separator))
+	if src == "" {
+		return ""
+	}
+	return src + ".torrent"
 }
 
-func splitLines(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if l := strings.TrimSpace(line); l != "" {
-			out = append(out, l)
+// splitList splits a space/comma/newline/tab-separated list into non-empty,
+// trimmed fields (or nil). Used for the optional tracker list.
+func splitList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
 		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
