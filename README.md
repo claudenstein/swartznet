@@ -207,7 +207,7 @@ go build -o dist/swartznet ./cmd/swartznet
 
 See [`docs/05-integration-design.md`](docs/05-integration-design.md) §12 for the roadmap.
 
-**Contributing.** APIs are still in motion, so please open an issue before sending large patches so we can align on the approach.
+**Contributing.** APIs are still in motion, so please open an issue before sending large patches so we can align on the approach. See [CONTRIBUTING.md](CONTRIBUTING.md) for the build/test workflow and the mainline-compatibility ground rules, and [SECURITY.md](SECURITY.md) for how to report a vulnerability privately.
 
 ---
 

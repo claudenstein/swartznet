@@ -37,6 +37,10 @@ language. The reference implementation lives in this repo.
 
 ## I want to understand the architecture
 
+- **[whitepaper.md](whitepaper.md)** ([PDF](whitepaper.pdf)) — the
+  one-document overview: the problem, the three search layers, the
+  mainline-compatibility argument, and the threat model. Start here
+  for the big picture before the design doc below.
 - **[05-integration-design.md](05-integration-design.md)** — the
   synthesis document. Three-layer architecture, wire format, the
   daemon layer shared by CLI / web UI / native GUI, ingestion
