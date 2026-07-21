@@ -10,6 +10,12 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
+// swarmPeerSink adapts the engine to swarmsearch.PeerSink: sn_peers-learned
+// addresses are introduced to every joined rendezvous swarm.
+type swarmPeerSink struct{ eng *Engine }
+
+func (s swarmPeerSink) AddDiscoveredPeers(addrs []string) { s.eng.AddRendezvousPeers(addrs) }
+
 // AddRendezvous joins a rendezvous swarm by infohash: a metadata-less torrent
 // used purely as a mainline-DHT meeting point where sn_search-capable peers find
 // and handshake each other (see internal/rendezvous for the derivation). It

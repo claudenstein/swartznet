@@ -57,6 +57,10 @@ func (p *Protocol) HandleMessage(peerAddr string, payload []byte, reply ReplyFun
 		// RIBLT Aggregate set-reconciliation (Slice 8). Gated on the peer
 		// having advertised BitSetReconciliation.
 		p.handleSyncFrame(peerAddr, payload, reply)
+	case ltepwire.MsgTypeSnPeers:
+		// sn_peers PEX (capable-peer discovery). Gated on the peer having
+		// advertised BitPeerGossip (checked inside).
+		p.handleSnPeers(peerAddr, payload)
 	default:
 		p.ban.Add(peerAddr, ScoreUnexpectedMessage)
 	}
@@ -243,6 +247,9 @@ func (p *Protocol) handlePeerAnnounce(addr string, pa ltepwire.PeerAnnounce) {
 		ps.PublisherPubkey = gotPubkey
 		ps.hasPubkey = true
 	}
+	// PEX: if the peer just advertised BitPeerGossip, introduce our other capable
+	// peers to it (once). Enqueue is non-blocking, so it is safe under p.mu.
+	p.maybeGossipLocked(ps)
 	idxSink, endSink := p.idxSink, p.endSink
 	p.mu.Unlock()
 

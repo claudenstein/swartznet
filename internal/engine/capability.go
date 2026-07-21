@@ -41,7 +41,24 @@ func (e *Engine) RuntimeFacts() ltepwire.RuntimeFacts {
 		CompanionPub:     true,
 		CompanionSub:     true,
 		SnippetHighlight: true,
+		// Advertise sn_peers PEX only when we have a rendezvous substrate to dial
+		// discovered peers into — otherwise gossiped addresses have nowhere to go.
+		PeerGossip: e.hasRendezvous(),
 	}
+}
+
+// hasRendezvous reports whether the node has joined any rendezvous swarm — the
+// gate for advertising BitPeerGossip (there is no point participating in PEX
+// without a swarm to introduce the learned peers to).
+func (e *Engine) hasRendezvous() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, h := range e.handles {
+		if h.rendezvous {
+			return true
+		}
+	}
+	return false
 }
 
 // publishingActive reports whether the node advertises the Layer-D publisher

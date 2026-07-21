@@ -307,6 +307,9 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*Engine, err
 	swarm.SetCapabilitySource(func() swarmsearch.Capabilities {
 		return swarmsearch.Capabilities{Sharing: e.Sharing(), Services: e.ServicesMask()}
 	})
+	// sn_peers PEX: addresses learned from gossip are introduced to the
+	// rendezvous swarms (the shared-infohash handshake context).
+	swarm.SetPeerSink(swarmPeerSink{eng: e})
 	if e.rescanInterval <= 0 {
 		e.rescanInterval = defaultRescanInterval
 	}

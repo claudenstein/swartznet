@@ -36,6 +36,14 @@ type EndorsementSink interface {
 	NoteEndorsement(endorser, candidate [32]byte)
 }
 
+// PeerSink receives sn_search-capable peer addresses ("ip:port", already
+// IP-sanity filtered) learned via sn_peers PEX. The engine implements it to
+// introduce those addresses to its rendezvous swarms (where the shared infohash
+// gives a handshake context). Nil when discovery is off.
+type PeerSink interface {
+	AddDiscoveredPeers(addrs []string)
+}
+
 // PeerToken authorizes an sn_search send to a peer that advertised the
 // extension in its LTEP `m` dict. Its fields are unexported and it has no
 // exported constructor: the ONLY way to obtain one is for the Protocol to mint

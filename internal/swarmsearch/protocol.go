@@ -32,10 +32,12 @@ type PeerState struct {
 	Version         int
 	PublisherPubkey [32]byte
 	hasPubkey       bool
+	gossipedTo      bool // we've sent this peer an sn_peers introduction (once)
 }
 
 type announceReq struct {
-	token PeerToken
+	token  PeerToken
+	gossip bool // true → send an sn_peers PEX frame instead of a peer_announce
 }
 
 // Protocol is the sn_search peer-wire engine. It is owned by the engine, which
@@ -53,8 +55,9 @@ type Protocol struct {
 	hasPub    bool
 	epoch     uint64 // bumped per (addr) mint so a stale token cannot resolve
 
-	idxSink IndexerSink
-	endSink EndorsementSink
+	idxSink  IndexerSink
+	endSink  EndorsementSink
+	peerSink PeerSink
 
 	// Sync (Slice 8): record substrate + reconciliation session registry.
 	recordSource RecordSource
@@ -137,6 +140,9 @@ func (p *Protocol) SetPublisherPubkey(pk [32]byte, has bool) {
 // Slice 7).
 func (p *Protocol) SetIndexerSink(s IndexerSink)         { p.mu.Lock(); p.idxSink = s; p.mu.Unlock() }
 func (p *Protocol) SetEndorsementSink(s EndorsementSink) { p.mu.Lock(); p.endSink = s; p.mu.Unlock() }
+
+// SetPeerSink installs the sink for sn_peers-learned addresses (nil-tolerant).
+func (p *Protocol) SetPeerSink(s PeerSink) { p.mu.Lock(); p.peerSink = s; p.mu.Unlock() }
 
 // SetRateLimit swaps the inbound-query rate limit.
 func (p *Protocol) SetRateLimit(rl RateLimit) { p.limiter.setConfig(rl) }
@@ -245,7 +251,11 @@ func (p *Protocol) announceWorker() {
 		case <-p.done:
 			return
 		case req := <-p.announceCh:
-			p.sendAnnounce(req.token)
+			if req.gossip {
+				p.sendGossip(req.token)
+			} else {
+				p.sendAnnounce(req.token)
+			}
 		}
 	}
 }
