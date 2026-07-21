@@ -78,6 +78,9 @@ type Options struct {
 	// SwarmStatus reports (known, capable) sn_search peer counts for /status;
 	// nil ⇒ the swarm block stays zero.
 	SwarmStatus func() (known, capable int)
+	// RendezvousStatus reports (joined rendezvous swarms, advertising PEX) for
+	// /status; nil ⇒ the rendezvous block is omitted.
+	RendezvousStatus func() (swarms int, gossip bool)
 	// PublisherStatus reports the Layer-D publisher state for GET /publish and
 	// the /status publisher block; nil ⇒ empty publisher state (the PubKey
 	// still renders from PublisherPubKey when an identity is loaded).
@@ -248,6 +251,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.opts.SwarmStatus != nil {
 		known, capable := s.opts.SwarmStatus()
 		out.Swarm = SwarmStatus{KnownPeers: known, CapablePeers: capable}
+	}
+	if s.opts.RendezvousStatus != nil {
+		swarms, gossip := s.opts.RendezvousStatus()
+		out.Rendezvous = &RendezvousStatus{Swarms: swarms, PeerGossip: gossip}
 	}
 	if s.opts.PublisherStatus != nil {
 		ps := s.opts.PublisherStatus()

@@ -54,6 +54,13 @@ export function render(container) {
     return section('Swarm (Layer S)', el('div', {}, [kv('known peers', s.known_peers), kv('capable peers', s.capable_peers)]));
   }
 
+  function rendezvousSection(status) {
+    const r = status && !status.__err ? status.rendezvous : undefined;
+    return section('Discovery (rendezvous + PEX)', r
+      ? el('div', {}, [kv('rendezvous swarms', r.swarms), kv('gossiping peers', r.peer_gossip ? 'yes' : 'no')])
+      : el('p', { class: 'muted' }, ['rendezvous off']));
+  }
+
   function dhtSection(status) {
     const d = status && !status.__err ? status.dht : undefined;
     return section('DHT', d
@@ -142,6 +149,7 @@ export function render(container) {
         torrentsSection(torrents),
         localSection(status, stats),
         swarmSection(status),
+        rendezvousSection(status),
         dhtSection(status),
         publisherSection(status, publish),
         aggregateSection(agg),

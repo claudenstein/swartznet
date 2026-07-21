@@ -109,6 +109,16 @@ func (st *statusTab) render() string {
 	add("  known=%d  search-capable=%d", sw.KnownPeers(), sw.CapablePeerCount())
 	add("")
 
+	// Capable-peer discovery (rendezvous + sn_peers PEX).
+	rvSwarms := len(e.RendezvousInfoHashes())
+	gossip := "no"
+	if rvSwarms > 0 {
+		gossip = "yes"
+	}
+	add("Discovery (rendezvous + PEX)")
+	add("  rendezvous-swarms=%d  gossiping=%s", rvSwarms, gossip)
+	add("")
+
 	// DHT routing.
 	good, total := e.DHTRoutingTableSize()
 	add("DHT Routing")

@@ -12,12 +12,13 @@ package httpapi
 // "omitted" means disabled, which is deliberately distinct from a present
 // block with zero nodes (an isolated-but-enabled node).
 type StatusResponse struct {
-	Local      LocalStatus     `json:"local"`
-	Swarm      SwarmStatus     `json:"swarm"`
-	Publisher  PublisherStatus `json:"publisher"`
-	DHT        *DHTStatus      `json:"dht,omitempty"`
-	Bloom      *BloomStatus    `json:"bloom,omitempty"`
-	Reputation *ReputationStat `json:"reputation,omitempty"`
+	Local      LocalStatus       `json:"local"`
+	Swarm      SwarmStatus       `json:"swarm"`
+	Publisher  PublisherStatus   `json:"publisher"`
+	DHT        *DHTStatus        `json:"dht,omitempty"`
+	Bloom      *BloomStatus      `json:"bloom,omitempty"`
+	Reputation *ReputationStat   `json:"reputation,omitempty"`
+	Rendezvous *RendezvousStatus `json:"rendezvous,omitempty"`
 }
 
 // LocalStatus reports Layer L (the local Bleve index).
@@ -30,6 +31,14 @@ type LocalStatus struct {
 type SwarmStatus struct {
 	KnownPeers   int `json:"known_peers"`
 	CapablePeers int `json:"capable_peers"`
+}
+
+// RendezvousStatus reports capable-peer discovery (rendezvous + sn_peers PEX).
+// Reports counts only — never the topic strings or community secrets. Omitted
+// from /status when rendezvous is not active.
+type RendezvousStatus struct {
+	Swarms     int  `json:"swarms"`      // rendezvous swarms currently joined
+	PeerGossip bool `json:"peer_gossip"` // advertising sn_peers PEX (BitPeerGossip)
 }
 
 // PublisherStatus reports Layer D publishing.

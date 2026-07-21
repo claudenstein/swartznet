@@ -47,8 +47,11 @@ Load-bearing consequences, carried over verbatim from the GUI discipline:
    `subscriber`, `reputation.top_indexers` are always `[]` when empty.
 3. **`omitempty` fields may be absent.** Treat missing as the zero value: `indexed_files`,
    `index_extracted`, `signed_by`, `trusted_publisher` on a torrent; `file_index` on a
-   content hit (absent ⇒ **index 0**, a frozen quirk); the whole `dht`/`bloom`/`reputation`
-   blocks on `/status` (absent `dht` ⇒ **DHT disabled**, not "0 nodes").
+   content hit (absent ⇒ **index 0**, a frozen quirk); the whole
+   `dht`/`bloom`/`reputation`/`rendezvous` blocks on `/status` (absent `dht` ⇒ **DHT
+   disabled**, not "0 nodes"; absent `rendezvous` ⇒ **discovery off**). The
+   `rendezvous` block reports counts only (`swarms`, `peer_gossip`) — never the
+   topic strings or community secrets.
 4. **Merge/PATCH endpoints use pointer semantics.** For `/config/rate-limit`, `/config/queue`,
    `/capabilities`: **omit** a field to leave it unchanged; **send** it to set it. Sending
    `0`/`false` is a real value (`0` = unlimited for rate/queue caps). Always trust the

@@ -134,6 +134,16 @@ func emitStatusText(w io.Writer, st httpapi.StatusResponse) {
 	fmt.Fprintf(w, "  known peers:    %d\n", st.Swarm.KnownPeers)
 	fmt.Fprintf(w, "  capable peers:  %d\n", st.Swarm.CapablePeers)
 	fmt.Fprintln(w)
+	if st.Rendezvous != nil {
+		fmt.Fprintln(w, "Capable-peer discovery (rendezvous + sn_peers PEX):")
+		fmt.Fprintf(w, "  rendezvous swarms: %d\n", st.Rendezvous.Swarms)
+		gossip := "no"
+		if st.Rendezvous.PeerGossip {
+			gossip = "yes"
+		}
+		fmt.Fprintf(w, "  gossiping peers:   %s\n", gossip)
+		fmt.Fprintln(w)
+	}
 	if st.DHT != nil {
 		fmt.Fprintln(w, "DHT routing table:")
 		fmt.Fprintf(w, "  good nodes:     %d\n", st.DHT.GoodNodes)

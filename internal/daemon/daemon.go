@@ -280,6 +280,12 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			sw := eng.SwarmSearch()
 			return sw.KnownPeers(), sw.CapablePeerCount()
 		}
+		apiOpts.RendezvousStatus = func() (int, bool) {
+			// Advertising sn_peers PEX is exactly "we have a rendezvous swarm to
+			// dial discovered peers into" (RuntimeFacts.PeerGossip = hasRendezvous).
+			n := len(eng.RendezvousInfoHashes())
+			return n, n > 0
+		}
 		if !opts.Cfg.DisableDHT {
 			apiOpts.DHTStats = eng.DHTRoutingTableSize
 		}
