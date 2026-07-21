@@ -323,3 +323,48 @@ Each maps a SPEC §7 question to the default the architecture adopts. Full conte
 - **2026-07-19** — **Slice 7 built.** Layer S: the sn_search BEP-10 (LTEP) peer-wire extension — the first WIRE slice, with mainline compatibility as the hard constraint. `contracts/ltepwire` gains the query/result/reject/peer_announce codec (golden vectors); `internal/swarmsearch` (Handler, PeerToken-gated transport seam, banman, token-bucket, anti-spoof query fan-out) never imports Bleve or the torrent package; the engine wires it through the 4 anacrolix LTEP callbacks with off-read-loop dual-256-semaphore dispatch; `searchmux`/`httpapi`/`daemon` add the swarm fan-in (§5.9 inline error); `wirecompat` gains a raw-socket `MiniPeer` + the vanilla-silence and real-wire-query scenarios. Behavioral extraction by a 6-agent workflow (52KB ledger in `docs/rebuild/slice7-layers-ledger.md`). The 4-lens review (13 agents) found **3 confirmed defects** — a bit-9 over-advertisement ban-trap (re-gated off, S7-7), an asked-set flood/false-ban vector (per-peer consume + grace window, S7-8), and a non-UTF-8 name-truncation empties bug (S7-9) — all fixed + pinned. THE mainline-compat gate is green: a vanilla peer receives ZERO sn_search frames over real loopback while a capable peer gets the peer_announce; a MiniPeer queries the engine over the real wire and gets indexed hits. 11/11 Slice-7 + 158 cumulative binary DoD checks; `go test -race` clean (0 data races across 20 packages incl. the wire scenarios). Slice decisions S7-1…S7-9 above.
 - **2026-07-19** — **Slice 6 built.** Capability mask: the single producer `contracts/ltepwire.Announced(Sharing, RuntimeFacts)` (frozen bit constants + golden vectors) plus the type split (operator `Sharing` bits 0–3 vs daemon `RuntimeFacts` bits 4–9), wired through `Engine.ServicesMask()`, the httpapi `ServicesReporter`/`Capabilities` collaborators (`GET`/`PATCH`/`POST /capabilities`, `PATCH` mutates only `Sharing`), and the live `/aggregate` + `/capabilities` `services` readout. Closes two §6 defects fully (static-`0x2ED`; "save sharing" clobbering Publisher — now structurally impossible) and the producer half of the third (downgrades honored; the wire half is Slice 7). Behavioral extraction by a 6-agent workflow (ledger in `docs/rebuild/slice6-capability-ledger.md`); a 4-lens adversarial review (recomputing every hex by hand) returned **0 findings**. 17/17 Slice-6 + 130 cumulative binary DoD checks; race-clean (0 data races across 19 packages). Slice decisions S6-1…S6-8 above.
 - **2026-07-18** — **Slice 5 built.** Spam-resistance: leaf packages `internal/reputation` (frozen FNV-64a Bloom v1 + golden vector, Bayesian reputation, source-attribution LRU), `internal/trust` (publisher allowlist), `internal/admission` (deny-by-default) built by a leaf workflow, then wired — engine `loadSpamResistance`/`Checkpoint`/`ConfirmHit`/`FlagHit`, the **one shared** `daemon.Confirm`/`daemon.Flag` path, httpapi `POST /confirm`·`/flag`·`GET /aggregate` + `/status` Bloom/reputation blocks, CLI `trust`/`confirm`/`flag`. Driving the real binary caught an offline `trust add` clean-install dir bug; the 4-lens review (10 agents, 6 raw → 3 confirmed after adversarial verify) caught a **HIGH** concurrent-checkpoint `.tmp` corruption race (→ unique `os.CreateTemp` + `ckptMu` + `Close` joins the checkpoint goroutine), a **MED** corrupt-`trust.json` fail-OPEN that could silently demote trusted publishers (→ fail-CLOSED `trust-unavailable`), and a **LOW** `--help` gap — all fixed and pinned. 22/22 Slice-5 + 130 cumulative binary DoD checks; race-clean (0 data races across 18 packages). Slice decisions S5-1…S5-9 above.
+
+## Capable-peer discovery: rendezvous swarm + sn_peers PEX (2026-07-20)
+
+- **2026-07-20** — **New feature pair: rendezvous (mainline-DHT capable-peer discovery) + `sn_peers` PEX.** The
+  problem: today SwartzNet finds `sn_search`-capable peers ONLY opportunistically (you happen to share a content
+  torrent, then the LTEP handshake reveals capability), so the search overlay is sparse and has no cold-start path
+  between two users who share no torrent. Two complementary, strictly mainline-compatible mechanisms — no new
+  reserved bit, DHT verb, or UDP port:
+
+  - **Rendezvous (the substrate).** All participating nodes `announce_peer`/`get_peers` a set of well-known
+    **rendezvous infohashes** on the ordinary mainline DHT. To a vanilla node this is just another torrent swarm
+    (pure BEP-5). Implemented by adding each rendezvous infohash as a bare metadata-less torrent via
+    `client.AddTorrentInfoHash` (engine `AddInfoHash` already exists): anacrolix auto-announces, finds peers, and
+    connects them within the swarm; the BT+LTEP handshake then flows through the EXISTING
+    `PeerConnAdded → NotePeerAdded → OnRemoteHandshake` pipeline and negotiates `sn_search`. Rendezvous torrents are
+    marked special: no autoindex, data download disallowed (never fetch content/metadata we'd act on), and hidden
+    from the normal Downloads snapshot.
+
+  - **`sn_peers` PEX (the densifier).** LTEP msg_type **9** exchanged only between peers that advertise the new
+    **BitPeerGossip service bit (bit 10, 0x400)** — a vanilla peer never sees it. Carries compact BEP-11-style peer
+    addresses (6B v4 / 18B v6, capped). Once you've met ONE capable peer, they tell you about others; the overlay
+    self-densifies. **KEY COUPLING:** a PEX address has nowhere to *connect* on its own — BitTorrent connections are
+    per-torrent — so received addresses are dialed **within the rendezvous swarm** (`Torrent.AddPeers` on the
+    rendezvous torrents). Rendezvous therefore is a hard prerequisite for PEX; build order is rendezvous first.
+
+  - **Consent / anti-leak.** Only peers that themselves advertise BitPeerGossip are gossiped onward (advertising the
+    bit = "I speak PEX and consent to being shared"). Received addresses are deduped and rate-limited; the anti-zombie
+    `NotePeerAdded`-before-any-announce discipline (see the swarmsearch connect() fix) is preserved.
+
+  - **Rendezvous infohash derivation** (`internal/rendezvous`, deterministic, versioned salt): global =
+    `SHA1("swartznet:rv:1:global")`; per-topic = `SHA1("swartznet:rv:1:t:" + normalize(topic))`; private community =
+    `HMAC-SHA1(secret, "swartznet:rv:1")` (a shared secret → a swarm only the group can compute, so membership is not
+    publicly enumerable). Topics are **explicit opt-in config**, NEVER auto-derived from the local index (that would
+    leak your library's topics to a public swarm).
+
+  - **Privacy tradeoff (decided).** Any public rendezvous makes SwartzNet *membership* enumerable (anyone can
+    `get_peers` the well-known infohash) — a sharper exposure than "your IP is in a content swarm", consistent with the
+    whitepaper's not-anonymity non-goal. Decision: the **global** rendezvous defaults ON with a one-flag opt-out
+    (`--no-rendezvous`), because a discovery feature that's off by default discovers nothing and peer-IP visibility is
+    already the BitTorrent baseline; the privacy-conscious use topic/community mode or opt out. Documented prominently
+    in `--help` + `docs/08` + the two BEP drafts, and logged at startup.
+
+  - **Specs:** `docs/12-rendezvous-draft.md` (mainline-DHT rendezvous) and `docs/13-bep-sn_peers-draft.md` (the PEX
+    LTEP message). Wire-compat matrix in `docs/05` §8 updated. Deterministic control owns the rendezvous set (config →
+    reconcile loop), per the production-architecture rules.
