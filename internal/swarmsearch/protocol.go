@@ -32,7 +32,6 @@ type PeerState struct {
 	Version         int
 	PublisherPubkey [32]byte
 	hasPubkey       bool
-	gossipedTo      bool // we've sent this peer an sn_peers introduction (once)
 }
 
 type announceReq struct {

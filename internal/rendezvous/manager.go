@@ -13,10 +13,21 @@ import (
 // Manager doesn't need). Kept as an interface here so the Manager is unit-tested
 // against a fake with no engine/anacrolix dependency.
 type Joiner interface {
-	AddRendezvous(hash metainfo.Hash) error
+	// AddRendezvous joins a swarm. community marks a PRIVATE community swarm,
+	// whose infohash is a secret meeting point — the engine must keep untrusted
+	// (PEX-learned) peers out of it so the secret infohash is never dialed in a
+	// context an outsider can observe.
+	AddRendezvous(hash metainfo.Hash, community bool) error
 	RemoveRendezvous(hash metainfo.Hash) error
 	// RendezvousInfoHashes returns the hex infohashes currently joined.
 	RendezvousInfoHashes() []string
+}
+
+// DesiredSwarm is one rendezvous swarm the config asks to join, tagged with
+// whether it is a private community swarm.
+type DesiredSwarm struct {
+	Hash      metainfo.Hash
+	Community bool
 }
 
 // Config is the operator's rendezvous preference: whether to join the public
@@ -29,26 +40,29 @@ type Config struct {
 	Communities []string // private-community shared secrets (SENSITIVE — never log)
 }
 
-// DesiredHashes returns the deduped set of rendezvous infohashes this config
-// asks to join, in a stable order (global, then topics, then communities, each
-// in input order). Empty/invalid topics and secrets are skipped.
-func (c Config) DesiredHashes() []metainfo.Hash {
+// DesiredSwarms returns the deduped set of rendezvous swarms this config asks to
+// join, in a stable order (global, then topics, then communities, each in input
+// order). Empty/invalid topics and secrets are skipped. Community swarms are
+// tagged so the engine can keep untrusted peers out of them.
+func (c Config) DesiredSwarms() []DesiredSwarm {
 	seen := make(map[metainfo.Hash]bool)
-	var out []metainfo.Hash
-	add := func(h metainfo.Hash, ok bool) {
+	var out []DesiredSwarm
+	add := func(h metainfo.Hash, ok, community bool) {
 		if ok && !seen[h] {
 			seen[h] = true
-			out = append(out, h)
+			out = append(out, DesiredSwarm{Hash: h, Community: community})
 		}
 	}
 	if c.Global {
-		add(GlobalInfoHash(), true)
+		add(GlobalInfoHash(), true, false)
 	}
 	for _, t := range c.Topics {
-		add(TopicInfoHash(t))
+		h, ok := TopicInfoHash(t)
+		add(h, ok, false)
 	}
 	for _, s := range c.Communities {
-		add(CommunityInfoHash(s))
+		h, ok := CommunityInfoHash(s)
+		add(h, ok, true)
 	}
 	return out
 }
@@ -76,10 +90,10 @@ func NewManager(j Joiner, cfg Config, log *slog.Logger) *Manager {
 // state — so it is safe to call repeatedly. Individual add/remove errors are
 // logged and skipped rather than aborting the whole reconcile.
 func (m *Manager) Reconcile() {
-	desired := m.cfg.DesiredHashes()
+	desired := m.cfg.DesiredSwarms()
 	desiredSet := make(map[metainfo.Hash]bool, len(desired))
-	for _, h := range desired {
-		desiredSet[h] = true
+	for _, d := range desired {
+		desiredSet[d.Hash] = true
 	}
 
 	current := make(map[metainfo.Hash]bool)
@@ -90,12 +104,12 @@ func (m *Manager) Reconcile() {
 		}
 	}
 
-	for _, h := range desired {
-		if current[h] {
+	for _, d := range desired {
+		if current[d.Hash] {
 			continue
 		}
-		if err := m.j.AddRendezvous(h); err != nil {
-			m.log.Warn("rendezvous.join_failed", "infohash", h.HexString(), "err", err)
+		if err := m.j.AddRendezvous(d.Hash, d.Community); err != nil {
+			m.log.Warn("rendezvous.join_failed", "swarm", shortHash(d.Hash), "err", err)
 		}
 	}
 	for h := range current {
@@ -103,10 +117,16 @@ func (m *Manager) Reconcile() {
 			continue
 		}
 		if err := m.j.RemoveRendezvous(h); err != nil {
-			m.log.Warn("rendezvous.leave_failed", "infohash", h.HexString(), "err", err)
+			m.log.Warn("rendezvous.leave_failed", "swarm", shortHash(h), "err", err)
 		}
 	}
 }
+
+// shortHash is a non-reversible 8-hex-char label for a rendezvous swarm, safe to
+// log: a PRIVATE community infohash is the group's enumeration capability (a full
+// hex infohash lets anyone get_peers it on the DHT), so we never log it in full —
+// 4 bytes is enough to correlate log lines but not to compute the DHT target.
+func shortHash(h metainfo.Hash) string { return h.HexString()[:8] + "…" }
 
 // Run reconciles once immediately, then re-reconciles every interval until ctx
 // is cancelled. interval <= 0 reconciles once and returns (no background loop).

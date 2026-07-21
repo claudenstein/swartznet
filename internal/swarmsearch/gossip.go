@@ -44,20 +44,23 @@ func (p *Protocol) peerHasGossip(addr string) bool {
 	return ok && ps.Services.Has(ltepwire.BitPeerGossip)
 }
 
-// maybeGossip enqueues a one-shot sn_peers introduction to a peer that has just
-// advertised BitPeerGossip, at most once per peer. Caller holds p.mu.
-func (p *Protocol) maybeGossipLocked(ps *PeerState) {
-	if ps == nil || !ps.Supported || ps.gossipedTo || !ps.Services.Has(ltepwire.BitPeerGossip) {
-		return
-	}
-	ps.gossipedTo = true
-	select {
-	case p.announceCh <- announceReq{token: ps.token, gossip: true}:
-	default:
-		// Queue full: drop the introduction (the periodic peer_announce will
-		// re-trigger a gossip attempt on the next round). Don't reset gossipedTo —
-		// avoid hammering a saturated queue.
-		p.log.Debug("swarmsearch.gossip_dropped_queue_full", "addr", ps.Addr)
+// gossipToAllLocked enqueues an sn_peers introduction to EVERY gossip-capable
+// peer. Called (caller holds p.mu) when a peer newly advertises BitPeerGossip:
+// the new peer learns the existing peers AND — crucially — the existing peers
+// learn the new one. A one-shot introduction to just the new peer would starve
+// early-arriving peers of every later arrival (they were gossiped an empty/small
+// list at connect and never re-notified). Enqueue is non-blocking (safe under
+// p.mu); a saturated queue drops and the next new-peer event re-broadcasts.
+func (p *Protocol) gossipToAllLocked() {
+	for _, ps := range p.peers {
+		if !ps.Supported || !ps.Services.Has(ltepwire.BitPeerGossip) {
+			continue
+		}
+		select {
+		case p.announceCh <- announceReq{token: ps.token, gossip: true}:
+		default:
+			p.log.Debug("swarmsearch.gossip_dropped_queue_full", "addr", ps.Addr)
+		}
 	}
 }
 

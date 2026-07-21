@@ -7,6 +7,34 @@ format follows [Keep a Changelog][kac]; the project follows
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 
+## Capable-peer discovery — rendezvous + `sn_peers` PEX (2026-07-20)
+
+SwartzNet nodes can now **find each other** instead of only meeting by chance in
+a shared content swarm — all strictly mainline-compatible (no new reserved bit,
+DHT verb, or UDP port). Two complementary mechanisms:
+
+- **Rendezvous** (the substrate) — nodes join well-known **rendezvous infohashes**
+  on the ordinary mainline DHT (`announce_peer`/`get_peers`), meet there, and
+  negotiate `sn_search` over the standard handshake. Three flavours (all
+  deterministic): a public **global** swarm (default on; `--no-rendezvous` to opt
+  out), per-**topic** swarms (`--rendezvous-topic`, so peers into the same content
+  meet), and private **community** swarms (`--rendezvous-community`, an
+  HMAC-of-a-secret infohash only the group can compute — membership not publicly
+  enumerable). Implemented as metadata-less torrents that never download, index,
+  or appear in the torrent list. Specs: [`docs/12`](docs/12-rendezvous-draft.md).
+- **`sn_peers` PEX** (the densifier) — capable peers that advertise the new
+  `BitPeerGossip` capability gossip each other's addresses (LTEP msg_type 9), so
+  the overlay self-densifies; learned addresses are dialed within the rendezvous
+  swarms. Opt-in and consent-based (only peers that advertise the bit are
+  gossiped), with strict IP-sanity filtering (loopback/private/link-local/etc.
+  rejected on both send and receive — an SSRF guard) and a 32-address cap. A
+  vanilla peer never sees an `sn_peers` frame. Spec:
+  [`docs/13`](docs/13-bep-sn_peers-draft.md).
+
+Discovery state (rendezvous swarm count, gossip on/off) is surfaced in `/status`
+and all three frontends (CLI `status`, web UI, native GUI). Community secrets and
+topic strings are never logged or echoed.
+
 ## v0.9.0 — 2026-07-20 (preview release)
 
 First tagged build of the from-scratch rebuild. Pre-1.0 preview — the wire

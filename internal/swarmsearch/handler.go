@@ -241,15 +241,19 @@ func (p *Protocol) handlePeerAnnounce(addr string, pa ltepwire.PeerAnnounce) {
 		p.mu.Unlock()
 		return
 	}
+	wasGossip := ps.Services.Has(ltepwire.BitPeerGossip)
 	ps.Services = ltepwire.ServiceBits(pa.Services) // unknown bits ignored, never rejected
 	ps.Version = pa.Version
 	if havePk {
 		ps.PublisherPubkey = gotPubkey
 		ps.hasPubkey = true
 	}
-	// PEX: if the peer just advertised BitPeerGossip, introduce our other capable
-	// peers to it (once). Enqueue is non-blocking, so it is safe under p.mu.
-	p.maybeGossipLocked(ps)
+	// PEX: when a peer NEWLY advertises BitPeerGossip, re-broadcast the peer list
+	// to every capable peer so early arrivals learn this new one (not just the
+	// reverse). Enqueue is non-blocking, so it is safe under p.mu.
+	if ps.Supported && !wasGossip && ps.Services.Has(ltepwire.BitPeerGossip) {
+		p.gossipToAllLocked()
+	}
 	idxSink, endSink := p.idxSink, p.endSink
 	p.mu.Unlock()
 

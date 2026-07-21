@@ -13,14 +13,15 @@ type Handle struct {
 	T   *torrent.Torrent
 	eng *Engine
 
-	mu         sync.Mutex
-	paused     bool
-	queued     bool
-	indexing   bool // per-torrent indexing toggle, default on
-	companion  bool // a companion-index bookkeeping torrent: never indexed, minted, or Layer-D published
-	rendezvous bool // a rendezvous meeting-point swarm: never downloads/indexes, hidden from the torrent list
-	queueOrder int64
-	signedBy   string
+	mu          sync.Mutex
+	paused      bool
+	queued      bool
+	indexing    bool // per-torrent indexing toggle, default on
+	companion   bool // a companion-index bookkeeping torrent: never indexed, minted, or Layer-D published
+	rendezvous  bool // a rendezvous meeting-point swarm: never downloads/indexes, hidden from the torrent list
+	rvCommunity bool // a PRIVATE community rendezvous swarm: untrusted (PEX) peers are never dialed in it
+	queueOrder  int64
+	signedBy    string
 
 	removed    chan struct{}
 	removeOnce sync.Once
@@ -187,18 +188,19 @@ func (e *Engine) registerLockedCompanion(t *torrent.Torrent) (h *Handle, existed
 // watchCompletion / autoIndex / ingestFileEvents would only block forever on
 // GotInfo(). The caller DisallowDataDownload()s it so no pieces are ever
 // requested even if a peer injects metadata for the infohash.
-func (e *Engine) registerLockedRendezvous(t *torrent.Torrent) (h *Handle, existed bool) {
+func (e *Engine) registerLockedRendezvous(t *torrent.Torrent, community bool) (h *Handle, existed bool) {
 	if h, ok := e.handles[t.InfoHash()]; ok {
 		return h, true
 	}
 	h = &Handle{
-		T:          t,
-		eng:        e,
-		indexing:   false,
-		rendezvous: true,
-		removed:    make(chan struct{}),
-		pieceSub:   startPieceSubscription(t, e.log),
-		fileSub:    startFileTracker(t, e.bgCtx, e.log),
+		T:           t,
+		eng:         e,
+		indexing:    false,
+		rendezvous:  true,
+		rvCommunity: community,
+		removed:     make(chan struct{}),
+		pieceSub:    startPieceSubscription(t, e.log),
+		fileSub:     startFileTracker(t, e.bgCtx, e.log),
 	}
 	e.nextQueueOrder++
 	h.queueOrder = e.nextQueueOrder

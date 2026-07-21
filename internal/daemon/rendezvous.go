@@ -21,8 +21,8 @@ const rendezvousReconcileInterval = 5 * time.Minute
 // AddRendezvous returns a handle the manager doesn't need; this drops it.
 type engineRendezvous struct{ eng *engine.Engine }
 
-func (a engineRendezvous) AddRendezvous(h metainfo.Hash) error {
-	_, err := a.eng.AddRendezvous(h)
+func (a engineRendezvous) AddRendezvous(h metainfo.Hash, community bool) error {
+	_, err := a.eng.AddRendezvous(h, community)
 	return err
 }
 func (a engineRendezvous) RemoveRendezvous(h metainfo.Hash) error { return a.eng.RemoveRendezvous(h) }
@@ -37,7 +37,7 @@ func startRendezvous(d *Daemon, eng *engine.Engine, cfg config.Config, log *slog
 		Topics:      cfg.RendezvousTopics,
 		Communities: cfg.RendezvousCommunities,
 	}
-	desired := rvCfg.DesiredHashes()
+	desired := rvCfg.DesiredSwarms()
 	if len(desired) == 0 {
 		return
 	}

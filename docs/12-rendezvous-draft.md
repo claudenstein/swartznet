@@ -87,6 +87,14 @@ offered:
 - **Topic sharding** avoids a single global membership list.
 - **Community swarms** (HMAC of a shared secret) let a closed group meet without
   any publicly computable infohash — membership is not enumerable by outsiders.
+  Community swarms rely on the **DHT alone** for discovery: `sn_peers` PEX-learned
+  peers are NEVER introduced to a community swarm. Every member already holds the
+  secret and finds the others via `get_peers`, and dialing an untrusted
+  (public-swarm-supplied) address in the community-infohash context would leak
+  that secret infohash in the — possibly plaintext — BitTorrent handshake, letting
+  an outsider enumerate the community without the secret. Public global/topic
+  swarms have no such issue (their infohashes are already computable), so they do
+  accept PEX peers.
 - **Opt-out** of the global swarm entirely (`--no-rendezvous`).
 - Discovered peers are still gated by the `sn_search` handshake and weighted by
   reputation, so poisoned rendezvous entries are cheap to reject.

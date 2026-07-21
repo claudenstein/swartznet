@@ -12,7 +12,7 @@ func TestAddRendezvous(t *testing.T) {
 	e := testEngine(t)
 	ih := rendezvous.GlobalInfoHash()
 
-	h, err := e.AddRendezvous(ih)
+	h, err := e.AddRendezvous(ih, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func TestAddRendezvous(t *testing.T) {
 	}
 
 	// Idempotent: a second add returns the same handle, no duplicate.
-	h2, err := e.AddRendezvous(ih)
+	h2, err := e.AddRendezvous(ih, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestAddRendezvous(t *testing.T) {
 	}
 
 	// Zero infohash rejected.
-	if _, err := e.AddRendezvous(metainfo.Hash{}); err == nil {
+	if _, err := e.AddRendezvous(metainfo.Hash{}, false); err == nil {
 		t.Error("zero infohash should error")
 	}
 }
@@ -59,7 +59,7 @@ func TestRemoveRendezvous(t *testing.T) {
 	if err := e.RemoveRendezvous(ih); err != nil {
 		t.Errorf("RemoveRendezvous(absent) = %v, want nil", err)
 	}
-	if _, err := e.AddRendezvous(ih); err != nil {
+	if _, err := e.AddRendezvous(ih, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.RemoveRendezvous(ih); err != nil {
@@ -88,6 +88,24 @@ func TestRemoveRendezvousRejectsNormalTorrent(t *testing.T) {
 	}
 }
 
+// TestAddRendezvousPeersSkipsCommunity pins the review fix: PEX-learned peers are
+// NEVER introduced to a private community swarm (dialing its secret infohash to
+// an attacker would leak it in the handshake). With ONLY a community swarm
+// joined, there is nowhere to introduce a gossip-learned peer → 0.
+func TestAddRendezvousPeersSkipsCommunity(t *testing.T) {
+	e := testEngine(t)
+	ihc, ok := rendezvous.CommunityInfoHash("team-secret")
+	if !ok {
+		t.Fatal("community hash")
+	}
+	if _, err := e.AddRendezvous(ihc, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.AddRendezvousPeers([]string{"1.2.3.4:6881"}); n != 0 {
+		t.Errorf("community-only AddRendezvousPeers = %d, want 0 (community must be excluded)", n)
+	}
+}
+
 func TestAddRendezvousPeersNoSwarms(t *testing.T) {
 	e := testEngine(t)
 	if n := e.AddRendezvousPeers([]string{"1.2.3.4:6881"}); n != 0 {
@@ -100,7 +118,7 @@ func TestAddRendezvousPeersNoSwarms(t *testing.T) {
 // before AddPeers, independent of anacrolix's internal accept count).
 func TestAddRendezvousPeersRejectsMalformed(t *testing.T) {
 	e := testEngine(t)
-	if _, err := e.AddRendezvous(rendezvous.GlobalInfoHash()); err != nil {
+	if _, err := e.AddRendezvous(rendezvous.GlobalInfoHash(), false); err != nil {
 		t.Fatal(err)
 	}
 	bad := []string{"evil.example.com:80", "garbage", "1.2.3.4:70000", "1.2.3.4", ":6881"}
@@ -113,13 +131,13 @@ func TestAddRendezvousPeersRejectsMalformed(t *testing.T) {
 // survives; hostnames (DNS risk) and bad ports are dropped.
 func TestParseNumericPeers(t *testing.T) {
 	in := []string{
-		"1.2.3.4:6881",         // ok v4
-		"[2001:db8::1]:51413",  // ok v6
-		"evil.example.com:80",  // hostname → rejected
-		"1.2.3.4",              // no port
-		"1.2.3.4:0",            // port 0
-		"1.2.3.4:70000",        // port out of range
-		"not-an-addr",          // junk
+		"1.2.3.4:6881",        // ok v4
+		"[2001:db8::1]:51413", // ok v6
+		"evil.example.com:80", // hostname → rejected
+		"1.2.3.4",             // no port
+		"1.2.3.4:0",           // port 0
+		"1.2.3.4:70000",       // port out of range
+		"not-an-addr",         // junk
 	}
 	got := parseNumericPeers(in)
 	if len(got) != 2 {

@@ -7,18 +7,22 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-// fakeJoiner is an in-memory Joiner recording the joined set.
+// fakeJoiner is an in-memory Joiner recording the joined set + community flags.
 type fakeJoiner struct {
-	joined  map[metainfo.Hash]bool
-	adds    int
-	removes int
+	joined    map[metainfo.Hash]bool
+	community map[metainfo.Hash]bool
+	adds      int
+	removes   int
 }
 
-func newFakeJoiner() *fakeJoiner { return &fakeJoiner{joined: map[metainfo.Hash]bool{}} }
+func newFakeJoiner() *fakeJoiner {
+	return &fakeJoiner{joined: map[metainfo.Hash]bool{}, community: map[metainfo.Hash]bool{}}
+}
 
-func (f *fakeJoiner) AddRendezvous(h metainfo.Hash) error {
+func (f *fakeJoiner) AddRendezvous(h metainfo.Hash, community bool) error {
 	if !f.joined[h] {
 		f.joined[h] = true
+		f.community[h] = community
 		f.adds++
 	}
 	return nil
@@ -39,26 +43,27 @@ func (f *fakeJoiner) RendezvousInfoHashes() []string {
 	return out
 }
 
-func TestDesiredHashes(t *testing.T) {
+func TestDesiredSwarms(t *testing.T) {
 	cfg := Config{Global: true, Topics: []string{"linux", "linux", "", "  "}, Communities: []string{"secret", ""}}
-	got := cfg.DesiredHashes()
+	got := cfg.DesiredSwarms()
 	// global + "linux" (deduped, empties skipped) + community("secret") = 3
 	if len(got) != 3 {
-		t.Fatalf("DesiredHashes = %d entries, want 3: %v", len(got), got)
-	}
-	if got[0] != GlobalInfoHash() {
-		t.Error("global not first")
+		t.Fatalf("DesiredSwarms = %d entries, want 3: %v", len(got), got)
 	}
 	topic, _ := TopicInfoHash("linux")
 	comm, _ := CommunityInfoHash("secret")
-	if got[1] != topic || got[2] != comm {
+	if got[0].Hash != GlobalInfoHash() || got[1].Hash != topic || got[2].Hash != comm {
 		t.Error("order not global,topic,community")
+	}
+	// Only the community swarm is tagged Community.
+	if got[0].Community || got[1].Community || !got[2].Community {
+		t.Errorf("community tagging wrong: %+v", got)
 	}
 
 	// Global off drops it.
 	off := Config{Global: false, Topics: []string{"linux"}}
-	if h := off.DesiredHashes(); len(h) != 1 || h[0] != topic {
-		t.Errorf("global-off DesiredHashes = %v, want [topic]", h)
+	if h := off.DesiredSwarms(); len(h) != 1 || h[0].Hash != topic || h[0].Community {
+		t.Errorf("global-off DesiredSwarms = %v, want [public topic]", h)
 	}
 }
 

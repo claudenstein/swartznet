@@ -368,3 +368,22 @@ Each maps a SPEC §7 question to the default the architecture adopts. Full conte
   - **Specs:** `docs/12-rendezvous-draft.md` (mainline-DHT rendezvous) and `docs/13-bep-sn_peers-draft.md` (the PEX
     LTEP message). Wire-compat matrix in `docs/05` §8 updated. Deterministic control owns the rendezvous set (config →
     reconcile loop), per the production-architecture rules.
+
+- **2026-07-20** — **Adversarial review of rendezvous + sn_peers PEX: 3 confirmed findings fixed.** A 5-dimension
+  adversarial-review workflow (mainline-compat / privacy / SSRF-poisoning / concurrency / correctness, each finding
+  independently verified) raised 6, confirmed 3, all fixed with regression tests:
+  - **(MED) Cross-swarm PEX leaked the private community infohash.** `AddRendezvousPeers` fanned gossip-learned
+    addresses into EVERY joined swarm, including private community swarms. Since `DisallowDataDownload` does not stop
+    the outbound dial/handshake and anacrolix's default MSE policy falls back to a PLAINTEXT handshake, an attacker on
+    the (default-on) global swarm could gossip its own listener, get the victim to dial it under the community
+    infohash `H_c`, and read `H_c` from the cleartext handshake — then `get_peers(H_c)` to enumerate the community
+    WITHOUT the secret, defeating the "membership not publicly enumerable" guarantee. Fix: tag community rendezvous
+    handles (`Handle.rvCommunity`, threaded `AddRendezvous(hash, community)` ← `Manager.DesiredSwarms` ← config) and
+    have `AddRendezvousPeers` introduce PEX peers ONLY to public global/topic swarms. Community swarms are DHT-only
+    (every member already holds the secret). Regression: `TestAddRendezvousPeersSkipsCommunity`.
+  - **(LOW) Community infohash logged in full on join/leave failure** (`manager.go`) — `H_c` is itself the
+    enumeration capability. Fix: log a non-reversible 8-hex-char `shortHash` for all rendezvous swarms.
+  - **(LOW) One-shot gossip latch starved early peers** — the first peer to connect got an empty introduction and
+    `gossipedTo` latched forever, so it never learned later arrivals. Fix: dropped the latch; when a peer NEWLY
+    advertises BitPeerGossip, re-broadcast the peer list to EVERY capable peer (`gossipToAllLocked`), so early peers
+    learn late ones. Regression: `TestGossipRebroadcastsToEarlyPeers`.

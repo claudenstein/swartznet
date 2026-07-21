@@ -169,6 +169,43 @@ func TestPeerAnnounceTriggersGossip(t *testing.T) {
 	}
 }
 
+// TestGossipRebroadcastsToEarlyPeers pins the review fix: when a later peer C
+// arrives, an earlier peer B is re-gossiped so it learns C (a one-shot intro to
+// C alone would starve B of every later arrival).
+func TestGossipRebroadcastsToEarlyPeers(t *testing.T) {
+	p := New(testLog())
+	defer p.Close()
+	rt := &frameRecorder{}
+	p.SetTransport(rt)
+
+	// B connects first + advertises gossip; no other peer yet.
+	p.NotePeerAdded("1.1.1.1:6881")
+	p.OnRemoteHandshake("1.1.1.1:6881", true, 1)
+	paB, _ := ltepwire.EncodePeerAnnounce(ltepwire.PeerAnnounce{Services: uint64(ltepwire.BitPeerGossip)})
+	p.HandleMessage("1.1.1.1:6881", paB, nil)
+
+	// C connects later + advertises gossip → B must be re-gossiped and learn C.
+	p.NotePeerAdded("2.2.2.2:6881")
+	p.OnRemoteHandshake("2.2.2.2:6881", true, 1)
+	paC, _ := ltepwire.EncodePeerAnnounce(ltepwire.PeerAnnounce{Services: uint64(ltepwire.BitPeerGossip)})
+	p.HandleMessage("2.2.2.2:6881", paC, nil)
+
+	// Only the frame sent to B carries C (2.2.2.2) — C's own frame excludes itself.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, f := range rt.snPeers() {
+			addrs, _ := ltepwire.DecodeSnPeers(f)
+			for _, a := range addrs {
+				if net.IP(a.IP).String() == "2.2.2.2" {
+					return // B learned the later arrival C
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("early peer B was never re-gossiped the later peer C")
+}
+
 func TestIsPublicIP(t *testing.T) {
 	cases := map[string]bool{
 		"1.2.3.4":              true,

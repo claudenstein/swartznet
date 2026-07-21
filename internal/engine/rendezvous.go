@@ -21,7 +21,12 @@ func (s swarmPeerSink) AddDiscoveredPeers(addrs []string) { s.eng.AddRendezvousP
 // and handshake each other (see internal/rendezvous for the derivation). It
 // never downloads content or acts on metadata, is never indexed, and is hidden
 // from the user-facing torrent list. Idempotent per infohash.
-func (e *Engine) AddRendezvous(hash metainfo.Hash) (*Handle, error) {
+//
+// community marks a PRIVATE community swarm: its infohash is a secret
+// (HMAC-derived) meeting point, so AddRendezvousPeers never introduces
+// untrusted PEX-learned peers to it — dialing the secret infohash to an attacker
+// would leak it in the (possibly plaintext) BitTorrent handshake.
+func (e *Engine) AddRendezvous(hash metainfo.Hash, community bool) (*Handle, error) {
 	if hash.IsZero() {
 		return nil, fmt.Errorf("engine: zero rendezvous infohash")
 	}
@@ -31,7 +36,7 @@ func (e *Engine) AddRendezvous(hash metainfo.Hash) (*Handle, error) {
 		return nil, fmt.Errorf("engine: closed")
 	}
 	t, _ := e.client.AddTorrentInfoHash(hash)
-	h, existed := e.registerLockedRendezvous(t)
+	h, existed := e.registerLockedRendezvous(t, community)
 	e.mu.Unlock()
 	if !existed {
 		// A handshake meeting point only: never request pieces. This also
@@ -94,7 +99,12 @@ func (e *Engine) AddRendezvousPeers(addrs []string) int {
 	e.mu.Lock()
 	var rvs []*Handle
 	for _, h := range e.handles {
-		if h.rendezvous {
+		// Introduce PEX-learned peers ONLY to public (global/topic) swarms. A
+		// private community swarm's infohash is secret; dialing an attacker-
+		// injected address in that swarm would leak the infohash in the handshake
+		// (defeating "membership not publicly enumerable"). Community swarms rely
+		// on the DHT alone — every member already holds the secret.
+		if h.rendezvous && !h.rvCommunity {
 			rvs = append(rvs, h)
 		}
 	}

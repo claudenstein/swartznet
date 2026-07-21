@@ -88,7 +88,11 @@ Ports are big-endian. There is no `txid` (it is unsolicited gossip). At most
   additionally applies IP-sanity filtering — rejecting loopback, unspecified,
   link-local, and (by policy) private ranges — so a hostile gossip cannot steer
   it at internal hosts. Addresses are advisory: no address is dialed outside a
-  swarm the node already participates in.
+  swarm the node already participates in, and — critically — PEX-learned addresses
+  are introduced only to PUBLIC (global/topic) rendezvous swarms, NEVER to a
+  private community swarm (see `12-rendezvous-draft.md`), so a public-swarm
+  attacker cannot make the node dial its listener under the community infohash and
+  recover that secret infohash from the handshake.
 
 ### Cadence and rate limits
 
