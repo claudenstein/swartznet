@@ -40,6 +40,11 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 	noIndex := fs.Bool("no-index", false, "don't index downloaded content at all")
 	var dhtBootstrap stringSliceFlag
 	fs.Var(&dhtBootstrap, "dht-bootstrap", "host:port of a DHT node to bootstrap against (repeat for multiple; empty uses anacrolix defaults)")
+	noRendezvous := fs.Bool("no-rendezvous", false, "don't join the public global rendezvous swarm (which lets sn_search peers find each other on the mainline DHT, but makes this node's membership publicly enumerable)")
+	var rvTopics stringSliceFlag
+	fs.Var(&rvTopics, "rendezvous-topic", "join a per-topic rendezvous swarm so peers into the same content meet (repeat for multiple)")
+	var rvCommunities stringSliceFlag
+	fs.Var(&rvCommunities, "rendezvous-community", "join a PRIVATE rendezvous swarm derived from a shared secret, so only secret-holders meet (repeat for multiple; the secret is never sent on the wire)")
 	dhtInsecure := fs.Bool("dht-insecure", false, "disable BEP-42 node-ID security (TESTING ONLY; needed for private DHTs)")
 	regtest := fs.Bool("regtest", false, "accelerated companion/Layer-D publisher timings (TESTING ONLY — never run against mainnet)")
 	if err := fs.Parse(args); err != nil {
@@ -77,6 +82,9 @@ func addWithContext(ctx context.Context, args []string, stdin io.Reader, stdout,
 	cfg.DisableDHTPublish = *noDHTPublish
 	cfg.NoUpload = *leechOnly
 	cfg.DHTBootstrapAddrs = dhtBootstrap
+	cfg.RendezvousGlobal = !*noRendezvous
+	cfg.RendezvousTopics = rvTopics
+	cfg.RendezvousCommunities = rvCommunities
 	cfg.DHTInsecure = *dhtInsecure
 	cfg.Regtest = *regtest
 

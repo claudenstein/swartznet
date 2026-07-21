@@ -231,6 +231,12 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 	// Per-entry failures only warn.
 	_ = eng.RestoreSession()
 
+	// Rendezvous (capable-peer discovery): join the configured meeting-point
+	// swarms on the mainline DHT so sn_search peers find each other. Deterministic
+	// control — the manager owns the swarm set. Skipped when the DHT is off, since
+	// a rendezvous swarm can't find peers without it.
+	startRendezvous(d, eng, opts.Cfg, log)
+
 	// The search mux is built unconditionally (not gated on the HTTP API) so
 	// every frontend — CLI, web UI, and the native GUI — fans out through the
 	// SAME three-layer mux, never its own reconciliation. Always wire Layer S;

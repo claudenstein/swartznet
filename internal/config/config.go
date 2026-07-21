@@ -112,6 +112,25 @@ type Config struct {
 	// it has no effect without a reputation tracker.
 	MinIndexerScore float64
 
+	// Rendezvous: capable-peer discovery on the mainline DHT. Nodes join
+	// well-known "rendezvous" infohashes (ordinary BEP-5 swarms) so sn_search
+	// peers find each other even with no content torrent in common. See
+	// internal/rendezvous and docs/12.
+	//
+	// RendezvousGlobal joins the single public global swarm (default on). It makes
+	// this node's SwartzNet membership publicly enumerable (anyone can get_peers
+	// the well-known infohash) — a sharper exposure than plain swarm
+	// participation; opt out with --no-rendezvous in a sensitive deployment.
+	RendezvousGlobal bool
+	// RendezvousTopics joins one swarm per topic, so nodes interested in the same
+	// content meet (and there is no single global membership list). Explicit
+	// opt-in; never auto-derived from the local index (which would leak it).
+	RendezvousTopics []string
+	// RendezvousCommunities joins a private swarm per shared secret
+	// (HMAC-SHA1-derived), so a closed group meets without public enumeration.
+	// SENSITIVE: these are secrets — never log or echo them.
+	RendezvousCommunities []string
+
 	// Regtest and DHTInsecure are test-only knobs, refused outside test
 	// binaries unless SWARTZNET_UNSAFE=1 (the single unsafe gate).
 	Regtest     bool
@@ -141,6 +160,9 @@ func Default() Config {
 		ShareContentHits: true,
 		// Layer D: the shipping per-keyword BEP-44 backend.
 		LayerDMode: "legacy",
+		// Discovery: join the public global rendezvous swarm by default so
+		// capable peers find each other out of the box (opt out: --no-rendezvous).
+		RendezvousGlobal: true,
 	}
 }
 
