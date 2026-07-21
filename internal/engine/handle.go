@@ -18,6 +18,7 @@ type Handle struct {
 	queued     bool
 	indexing   bool // per-torrent indexing toggle, default on
 	companion  bool // a companion-index bookkeeping torrent: never indexed, minted, or Layer-D published
+	rendezvous bool // a rendezvous meeting-point swarm: never downloads/indexes, hidden from the torrent list
 	queueOrder int64
 	signedBy   string
 
@@ -106,6 +107,15 @@ func (h *Handle) setIndexing(v bool) {
 	h.indexing = v
 }
 
+// isRendezvous reports whether this handle is a rendezvous meeting-point swarm
+// (added via AddRendezvous). Rendezvous handles never download or index and are
+// filtered out of the user-facing torrent list.
+func (h *Handle) isRendezvous() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.rendezvous
+}
+
 func (h *Handle) getQueueOrder() int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -168,6 +178,32 @@ func (e *Engine) registerLocked(t *torrent.Torrent, paused bool) (h *Handle, exi
 // "swartznet-content-index-*" filenames onto the public DHT keyword index.
 func (e *Engine) registerLockedCompanion(t *torrent.Torrent) (h *Handle, existed bool) {
 	return e.registerLockedRestore(t, false, nil, true)
+}
+
+// registerLockedRendezvous registers a rendezvous meeting-point torrent (caller
+// holds e.mu). Unlike every other add, it spawns NONE of the download/index
+// goroutines: a rendezvous swarm exists only so sn_search-capable peers meet and
+// handshake on the mainline DHT. It never fetches content, so autoDownload /
+// watchCompletion / autoIndex / ingestFileEvents would only block forever on
+// GotInfo(). The caller DisallowDataDownload()s it so no pieces are ever
+// requested even if a peer injects metadata for the infohash.
+func (e *Engine) registerLockedRendezvous(t *torrent.Torrent) (h *Handle, existed bool) {
+	if h, ok := e.handles[t.InfoHash()]; ok {
+		return h, true
+	}
+	h = &Handle{
+		T:          t,
+		eng:        e,
+		indexing:   false,
+		rendezvous: true,
+		removed:    make(chan struct{}),
+		pieceSub:   startPieceSubscription(t, e.log),
+		fileSub:    startFileTracker(t, e.bgCtx, e.log),
+	}
+	e.nextQueueOrder++
+	h.queueOrder = e.nextQueueOrder
+	e.handles[t.InfoHash()] = h
+	return h, false
 }
 
 func (e *Engine) registerLockedRestore(t *torrent.Torrent, paused bool, restore *sessionEntry, companion bool) (h *Handle, existed bool) {

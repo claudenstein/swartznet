@@ -41,6 +41,9 @@ func (e *Engine) TorrentSnapshots() []TorrentSnapshot {
 	out := make([]TorrentSnapshot, 0, len(handles))
 	store := e.TrustStore()
 	for _, h := range handles {
+		if h.isRendezvous() {
+			continue // meeting-point swarms are not user-facing downloads
+		}
 		s := h.snapshot()
 		s.IndexedFiles, s.IndexExtracted = e.IndexStats(s.InfoHash)
 		s.TrustedPub = s.SignedBy != "" && store != nil && store.IsTrusted(s.SignedBy)

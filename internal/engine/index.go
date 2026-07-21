@@ -79,7 +79,7 @@ func (e *Engine) autoIndex(h *Handle) {
 	// Companion bookkeeping torrents are never indexed, minted, or Layer-D
 	// published — they would otherwise pollute this node's own published corpus
 	// and leak "swartznet-content-index-*" filenames onto the DHT keyword index.
-	if h.companion {
+	if h.companion || h.rendezvous {
 		return
 	}
 	// Wait for metadata WITHOUT a wall-clock cap (bounded by engine close +
