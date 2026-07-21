@@ -49,7 +49,13 @@ const (
 	MsgTypeSyncNeed     = 6 // reserved (Slice 8)
 	MsgTypeSyncRecords  = 7 // reserved (Slice 8)
 	MsgTypeSyncEnd      = 8 // reserved (Slice 8)
+	MsgTypeSnPeers      = 9 // sn_peers PEX (capable-peer discovery)
 )
+
+// MaxPeersPerGossip caps the addresses carried in one sn_peers frame. Encode
+// errors on overflow, decode truncates — bounds both wire size and the
+// downstream dial work a single gossip can trigger.
+const MaxPeersPerGossip = 32
 
 // Reject codes carried in the `code` field of a reject frame.
 const (
@@ -127,6 +133,27 @@ type PeerAnnounce struct {
 	Services uint64   `bencode:"services,omitempty"`
 	Pk       []byte   `bencode:"pk,omitempty"`
 	Endorsed [][]byte `bencode:"endorsed,omitempty"`
+}
+
+// CompactAddr is one peer endpoint carried in an sn_peers frame. IP is 4 bytes
+// (IPv4) or 16 bytes (IPv6); Port is the TCP port. Kept net-free so
+// contracts/ltepwire has no net dependency — the swarmsearch/engine layer maps
+// it to/from net types.
+type CompactAddr struct {
+	IP   []byte
+	Port uint16
+}
+
+// SnPeers is msg_type 9: a peer-exchange gossip of sn_search-capable peer
+// endpoints, so the capable-peer overlay self-densifies. It carries NO txid. V4
+// is a packed list of 6-byte compact IPv4 endpoints (4-byte addr + 2-byte
+// big-endian port); V6 is a packed list of 18-byte compact IPv6 endpoints (16 +
+// 2) — the BEP-11 PEX convention. Exchanged ONLY between peers that advertise
+// BitPeerGossip; a vanilla peer never sees it.
+type SnPeers struct {
+	MsgType int    `bencode:"msg_type"`
+	V4      []byte `bencode:"v4,omitempty"`
+	V6      []byte `bencode:"v6,omitempty"`
 }
 
 // peekHeader is the minimal decode used to discriminate an inbound frame: it
@@ -274,6 +301,74 @@ func DecodePeerAnnounce(payload []byte) (PeerAnnounce, error) {
 		pa.Endorsed = clean
 	}
 	return pa, nil
+}
+
+// EncodeSnPeers stamps msg_type and packs addrs into an sn_peers frame, split by
+// IP family. It ERRORS if any address has an IP that is not 4 or 16 bytes, or if
+// the total exceeds MaxPeersPerGossip (the asymmetric-encode half). Port is
+// written big-endian.
+func EncodeSnPeers(addrs []CompactAddr) ([]byte, error) {
+	if len(addrs) > MaxPeersPerGossip {
+		return nil, fmt.Errorf("ltepwire: sn_peers %d addrs exceeds cap %d", len(addrs), MaxPeersPerGossip)
+	}
+	var v4, v6 []byte
+	for _, a := range addrs {
+		switch len(a.IP) {
+		case 4:
+			v4 = append(v4, a.IP...)
+			v4 = append(v4, byte(a.Port>>8), byte(a.Port))
+		case 16:
+			v6 = append(v6, a.IP...)
+			v6 = append(v6, byte(a.Port>>8), byte(a.Port))
+		default:
+			return nil, fmt.Errorf("ltepwire: sn_peers ip must be 4 or 16 bytes, got %d", len(a.IP))
+		}
+	}
+	return bencode.Marshal(SnPeers{MsgType: MsgTypeSnPeers, V4: v4, V6: v6})
+}
+
+// DecodeSnPeers unmarshals an sn_peers frame and unpacks its compact endpoint
+// lists. It is tolerant (the asymmetric-decode half): trailing bytes that don't
+// complete a 6-/18-byte record are dropped, the total is truncated to
+// MaxPeersPerGossip, and records with a zero IP or zero port are skipped as
+// unusable. IP sanity (loopback/unspecified/etc.) is the caller's job — this
+// layer is net-free.
+func DecodeSnPeers(payload []byte) ([]CompactAddr, error) {
+	var sp SnPeers
+	if err := decodeBounded(payload, &sp); err != nil {
+		return nil, err
+	}
+	if sp.MsgType != MsgTypeSnPeers {
+		return nil, fmt.Errorf("ltepwire: not an sn_peers, msg_type=%d", sp.MsgType)
+	}
+	out := make([]CompactAddr, 0, MaxPeersPerGossip)
+	for i := 0; i+6 <= len(sp.V4) && len(out) < MaxPeersPerGossip; i += 6 {
+		ip := append([]byte(nil), sp.V4[i:i+4]...)
+		port := uint16(sp.V4[i+4])<<8 | uint16(sp.V4[i+5])
+		if port == 0 || isZeroIP(ip) {
+			continue
+		}
+		out = append(out, CompactAddr{IP: ip, Port: port})
+	}
+	for i := 0; i+18 <= len(sp.V6) && len(out) < MaxPeersPerGossip; i += 18 {
+		ip := append([]byte(nil), sp.V6[i:i+16]...)
+		port := uint16(sp.V6[i+16])<<8 | uint16(sp.V6[i+17])
+		if port == 0 || isZeroIP(ip) {
+			continue
+		}
+		out = append(out, CompactAddr{IP: ip, Port: port})
+	}
+	return out, nil
+}
+
+// isZeroIP reports whether every byte of ip is zero (an unusable endpoint).
+func isZeroIP(ip []byte) bool {
+	for _, b := range ip {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func clampRank(r int) int {

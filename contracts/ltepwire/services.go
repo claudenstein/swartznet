@@ -49,8 +49,12 @@ const (
 	// BitSetReconciliation (bit 9) — speaks the Aggregate RIBLT set-recon
 	// sync protocol (required to receive sync frames).
 	BitSetReconciliation ServiceBits = 1 << 9 // 0x200
+	// BitPeerGossip (bit 10) — speaks sn_peers PEX (msg_type 9) AND consents to
+	// having its own address shared onward. A node advertises this to opt into
+	// the capable-peer overlay; peers only gossip addresses of nodes that set it.
+	BitPeerGossip ServiceBits = 1 << 10 // 0x400
 
-	// Bits 10..63 are reserved. Allocate the next free bit; never reuse.
+	// Bits 11..63 are reserved. Allocate the next free bit; never reuse.
 )
 
 // Has reports whether every bit of `bit` is set in s.
@@ -95,6 +99,9 @@ type RuntimeFacts struct {
 	CompanionSub bool
 	// SnippetHighlight → BitSnippetHighlight.
 	SnippetHighlight bool
+	// PeerGossip → BitPeerGossip. True iff the node participates in sn_peers PEX
+	// (and thus consents to having its address shared onward).
+	PeerGossip bool
 }
 
 // Announced is the SINGLE pure producer of the 64-bit services mask,
@@ -133,6 +140,9 @@ func Announced(s Sharing, f RuntimeFacts) uint64 {
 	}
 	if f.Reconciliation {
 		m |= BitSetReconciliation // bit 9
+	}
+	if f.PeerGossip {
+		m |= BitPeerGossip // bit 10
 	}
 	return uint64(m)
 }

@@ -673,6 +673,18 @@ The last row is the most important: **there is no distinction between "our" DHT 
 | Both run the DHT publisher | Both add each other's pubkeys to their gossip-discovered indexer set after first `lt_search` handshake. *Implemented: the LTEP `peer_announce` frame carries a `pk` field (32-byte ed25519) when the sender has `caps.Publisher == 1`. The receiver stashes it on its `PeerState.PublisherPubkey` and forwards it to an `IndexerSink` attached to `*dhtindex.Lookup`, so subsequent `search --dht` fan-outs auto-include the peer. Non-publishers (`Publisher == 0`) suppress `pk` — pure subscribers cannot pollute the indexer set.* |
 | One has `sn_search_v: 1`, the other `sn_search_v: 2` (future) | The `v: 1` client ignores fields it doesn't understand in messages from the `v: 2` client (bencode's dict-based schema gives us forward compatibility for free). |
 
+### 8.5 Capable-peer discovery (rendezvous + `sn_peers` PEX)
+
+See `12-rendezvous-draft.md` and `13-bep-sn_peers-draft.md` for the full specs.
+
+| Test | Expected behaviour |
+|---|---|
+| Vanilla DHT node receives our `announce_peer`/`get_peers` for a rendezvous infohash | Served exactly like any other torrent's infohash — the node cannot tell a rendezvous infohash from a real torrent's. No new DHT verb. |
+| Vanilla client is a peer in a rendezvous swarm | We do the standard BT+LTEP handshake; it does not advertise `sn_search`, so we never send it a search or `sn_peers` message. It sees a normal (if idle) peer. |
+| `sn_search` peer that does NOT advertise `BitPeerGossip` (bit 10) | Never receives an `sn_peers` frame, and its address is never included in gossip to others (consent model). |
+| Two SwartzNet nodes, both `BitPeerGossip`, meet in a rendezvous swarm | They exchange `sn_peers` (msg_type 9); each introduces the other's learned addresses to its rendezvous swarms, densifying the overlay. |
+| Malicious `sn_peers` with loopback/private/oversized address list | Records past the 32-cap and malformed trailing bytes are dropped on decode; loopback/unspecified/link-local/private IPs are filtered before any dial; no address is dialed outside a swarm we already joined. |
+
 ---
 
 ## 9. Threat model and what we explicitly don't protect against

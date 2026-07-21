@@ -34,6 +34,15 @@ language. The reference implementation lives in this repo.
   the domain-prefixed signature payload, and the verification
   algorithm. Wire-compatible with every existing BitTorrent
   client.
+- **[12-rendezvous-draft.md](12-rendezvous-draft.md)** —
+  Capable-peer discovery on the mainline DHT. Defines the
+  well-known rendezvous infohash derivations (global / topic /
+  private-community), the join-as-metadata-less-torrent
+  mechanism, and the privacy tradeoff. Pure BEP-5.
+- **[13-bep-sn_peers-draft.md](13-bep-sn_peers-draft.md)** —
+  `sn_peers`, peer exchange for the search overlay (LTEP
+  msg_type 9). Defines the compact-address message, the
+  `BitPeerGossip` consent bit, and the tolerant decode rules.
 
 ## I want to understand the architecture
 
