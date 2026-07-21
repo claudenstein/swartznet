@@ -10,7 +10,8 @@ new handshake bit, a new DHT query, a new port — which fragments the network a
 makes the overlay trivial to fingerprint and block. SwartzNet solves this by
 carrying search entirely inside protocol surfaces that mainline clients already
 speak: the extension protocol, the DHT's signed-item store, and ordinary
-torrents. A vanilla client sees nothing but standard traffic. Search indexes are
+torrents — including the swarms that nodes join purely to find one another. A
+vanilla client sees nothing but standard traffic. Search indexes are
 signed by their publishers, reconciled between peers with a rateless set
 protocol, and defended against spam by reputation and admission control rather
 than by a central authority. The result is a distributed full-text index that is
@@ -103,8 +104,9 @@ that would blur which layer — and which trust model — produced a hit.
 ## 5. Layer S: Peer-Wire Search
 
 The first way a node's index reaches others is directly, over the peer
-connections it already has. SwartzNet registers a named extension, `sn_search`,
-through LTEP. Immediately after the extension handshake, a participating peer
+connections it already has. (Section 11 describes how those connections come to
+exist between SwartzNet nodes that share no content.) SwartzNet registers a named
+extension, `sn_search`, through LTEP. Immediately after the extension handshake, a participating peer
 sends a capability announcement — a mask of which search services it offers.
 
 The opt-in is enforced on the *send* side, and structurally. When a node observes
@@ -227,10 +229,63 @@ privacy-preserving default is also the mainline-compatible one: a node that
 shares nothing is wire-indistinguishable from a vanilla client.
 
 
-## 11. Content Discovery
+## 11. Peer Discovery: Rendezvous and Peer Exchange
 
-Two further mechanisms populate the index without a central catalogue. A node may
-publish a **companion content-index**: a compact, compressed snapshot of what it
+The peer-wire and DHT layers both presuppose something the network does not
+guarantee: that SwartzNet nodes are connected to one another. A node learns that a
+peer speaks `sn_search` only after the two have completed a handshake, and that
+handshake happens only inside a torrent swarm they have both joined. Two SwartzNet
+users who share no torrent therefore never meet, and the overlay stays as sparse
+as the accident of overlapping downloads makes it. It needs a way to bootstrap
+that does not itself introduce a new protocol.
+
+The answer is a **rendezvous swarm**: a well-known infohash that participating
+nodes join for the sole purpose of meeting. Each participant announces it on the
+mainline DHT and asks the DHT for its peers, exactly as for any torrent — to a
+vanilla DHT node a rendezvous infohash is indistinguishable from a real one, and
+no new query is involved. Nodes that find each other there complete the ordinary
+handshake and negotiate `sn_search`. Rendezvous infohashes are derived
+deterministically, so independent nodes compute the same address, in three
+flavours: a single **global** swarm every node may join; per-**topic** swarms, so
+nodes interested in the same subject meet and no single address lists the whole
+membership; and private **community** swarms, whose address is the keyed hash of a
+shared secret, so a closed group meets on the public DHT without its membership
+being computable by anyone who lacks the secret. A rendezvous torrent carries no
+data — it is a meeting point, never a download — so joining one transfers no
+content; its cost is the DHT announce and lookups plus the peer handshakes
+themselves.
+
+Rendezvous solves the cold start; **peer exchange** makes the overlay dense. Once
+a node has met one search-capable peer, that peer can introduce it to others it
+knows, gossiped as compact addresses inside the same `sn_search` extension.
+Exchange is opt-in and consent-based: a node sets a capability bit to signal both
+that it speaks the gossip protocol and that it consents to being named in one, and
+only peers that have set the bit are ever gossiped. A learned address has nowhere
+to connect on its own — BitTorrent connections are per-torrent — so it is
+introduced into the node's rendezvous swarms, where the shared infohash gives the
+handshake its context. Gossip is bounded and filtered: non-routable addresses are
+dropped, the count per message is capped, and — because dialing an address inside
+a swarm reveals that swarm's infohash in the (sometimes plaintext) handshake —
+gossip-learned addresses are never introduced into a private community swarm,
+which would otherwise leak that community's secret-derived infohash: its
+enumeration capability, though not the secret itself, which the hash does not
+reveal. A vanilla peer, having negotiated no extension, sees none of it.
+
+The cost of being discoverable is being enumerable. Any public rendezvous makes
+SwartzNet membership something an observer can list — a sharper exposure than
+merely appearing in a content swarm, and consistent with the system's explicit
+non-goal of network anonymity (peer addresses are visible in BitTorrent
+regardless). The mitigations are structural rather than cryptographic hiding: the
+topic and community swarms already trade one global list for many partial ones or
+a secret-gated address, and the global swarm can be declined outright. As everywhere else in the design, discovery buys reach with
+standard traffic and pays for it in a stated, bounded exposure rather than in a
+new protocol.
+
+
+## 12. Content Discovery
+
+Two more mechanisms populate the index directly, without a central catalogue. A
+node may publish a **companion content-index**: a compact, compressed snapshot of what it
 has indexed, distributed as an ordinary single-file torrent and advertised
 through a BEP-46 mutable pointer. Another node can *follow* a publisher, fetch its
 snapshots as they update, and import its catalogue — verifying authorship and
@@ -243,11 +298,12 @@ opt-in and ride only standard verbs; neither downloads or indexes anything the
 operator did not ask for.
 
 
-## 12. Conclusion
+## 13. Conclusion
 
 We have described a full-text search layer for BitTorrent that requires no
 coordinating server and no departure from the standards the network already runs
-on. Nodes index what they hold locally, answer each other over existing peer
+on. Nodes index what they hold locally, find one another through ordinary DHT
+swarms used as rendezvous points, answer each other over existing peer
 connections, publish signed keyword records into the DHT's standard signed-item
 store, reconcile those records with a rateless set protocol, and — optionally —
 distribute whole signed catalogues as ordinary torrents located through standard
@@ -264,7 +320,7 @@ and carried inside the one it already speaks.
 
 1. B. Cohen, *The BitTorrent Protocol Specification* (BEP 3).
 2. *DHT Protocol* (BEP 5); *Extension for Peers to Send Metadata Files* (BEP 9).
-3. *Extension Protocol* (BEP 10).
+3. *Extension Protocol* (BEP 10); *Peer Exchange (PEX)* (BEP 11).
 4. A. Norberg et al., *Storing Arbitrary Data in the DHT* (BEP 44).
 5. *Updating Torrents via DHT Mutable Items* (BEP 46).
 6. *DHT Infohash Indexing* (BEP 51).
@@ -273,4 +329,5 @@ and carried inside the one it already speaks.
 9. L. Yang, Y. Gilad, M. Alizadeh, *Practical Rateless Set Reconciliation*
    (SIGCOMM 2024) — the rateless invertible-Bloom set-difference protocol.
 10. SwartzNet architecture and protocol drafts: `docs/05-integration-design.md`,
-    `docs/06-bep-sn_search-draft.md`, `docs/07-bep-dht-keyword-index-draft.md`.
+    `docs/06-bep-sn_search-draft.md`, `docs/07-bep-dht-keyword-index-draft.md`,
+    `docs/12-rendezvous-draft.md`, `docs/13-bep-sn_peers-draft.md`.
